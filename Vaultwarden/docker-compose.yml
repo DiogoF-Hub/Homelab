@@ -1,0 +1,83 @@
+# Real domain is replaced by test.domain.com
+services:
+  vaultwarden:
+    image: vaultwarden/server:latest
+    container_name: vaultwarden
+    restart: unless-stopped
+    ports:
+      - 80:80
+    volumes:
+      - /vw-data:/data
+    environment:
+      - DOMAIN
+      - ADMIN_TOKEN
+
+      # Rocket HTTP settings (Caddy handles TLS now)
+      - ROCKET_PORT=80
+      - ROCKET_ADDRESS=0.0.0.0
+
+      - SENDS_ALLOWED=false
+
+      # Disable new account signups and user invitations
+      - SIGNUPS_ALLOWED=false
+      - INVITATIONS_ALLOWED=false
+
+      # Use Cloudflare's header to log the real client IP instead of Docker internal IPs
+      - CLIENT_IP_HEADER=CF-Connecting-IP
+      #- CLIENT_IP_HEADER=X-Real-IP
+
+      # Mailjet SMTP settings for sending email
+      - SMTP_HOST
+      - SMTP_PORT
+      - SMTP_SECURITY
+      - SMTP_USERNAME
+      - SMTP_PASSWORD
+      - SMTP_FROM
+      - SMTP_FROM_NAME
+      - SMTP_TIMEOUT
+
+      # Correct Timezone for the logs
+      - TZ=Europe/Luxembourg
+    networks:
+      - caddy-vault
+
+  caddy:
+    image: caddy:latest
+    container_name: caddy
+    restart: unless-stopped
+    environment:
+      - TZ=Europe/Luxembourg
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile
+      - caddy_data:/data
+      - caddy_config:/config
+      - ./robots.txt:/srv/robots.txt
+      #- /home/pi/vault/logs/caddy:/var/log/caddy
+      - /etc/letsencrypt/live/test.domain.com/fullchain.pem:/ssl/fullchain.pem:ro
+      - /etc/letsencrypt/live/test.domain.com/privkey.pem:/ssl/privkey.pem:ro
+    networks:
+      - caddy-vault
+      - caddy-cloudflared
+
+  cloudflared:
+    image: cloudflare/cloudflared:latest
+    container_name: cloudflared
+    restart: unless-stopped
+    environment:
+      # Correct Timezone for the logs
+      - TZ=Europe/Luxembourg
+    command: tunnel --no-autoupdate run --token ${CLOUD_TOKEN}
+    networks:
+      - caddy-cloudflared
+
+networks:
+  caddy-vault:
+    driver: bridge
+  caddy-cloudflared:
+    driver: bridge
+
+volumes:
+  caddy_data:
+    name: caddy_data
+  caddy_config:
+    name: caddy_config
