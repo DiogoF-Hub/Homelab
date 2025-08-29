@@ -1,0 +1,38 @@
+# Real domain is replaced by test.domain.com
+test.domain.com {
+    tls /ssl/fullchain.pem /ssl/privkey.pem
+
+    encode gzip
+
+    # Serve robots.txt locally
+    handle /robots.txt {
+        root * /srv
+        file_server
+    }
+
+    # Reverse proxy to Vaultwarden
+    reverse_proxy vaultwarden:80 {
+        header_up Host { host }
+        header_up X-Real-IP { >CF-Connecting-IP }
+        header_up X-Forwarded-For { >CF-Connecting-IP }
+        header_up X-Forwarded-Proto { scheme }
+    }
+
+    # Security headers
+    header {
+        # HSTS with preload
+        Strict-Transport-Security "max-age=63072000; includeSubDomains; preload"
+
+        # nosniff is to prevent browsers from guessing file types for better security
+        X-Content-Type-Options "nosniff"
+
+        # Only send referrer info to same-origin links for privacy
+        Referrer-Policy "same-origin"
+
+        # Disable Google's FLoC tracking for better privacy
+        Permissions-Policy "interest-cohort=()"
+
+        # Remove the Server header to hide server info
+        -Server
+    }
+}
