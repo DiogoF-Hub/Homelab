@@ -1,8 +1,8 @@
 # Homelab
 
-This repository contains my personal **homelab configurations and scripts** for services like **Vaultwarden**, **Pi-hole** and others. It includes everything from Docker Compose files to automation scripts that make deploying, updating, and maintaining these services much easier.
+This repository contains my personal **homelab configurations and scripts** for services like **Vaultwarden**, **Pi-hole**, and **custom HTTPS certificate generation**. It includes everything from Docker Compose files to automation scripts that make deploying, updating, and maintaining these services much easier.
 
-The goal is to **share my setup publicly** so others can learn, adapt, or get inspiration for their own homelab environments.
+The goal is to **share my setup publicly** so others can learn, adapt, or get inspiration for their own homelab environments. The only thing I kindly ask is that if you find something that could improve security or make the setup better, please let me know so I can learn and improve as well.
 
 ---
 
@@ -20,17 +20,22 @@ Homelab/
 │   ├── root_crontab.txt
 │   ├── start-containers.sh
 │
-└── Vaultwarden/
-    ├── .env
-    ├── Caddyfile
+├── Vaultwarden/
+│   ├── .env
+│   ├── Caddyfile
+│   ├── README.md
+│   ├── certbot.conf
+│   ├── docker-compose.yml
+│   ├── main.sh
+│   ├── robots.txt
+│   ├── root_crontab.txt
+│   ├── start-containers.sh
+│   ├── truenas-script.sh
+│
+└── HTTPS Generator/
     ├── README.md
-    ├── certbot.conf
-    ├── docker-compose.yml
-    ├── main.sh
-    ├── robots.txt
-    ├── root_crontab.txt
-    ├── start-containers.sh
-    ├── truenas-script.sh
+    ├── generate_cert.sh
+    ├── openssl.cnf
 ```
 
 ---
@@ -68,11 +73,29 @@ Homelab/
 
 ---
 
+### **HTTPS Generator**
+
+* **Features**
+
+  * Creates a **root CA** for signing device certificates
+  * Generates **device-specific certificates** with proper SAN support
+
+    * Hostname, `.local`, `.localdomain`, and optional **Tailscale domains**
+    * Optional IP entries
+  * Certificates are **iOS-compatible**, respecting the 825-day limit
+* **Usage**
+
+  * `generate_cert.sh` to create certificates for services or devices
+  * `openssl.cnf` template automatically customized by the script
+  * Root CA (`rootCA.pem`) can be installed on devices (rename to `.crt` if needed)
+
+---
+
 ## 🚀 Goals
 
 * Keep configurations version-controlled and organized
 * Share a reproducible and secure setup for self-hosted services
-* Provide automation to simplify updates and backups
+* Create a well-documented setup that is easy to manage and evolve as I learn and improve my homelab.
 
 ---
 
