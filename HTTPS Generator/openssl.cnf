@@ -9,7 +9,7 @@ prompt = no
 
 [req_distinguished_name]
 C = US
-ST = US
+ST = Washington
 L = Washington
 O = Homelab
 OU = Devices
