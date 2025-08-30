@@ -40,7 +40,7 @@ This file defines the core variables for your setup.
 Example template:
 
 ```bash
-ADMIN_TOKEN=''         # Optional admin panel token
+ADMIN_TOKEN=''         # admin panel token (must be generated inside the Vaultwarden Docker image because it outputs a password hash)
 CLOUD_TOKEN=''         # Optional token for Cloudflare Tunnel integration
 DOMAIN=''              # Your domain (e.g., vault.example.com)
 
@@ -55,6 +55,14 @@ SMTP_FROM_NAME=''
 SMTP_TIMEOUT=''
 ```
 I used [Mailjet](https://www.mailjet.com) provider
+
+> To generate the `ADMIN_TOKEN` hash, run this command inside the Vaultwarden container:
+>
+> ```bash
+> docker exec -it vaultwarden /vaultwarden hash
+> ```
+>
+> Then type your desired admin password, copy the output hash, and paste it into the `ADMIN_TOKEN` field in your `.env` file.
 
 > Replace these values to match your environment and email provider.
 
