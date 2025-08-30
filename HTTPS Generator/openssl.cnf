@@ -1,0 +1,25 @@
+# Replace all the info needed
+# The word "replace" will be replaced by the info entered in the script
+[req]
+default_bits = 2048
+default_md = sha256
+distinguished_name = req_distinguished_name
+req_extensions = req_ext
+prompt = no
+
+[req_distinguished_name]
+C = US
+ST = US
+L = Washington
+O = Homelab
+OU = Devices
+CN = replace.local
+
+[req_ext]
+subjectAltName = @alt_names
+extendedKeyUsage = serverAuth
+
+[alt_names]
+DNS.1 = replace.local
+DNS.2 = replace.local.localdomain
+DNS.3 = replace.tsnet
