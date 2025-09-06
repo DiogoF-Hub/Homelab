@@ -170,10 +170,10 @@ I used [Mailjet](https://www.mailjet.com) provider
 * **Automatic HTTP → HTTPS redirection**
 * **HSTS enabled** (max-age 12 months, include subdomains, preload)
 * **Certificate Transparency Monitoring** to receive alerts on new certificate issuance
-* **Full (strict) SSL/TLS** for end-to-end encryption with Let’s Encrypt
+* **Full (strict) SSL/TLS** for end-to-end encryption with Let’s Encrypt ([Cloudflare docs](https://developers.cloudflare.com/ssl/origin-configuration/ssl-modes/full-strict/))
 * **Opportunistic Encryption disabled** to avoid unintended HTTP requests
 * **Geo-blocking** for specific countries (but `robots.txt` remains globally accessible)
-* **RUM script disabled** to prevent Cloudflare analytics injection
+* **RUM script disabled** to prevent Cloudflare analytics injection ([Cloudflare docs](https://developers.cloudflare.com/speed/speed-test/rum-beacon/))
 * **Zero-trust admin access**:
 
   * Accessing `/admin` triggers a Cloudflare Access login page
