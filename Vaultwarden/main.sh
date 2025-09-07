@@ -202,6 +202,15 @@ done
     echo -e "\n[->] Updating package lists..."
     apt-get update -y
 
+    echo -e "\n[->] Ensuring unattended-upgrades is installed..."
+    if ! dpkg -s unattended-upgrades >/dev/null 2>&1; then
+        apt-get install -y unattended-upgrades
+    fi
+
+    echo -e "\n[->] Configuring unattended-upgrades..."
+    dpkg-reconfigure -f noninteractive unattended-upgrades
+    systemctl enable --now unattended-upgrades.service apt-daily.timer apt-daily-upgrade.timer >/dev/null 2>&1 || true
+
     # upgrade openssh-server while keeping existing configuration
     echo -e "\n[->] Reinstalling openssh-server..."
     UCF_FORCE_CONFFOLD=1 apt-get install --only-upgrade openssh-server -y
