@@ -4,8 +4,6 @@ services:
     image: vaultwarden/server:latest
     container_name: vaultwarden
     restart: unless-stopped
-    ports:
-      - 80:80
     volumes:
       - /vw-data:/data
     environment:
@@ -66,7 +64,8 @@ services:
     environment:
       # Correct Timezone for the logs
       - TZ=Europe/Luxembourg
-    command: tunnel --no-autoupdate run --token ${CLOUD_TOKEN}
+      - TUNNEL_TOKEN=${CLOUD_TOKEN}
+    command: tunnel --no-autoupdate run
     networks:
       - caddy-cloudflared
 
