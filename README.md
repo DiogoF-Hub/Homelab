@@ -28,14 +28,15 @@ Homelab/
 │   ├── docker-compose.yml
 │   ├── main.sh
 │   ├── robots.txt
+│   ├── security.txt
 │   ├── root_crontab.txt
 │   ├── start-containers.sh
 │   ├── truenas-script.sh
 │
 └── HTTPS Generator/
-    ├── README.md
-    ├── generate_cert.sh
-    ├── openssl.cnf
+  ├── README.md
+  ├── generate_cert.sh
+  ├── openssl.cnf
 ```
 
 ---
