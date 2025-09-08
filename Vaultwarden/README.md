@@ -3,7 +3,7 @@
 This folder contains my **Docker-based Vaultwarden configuration and automation scripts**.
 The setup is designed for **secure self-hosted password management**, with:
 
-* **Caddy reverse proxy** for HTTPS, security headers, and a `robots.txt` file
+* **Caddy reverse proxy** for HTTPS, security headers, a `robots.txt` file, and a `security.txt` file for vulnerability reporting
 * **Encrypted backups** using hybrid encryption
 * **Automated off-site replication** to TrueNAS and Hetzner Storage Box
 * **Strict Cloudflare security policies** for zero trust access
@@ -24,6 +24,7 @@ Vaultwarden/
 ├── docker-compose.yml        # Docker Compose configuration
 ├── main.sh                   # Daily maintenance and update script
 ├── robots.txt                # Disallows bots from indexing sensitive paths
+├── security.txt              # Contact info for reporting vulnerabilities (served at /.well-known/security.txt)
 ├── root_crontab.txt          # Crontab entries for automation
 ├── start-containers.sh       # Startup script (run at boot via crontab)
 ├── truenas-script.sh         # Script on TrueNAS to pull backups and logs
