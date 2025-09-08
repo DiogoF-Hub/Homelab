@@ -10,6 +10,13 @@ test.domain.com {
         file_server
     }
 
+    # Serve security.txt locally
+    handle /.well-known/security.txt {
+        root * /srv/
+        file_server
+    }
+    redir /security.txt /.well-known/security.txt 308
+
     # Reverse proxy to Vaultwarden
     reverse_proxy vaultwarden:80 {
         header_up Host { host }
