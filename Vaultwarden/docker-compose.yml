@@ -50,6 +50,7 @@ services:
       - caddy_data:/data
       - caddy_config:/config
       - ./robots.txt:/srv/robots.txt
+      - ./security.txt:/srv/.well-known/security.txt
       #- /home/pi/vault/logs/caddy:/var/log/caddy
       - /etc/letsencrypt/live/test.domain.com/fullchain.pem:/ssl/fullchain.pem:ro
       - /etc/letsencrypt/live/test.domain.com/privkey.pem:/ssl/privkey.pem:ro

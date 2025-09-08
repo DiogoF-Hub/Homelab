@@ -1,0 +1,5 @@
+# Domain and email were replaced by test.domain.com
+Contact: mailto:test@domain.com
+Preferred-Languages: en, pt, fr
+Canonical: https://test.domain.com/.well-known/security.txt
+Expires: 2027-12-31T00:00:00.000Z
