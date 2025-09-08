@@ -161,6 +161,7 @@ I used [Mailjet](https://www.mailjet.com) provider
   }
   ```
 * Provides `robots.txt` to block indexing of sensitive paths
+* **Added `security.txt`**: Implements the [security.txt standard](https://securitytxt.org/) to provide clear contact information for reporting vulnerabilities or security issues. This file is served via Caddy at `/.well-known/security.txt`, helping security researchers reach out responsibly and improving overall transparency.
 
 ---
 
