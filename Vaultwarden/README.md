@@ -72,8 +72,8 @@ I used [Mailjet](https://www.mailjet.com) provider
 ### **Caddy Reverse Proxy (`Caddyfile`)**
 
 * Provides **HTTPS** for Vaultwarden
-* Adds **security headers**
 * Hosts a `robots.txt` file (Vaultwarden does not natively support it)
+* Hosts a `security.txt` file at `/.well-known/security.txt` to provide contact information for vulnerability reporting (see [security.txt standard](https://securitytxt.org/))
 
 ---
 
