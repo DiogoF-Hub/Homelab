@@ -178,6 +178,7 @@ I used [Mailjet](https://www.mailjet.com) provider
 
   * Accessing `/admin` triggers a Cloudflare Access login page
   * Only my GitHub account is allowed, adding another layer of protection before the Vaultwarden password prompt
+* **DNS CAA records enforced** to restrict certificate issuance to only trusted Certificate Authorities, preventing unauthorized SSL/TLS certificates for my domain
 
 ---
 
