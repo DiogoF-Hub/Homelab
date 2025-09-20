@@ -186,6 +186,21 @@ I used [Mailjet](https://www.mailjet.com) provider
 
 ---
 
+### **Vaultwarden Configuration**
+
+* **Icon fetching disabled**: Vaultwarden can normally fetch favicons from the domains of saved logins.  
+  - This feature is disabled to prevent outbound requests to arbitrary websites, simplify firewall rules, and reduce external visibility of the instance.  
+  - The environment variable **`ICON_CACHE_TTL=0`** is set so that previously downloaded icons remain served locally without refresh or re-fetch, while no new outbound requests are made.
+
+* **Sends disabled**: The optional Sends feature for file and note sharing is not required in this setup.  
+  - Disabling it removes functionality that is unnecessary for the intended use case and also reduces potential attack surface.  
+
+* **Signups and invitations disabled**: Vaultwarden allows new user registrations and user-to-user invitations by default.  
+  - These options are disabled in the provided `docker-compose.yml` to prevent unauthorized account creation and maintain strict control over access.  
+  - No additional configuration is required by the user, this setup already applies the restriction.
+
+---
+
 ### **Backup and Redundancy**
 
 * **Hybrid encryption** for every backup
