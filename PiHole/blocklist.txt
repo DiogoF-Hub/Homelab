@@ -42,3 +42,9 @@ https://o0.pages.dev/Lite/domains.txt
 https://raw.githubusercontent.com/hagezi/dns-blocklists/main/adblock/pro.txt
 https://raw.githubusercontent.com/DandelionSprout/adfilt/refs/heads/master/Alternate%20versions%20Anti-Malware%20List/AntiMalwareHosts.txt
 https://raw.githubusercontent.com/DandelionSprout/adfilt/refs/heads/master/Alternate%20versions%20Anti-Malware%20List/AntiMalwareDomains.txt
+https://gitlab.com/hagezi/mirror/-/raw/main/dns-blocklists/domains/pro.txt
+https://gitlab.com/hagezi/mirror/-/raw/main/dns-blocklists/domains/tif.txt
+https://gitlab.com/hagezi/mirror/-/raw/main/dns-blocklists/adblock/fake.txt
+https://gitlab.com/hagezi/mirror/-/raw/main/dns-blocklists/adblock/nsfw.txt
+https://gitlab.com/hagezi/mirror/-/raw/main/dns-blocklists/adblock/gambling.txt
+https://gitlab.com/hagezi/mirror/-/raw/main/dns-blocklists/domains/pro.plus.txt
