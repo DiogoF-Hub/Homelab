@@ -55,7 +55,7 @@ SMTP_FROM=''
 SMTP_FROM_NAME=''
 SMTP_TIMEOUT=''
 ```
-I used [Mailjet](https://www.mailjet.com) provider
+I personally used [Mailjet](https://www.mailjet.com) provider
 
 > To generate the `ADMIN_TOKEN` hash, run this command inside the Vaultwarden container:
 >
@@ -83,7 +83,7 @@ I used [Mailjet](https://www.mailjet.com) provider
 
   * Automatically update DNS records
   * Request and renew Let’s Encrypt certificates
-* Ensures **Full (strict) SSL/TLS** encryption between Cloudflare and your server
+* Ensures **Full (strict) SSL/TLS** encryption between Cloudflare and the server
 
 ---
 
@@ -100,7 +100,7 @@ I used [Mailjet](https://www.mailjet.com) provider
 | Script                    | Purpose                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
 | ------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | **`start-containers.sh`** | Brings up Vaultwarden and Caddy after a reboot (run via root crontab).                                                                                                                                                                                                                                                                                                                                                                                           |
-| **`main.sh`**             | Full daily maintenance script:<br>1. Stops containers safely<br>2. Creates an **encrypted backup** using hybrid encryption:<br>   • Generates a random AES-256 key<br>   • Encrypts the backup with AES-256<br>   • Encrypts that AES-256 key with a public key<br>   • Packages both encrypted key and backup into a compressed archive<br>3. Updates Docker images<br>4. Runs a full system update and **does a reboot**. |
+| **`main.sh`**             | Full daily maintenance script:<br>1. Stops containers safely<br>2. Creates an **encrypted backup** using hybrid encryption:<br>   • Generates a random AES-256 key<br>   • Encrypts the backup with AES-256<br>   • Encrypts that AES-256 key with a public key<br>   • Records the OpenSSL version used by running `openssl version -a` and saves the output to a `.txt` file<br>   • Packages the encrypted key, the backup, and the OpenSSL version file together into a compressed archive<br>3. Updates Docker images<br>4. Runs a full system update and **does a reboot**. |
 | **`truenas-script.sh`**   | Runs on TrueNAS to fetch daily encrypted backups and logs via `scp` using a restricted SSH user. After fetching locally, it pushes a copy to the **Hetzner Storage Box**, ensuring redundancy:<br>• Local backups on TrueNAS<br>• Cloud backups on Hetzner                                                                                                                                                                                                       |
 
 ---
