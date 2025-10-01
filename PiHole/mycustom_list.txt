@@ -47,3 +47,9 @@ adx.ads.oppomobile.com
 
 # LG
 ngfts.lge.com
+
+# Social Trackers
+graph.facebook.com
+
+# VK (VKontakte)
+api.vk.com
