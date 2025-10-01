@@ -50,6 +50,7 @@ ngfts.lge.com
 
 # Social Trackers
 graph.facebook.com
+connect.facebook.net
 
 # VK (VKontakte)
 api.vk.com
