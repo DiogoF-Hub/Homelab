@@ -1,0 +1,49 @@
+# DoubleClick (Google)
+ad.doubleclick.net
+stats.g.doubleclick.net
+static.doubleclick.net
+m.doubleclick.net
+mediavisor.doubleclick.net
+
+# Google Ads
+pagead2.googlesyndication.com
+
+# MoPub
+ads.mopub.com
+analytics.mopub.com
+api.mopub.com
+
+# Vungle
+api.vungle.com
+
+# Index Exchange (Casale Media)
+indexexchange.com
+cdn.indexexchange.com
+
+# Mobile Ad Networks
+live.chartboost.com
+init.supersonicads.com
+
+# YouTube Ads
+s.youtube.com
+redirector.googlevideo.com
+youtubei.googleapis.com
+
+# Google Analytics
+click.googleanalytics.com
+
+# Honeybadger
+api.honeybadger.io
+
+# Raygun
+api.raygun.com
+
+# Stackdriver (GCP)
+trace.googleapis.com
+errorreporting.googleapis.com
+
+# Oppo
+adx.ads.oppomobile.com
+
+# LG
+ngfts.lge.com
