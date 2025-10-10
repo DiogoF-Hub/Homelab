@@ -221,6 +221,20 @@ done
     echo -e "\n[->] Full upgrade (dist-upgrade)..."
     apt-get dist-upgrade -y
 
+    # This is specific to Raspberry Pi OS (firmware updates)
+    echo -e "\n[->] Checking Raspberry Pi EEPROM update..."
+    if command -v rpi-eeprom-update >/dev/null 2>&1; then
+        if rpi-eeprom-update | grep -qiE 'UPDATE (AVAILABLE|REQUIRED)'; then
+            echo "[->] Applying EEPROM update..."
+            rpi-eeprom-update -a
+        else
+            echo "[->] EEPROM is up to date."
+        fi
+    else
+        echo "[i] rpi-eeprom-update not found. Skipping."
+    fi
+
+
     echo -e "\n[->] Cleaning up..."
     apt-get autoremove --purge -y
     apt-get clean
