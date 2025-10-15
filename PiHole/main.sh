@@ -123,6 +123,12 @@ done
         if [ "$LOCAL_ID" != "$LATEST_ID" ]; then
             echo -e "\n[!!!] $service needs update."
             UPDATED=1
+
+            # Remove old image if it exists
+            if [ -n "$LOCAL_ID" ]; then
+                echo -e "\n[->] Removing old image $LOCAL_ID..."
+                docker rmi -f "$LOCAL_ID" || echo "[WARN] Failed to remove old image $LOCAL_ID"
+            fi
         else
             echo -e "\n[✔] $service is up-to-date."
         fi

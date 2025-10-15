@@ -32,6 +32,8 @@ Homelab/
 │   ├── root_crontab.txt
 │   ├── start-containers.sh
 │   ├── truenas-script.sh
+│   ├── deploy-hook.sh
+│   ├── vault_domains_allow_firewall.txt
 │
 └── HTTPS Generator/
   ├── README.md

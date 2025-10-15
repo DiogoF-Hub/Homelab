@@ -1,8 +1,11 @@
 # Real domain is replaced by test.domain.com
 test.domain.com {
-    tls /ssl/fullchain.pem /ssl/privkey.pem
+    tls /ssl/fullchain.pem /ssl/privkey.pem {
+        protocols tls1.3
+        curves x25519 secp256r1
+    }
 
-    encode gzip
+    encode zstd gzip
 
     # Serve robots.txt locally
     handle /robots.txt {
@@ -28,7 +31,7 @@ test.domain.com {
     # Security headers
     header {
         # HSTS with preload
-        Strict-Transport-Security "max-age=63072000; includeSubDomains; preload"
+        Strict-Transport-Security "max-age=31536000; includeSubDomains; preload"
 
         # nosniff is to prevent browsers from guessing file types for better security
         X-Content-Type-Options "nosniff"
