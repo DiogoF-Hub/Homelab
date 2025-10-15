@@ -193,7 +193,7 @@ The Vaultwarden service is isolated on its **own VLAN (VLAN-DMZ)** behind strict
   ```bash
   header {
       # HSTS with preload
-      Strict-Transport-Security "max-age=63072000; includeSubDomains; preload"
+      Strict-Transport-Security "max-age=31536000; includeSubDomains; preload"
 
       # Prevent MIME type sniffing
       X-Content-Type-Options "nosniff"
