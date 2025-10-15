@@ -14,14 +14,15 @@ RETENTION_DAYS=30
 
 # Paths
 # Logs and backup are being saved in this dir (/srv) so with my truenas setup, I can easily retrieve them with another user which has access rights to this dir
+USER_POD="poduser"
 MAIN_DIR="/srv"
-COMPOSE_DIR="/home/pi/vault"
+COMPOSE_DIR="/home/$USER_POD/vault"
 
 # Path to RSA public key (used to encrypt the AES key)
-RSA_PUBLIC_KEY="${COMPOSE_DIR}/vaultwarden_public_key.pem"
+RSA_PUBLIC_KEY="/home/pi/vault/vaultwarden_public_key.pem"
 
 # Data directory for Vaultwarden
-vw_DATA_DIR="/vw-data"
+vw_DATA_DIR="/srv/vw-data"
 
 LOG_DIR="${MAIN_DIR}/logs"
 BACKUP_LOG_DIR="${LOG_DIR}/backup"
@@ -47,7 +48,7 @@ mkdir -p "$BACKUP_DIR"
 # ======================
 echo "[->] Stopping all containers in Docker Compose stack..." | tee -a "$BACKUP_LOG" "$DOCKER_LOG" "$SYSTEM_LOG"
 cd "$COMPOSE_DIR" || { echo "[ERROR] Cannot access compose directory." | tee -a "$BACKUP_LOG" "$DOCKER_LOG" "$SYSTEM_LOG"; exit 1; }
-docker compose down 2>&1 | tee -a "$BACKUP_LOG" "$DOCKER_LOG" "$SYSTEM_LOG"
+sudo -u $USER_POD podman-compose down 2>&1 | tee -a "$BACKUP_LOG" "$DOCKER_LOG" "$SYSTEM_LOG"
 
 # Wait for all services to be fully stopped
 WAITED=0
@@ -56,8 +57,8 @@ SERVICES=$(docker compose config --services)
 while true; do
     ALL_STOPPED=true
     for service in $SERVICES; do
-        CONTAINER_ID=$(docker ps -aqf "name=${service}")
-        if [ -n "$CONTAINER_ID" ] && [ "$(docker inspect -f '{{.State.Running}}' "$CONTAINER_ID" 2>/dev/null)" == "true" ]; then
+        CONTAINER_ID=$(sudo -u $USER_POD podman ps -aq --filter "name=${service}")
+        if [ -n "$CONTAINER_ID" ] && [ "$(sudo -u $USER_POD podman inspect -f '{{.State.Running}}' "$CONTAINER_ID" 2>/dev/null)" == "true" ]; then
             ALL_STOPPED=false
             break
         fi
@@ -145,27 +146,39 @@ done
     for service in $(docker compose config --services); do
         echo -e "\n[----- $service -----]"
 
-        IMAGE=$(docker compose config | awk -v svc="$service" '$1 == svc ":" {in_service=1} in_service && $1 == "image:" {print $2; exit}')
+        IMAGE=$(sudo -u $USER_POD docker compose config | awk -v svc="$service" '$1 == svc ":" {in_service=1} in_service && $1 == "image:" {print $2; exit}')
 
         if [ -z "$IMAGE" ]; then
             echo "[WARN] Could not determine image for service $service."
             continue
         fi
 
-        LOCAL_ID=$(docker image inspect "$IMAGE" --format '{{.Id}}' 2>/dev/null)
+        # Get currently installed image ID
+        LOCAL_ID=$(sudo -u $USER_POD podman image inspect "$IMAGE" --format '{{.Id}}' 2>/dev/null)
+
+        # Pull the latest image (with retries)
         for attempt in {1..3}; do
-            if docker pull "$IMAGE"; then
-            break
+            if sudo -u $USER_POD podman pull "docker.io/$IMAGE"; then
+                break
             else
-            echo -e "\n[WARN] docker pull failed for $IMAGE (attempt $attempt)." >&2
-            sleep 2
+                echo -e "\n[WARN] podman pull failed for $IMAGE (attempt $attempt)." >&2
+                sleep 2
             fi
         done
-        LATEST_ID=$(docker image inspect "$IMAGE" --format '{{.Id}}' 2>/dev/null)
 
+        # Get new image ID after pull
+        LATEST_ID=$(sudo -u $USER_POD podman image inspect "$IMAGE" --format '{{.Id}}' 2>/dev/null)
+
+        # Compare image IDs
         if [ "$LOCAL_ID" != "$LATEST_ID" ]; then
             echo -e "\n[!!!] $service needs update."
             UPDATED=1
+
+            # Remove old image if it exists
+            if [ -n "$LOCAL_ID" ]; then
+                echo -e "\n[->] Removing old image $LOCAL_ID..."
+                sudo -u $USER_POD podman rmi -f "$LOCAL_ID" || echo "[WARN] Failed to remove old image $LOCAL_ID"
+            fi
         else
             echo -e "\n[OK] $service is up-to-date."
         fi
@@ -184,6 +197,7 @@ done
     echo "Docker Container Update finished at: $(date)"
     echo "---------------------------------------------------------"
 } >> "$DOCKER_LOG" 2>&1
+
 
 
 # ======================
@@ -233,7 +247,6 @@ done
     else
         echo "[i] rpi-eeprom-update not found. Skipping."
     fi
-
 
     echo -e "\n[->] Cleaning up..."
     apt-get autoremove --purge -y

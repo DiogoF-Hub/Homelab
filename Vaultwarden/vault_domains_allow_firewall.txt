@@ -1,0 +1,36 @@
+# List of domains allowed for the firewall VLAN interface where the Raspberry Pi is located.
+# These domains are permitted to ensure proper network access for services running on the Raspberry Pi.
+
+0.debian.pool.ntp.org
+1.debian.pool.ntp.org
+2.debian.pool.ntp.org
+3.debian.pool.ntp.org
+acme-staging-v02.api.letsencrypt.org
+acme-v02.api.letsencrypt.org
+api.cloudflare.com
+archive.raspberrypi.com
+auth.docker.io
+deb.debian.org
+debian.map.fastlydns.net
+production.cloudflare.docker.com
+protocol-v2.argotunnel.com
+region1.v2.argotunnel.com
+region2.v2.argotunnel.com
+registry-1.docker.io
+download.docker.com
+argotunnel.com
+github.com
+api.github.com
+raw.githubusercontent.com
+objects.githubusercontent.com
+ghcr.io
+avatars.githubusercontent.com
+codeload.github.com
+lb-140-82-121-3-fra.github.com
+lb-140-82-121-5-fra.github.com
+proxy.golang.org
+sum.golang.org
+dl.google.com
+go.googlesource.com
+pkg.go.dev
+golang.org

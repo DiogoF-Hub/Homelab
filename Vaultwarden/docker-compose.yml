@@ -5,7 +5,7 @@ services:
     container_name: vaultwarden
     restart: unless-stopped
     volumes:
-      - /vw-data:/data
+      - /srv/vw-data:/data
     environment:
       - DOMAIN
       - ADMIN_TOKEN
@@ -51,9 +51,8 @@ services:
       - caddy_config:/config
       - ./robots.txt:/srv/robots.txt
       - ./security.txt:/srv/.well-known/security.txt
-      #- /home/pi/vault/logs/caddy:/var/log/caddy
-      - /etc/letsencrypt/live/test.domain.com/fullchain.pem:/ssl/fullchain.pem:ro
-      - /etc/letsencrypt/live/test.domain.com/privkey.pem:/ssl/privkey.pem:ro
+      - /srv/vw-certs/fullchain.pem:/ssl/fullchain.pem:ro
+      - /srv/vw-certs/privkey.pem:/ssl/privkey.pem:ro
     networks:
       - caddy-vault
       - caddy-cloudflared
