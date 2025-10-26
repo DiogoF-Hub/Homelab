@@ -6,43 +6,60 @@ test.domain.com {
     }
 
     encode zstd gzip
+    root * /srv
 
-    # Serve robots.txt locally
-    handle /robots.txt {
-        root * /srv
-        file_server
-    }
-
-    # Serve security.txt locally
-    handle /.well-known/security.txt {
-        root * /srv/
-        file_server
-    }
-    redir /security.txt /.well-known/security.txt 308
-
-    # Reverse proxy to Vaultwarden
-    reverse_proxy vaultwarden:80 {
-        header_up Host { host }
-        header_up X-Real-IP { >CF-Connecting-IP }
-        header_up X-Forwarded-For { >CF-Connecting-IP }
-        header_up X-Forwarded-Proto { scheme }
-    }
-
-    # Security headers
+    # Global headers only include what Vaultwarden doesn't set (to avoid conflicts), while TXT-specific headers add stricter policies for static files.
+    # -------- Global headers (apply to everything) --------
     header {
-        # HSTS with preload
         Strict-Transport-Security "max-age=31536000; includeSubDomains; preload"
-
-        # nosniff is to prevent browsers from guessing file types for better security
         X-Content-Type-Options "nosniff"
-
-        # Only send referrer info to same-origin links for privacy
         Referrer-Policy "same-origin"
-
-        # Disable Google's FLoC tracking for better privacy
         Permissions-Policy "interest-cohort=()"
-
-        # Remove the Server header to hide server info
         -Server
+    }
+
+    # -------- robots.txt (TXT-only headers) --------
+    handle /robots.txt {
+        header {
+            Content-Security-Policy "default-src 'none'; base-uri 'none'; frame-ancestors 'none'"
+            X-Frame-Options "SAMEORIGIN"
+            Cross-Origin-Resource-Policy "same-origin"
+            X-Robots-Tag "noindex, nofollow"
+            X-XSS-Protection "0"
+        }
+        file_server
+    }
+
+    # -------- /.well-known/security.txt (TXT-only headers) --------
+    handle /.well-known/security.txt {
+        header {
+            Content-Security-Policy "default-src 'none'; base-uri 'none'; frame-ancestors 'none'"
+            X-Frame-Options "SAMEORIGIN"
+            Cross-Origin-Resource-Policy "same-origin"
+            X-Robots-Tag "noindex, nofollow"
+            X-XSS-Protection "0"
+        }
+        file_server
+    }
+
+    # -------- /security.txt -> internal rewrite to canonical file (TXT-only headers) --------
+    handle /security.txt {
+        header {
+            Content-Security-Policy "default-src 'none'; base-uri 'none'; frame-ancestors 'none'"
+            X-Frame-Options "SAMEORIGIN"
+            Cross-Origin-Resource-Policy "same-origin"
+            X-Robots-Tag "noindex, nofollow"
+            X-XSS-Protection "0"
+        }
+        rewrite * /.well-known/security.txt
+        file_server
+    }
+
+    # -------- Catch-all: reverse proxy to Vaultwarden --------
+    reverse_proxy vaultwarden:80 {
+        header_up Host {host}
+        header_up X-Real-IP {>CF-Connecting-IP}
+        header_up X-Forwarded-For {>CF-Connecting-IP}
+        header_up X-Forwarded-Proto {scheme}
     }
 }
