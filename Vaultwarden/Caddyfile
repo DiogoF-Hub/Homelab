@@ -15,6 +15,7 @@ test.domain.com {
         X-Content-Type-Options "nosniff"
         Referrer-Policy "same-origin"
         Permissions-Policy "interest-cohort=()"
+        Cross-Origin-Opener-Policy "same-origin"
         -Server
     }
 
