@@ -72,16 +72,6 @@ SMTP_TIMEOUT=''
 
 I personally used [Mailjet](https://www.mailjet.com) provider.
 
-> To generate the `ADMIN_TOKEN` hash, run this command inside the Vaultwarden container:
->
-> ```bash
-> podman exec -it vaultwarden /vaultwarden hash
-> ```
->
-> Then type your desired admin password, copy the output hash, and paste it into the `ADMIN_TOKEN` field in your `.env` file.
-
-> Replace these values to match your environment and email provider.
-
 ---
 
 ### **Caddy Reverse Proxy (`Caddyfile`)**
