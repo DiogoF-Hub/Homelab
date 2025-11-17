@@ -15,7 +15,7 @@ This allows me to easily list the services in a compose file without affecting c
 
 The setup is designed for **secure self-hosted password management**, with:
 
-* **[Caddy reverse proxy](#caddy)** for HTTPS, security headers, a `robots.txt` file, and a `security.txt` file for vulnerability reporting
+* **[Caddy reverse proxy](#caddy-reverse-proxy-caddyfile)** for HTTPS, security headers, a `robots.txt` file, and a `security.txt` file for vulnerability reporting
 * **Encrypted backups** using hybrid encryption
 * **Automated off-site replication** to TrueNAS and Hetzner Storage Box
 * **Strict [Cloudflare](#cloudflare) security policies** for zero trust access
@@ -87,6 +87,7 @@ I personally used [Mailjet](https://www.mailjet.com) provider.
 ### **Caddy Reverse Proxy (`Caddyfile`)**
 
 * Provides **HTTPS** for Vaultwarden
+* Implements **comprehensive security headers** (see [Security Headers](#-additional-security-layers) section for full details)
 * Hosts a `robots.txt` file (Vaultwarden does not natively support it)
 * Hosts a `security.txt` file at `/.well-known/security.txt` to provide contact information for vulnerability reporting (see [security.txt standard](https://securitytxt.org/))
 
@@ -98,7 +99,7 @@ I personally used [Mailjet](https://www.mailjet.com) provider.
 
   * Automatically update DNS records
   * Request and renew Let’s Encrypt certificates
-* Ensures **Full (strict) SSL/TLS** encryption between Cloudflare and the server
+* Ensures **([Full (strict) SSL/TLS](https://developers.cloudflare.com/ssl/origin-configuration/ssl-modes/full-strict/))** encryption between Cloudflare and the server
 
 ---
 
@@ -121,36 +122,6 @@ I personally used [Mailjet](https://www.mailjet.com) provider.
 
 ---
 
-## 🚀 Deployment Steps
-
-1. **Edit environment variables**
-   Update `.env` with your domain, admin token, and SMTP details.
-
-2. **Configure Cloudflare for DNS and certificates**
-
-   * Generate a Cloudflare API token with DNS edit permissions
-   * Create a Zero Trust token for Cloudflare Access and configure it to route `https://caddy`
-   * Add your API token to `certbot.conf` for automatic certificate renewals
-
-3. **Load crontab entries**
-
-   ```bash
-   sudo crontab -e
-   ```
-
-   Paste the contents of `root_crontab.txt`.
-
-4. **Start containers manually (first run only)**
-
-   ```bash
-   podman-compose up -d
-   ```
-
-5. **Access the web interface**
-
-   * URL: `https://<your-domain>`
-
----
 
 ## 🔒 Security Features
 
@@ -185,31 +156,39 @@ The Vaultwarden service is isolated on its **own VLAN (VLAN-DMZ)** behind strict
 
 ## 🔐 Additional Security Layers
 
-### **Caddy**
+### **Security Headers**
 
-* Forces HTTPS
-* Adds strong security headers:
+The Caddy reverse proxy implements comprehensive HTTP security headers, achieving an **A+ rating** on [securityheaders.com](https://securityheaders.com).
 
-  ```bash
-  header {
-      # HSTS with preload
-      Strict-Transport-Security "max-age=31536000; includeSubDomains; preload"
+#### **Implemented Headers**
 
-      # Prevent MIME type sniffing
-      X-Content-Type-Options "nosniff"
+| Header | Value | Purpose |
+|--------|-------|---------|
+| **`Strict-Transport-Security`** | `max-age=31536000; includeSubDomains; preload` | Enforces HTTPS for 1 year, including all subdomains. Prevents protocol downgrade attacks and cookie hijacking. Domain is [HSTS preloaded](https://hstspreload.org/) in browsers. |
+| **`X-Content-Type-Options`** | `nosniff` | Prevents MIME type sniffing. Stops browsers from interpreting files as a different MIME type than declared, blocking potential XSS attacks. |
+| **`Referrer-Policy`** | `same-origin` | Limits referrer information to same-origin requests only. Prevents leaking sensitive URLs (including tokens/IDs) to external sites. |
+| **`Permissions-Policy`** | `accelerometer=(), ambient-light-sensor=(), autoplay=(), battery=(), camera=(), display-capture=(), document-domain=(), encrypted-media=(), execution-while-not-rendered=(), execution-while-out-of-viewport=(), fullscreen=(), geolocation=(), gyroscope=(), interest-cohort=(), magnetometer=(), microphone=(), midi=(), payment=(), picture-in-picture=(), screen-wake-lock=(), sync-xhr=(), usb=(), web-share=(), xr-spatial-tracking=()` | Disables 24 browser features that are unnecessary for a password manager, reducing attack surface. Notable: blocks FLoC tracking, sensor APIs, media capture, and geolocation. Clipboard and WebAuthn remain enabled for password management functionality. |
+| **`Cross-Origin-Opener-Policy`** | `same-origin` | Isolates the browsing context, preventing other origins from interacting with your windows. Protects against Spectre-like attacks and cross-origin information leaks. |
+| **`X-Frame-Options`** | `SAMEORIGIN` | Prevents clickjacking attacks by disallowing the site from being embedded in iframes from other origins. |
+| **`Content-Security-Policy`** | *(Applied to static files only)* `default-src 'none'; base-uri 'none'; frame-ancestors 'none'` | Strict CSP for `robots.txt` and `security.txt` files, preventing any resource loading or framing. |
 
-      # Limit referrer information to same-origin only
-      Referrer-Policy "same-origin"
+#### **Removed Headers**
 
-      # Disable Google's FLoC tracking
-      Permissions-Policy "interest-cohort=()"
+| Header | Purpose |
+|--------|---------|
+| **`-Server`** | Removes server identification to prevent fingerprinting and targeted attacks based on known server vulnerabilities. |
+| **`-Via`** | Removes proxy information that could reveal infrastructure details. |
 
-      # Hide server information
-      -Server
-  }
-  ```
-* Provides `robots.txt` to block indexing of sensitive paths
-* **Added `security.txt`**: Implements the [security.txt standard](https://securitytxt.org/) to provide clear contact information for reporting vulnerabilities or security issues. This file is served via Caddy at `/.well-known/security.txt`, helping security researchers reach out responsibly and improving overall transparency.
+#### **Why These Matter for Vaultwarden**
+
+Password managers are high-value targets. These headers provide defense-in-depth:
+
+- **HSTS + Preload**: Ensures connections are always encrypted, even before the first request
+- **CSP + X-Frame-Options**: Prevents UI redressing attacks that could trick users into revealing passwords
+- **Permissions-Policy**: Blocks unnecessary browser APIs that could be exploited (cameras, microphone, sensors)
+- **COOP + Referrer-Policy**: Prevents cross-origin data leaks, including sensitive vault URLs
+- **Server/Via removal**: Reduces information disclosure for potential attackers
+
 
 ---
 
