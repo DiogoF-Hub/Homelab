@@ -1,10 +1,6 @@
-# List of domains allowed for the firewall VLAN interface where the Raspberry Pi is located.
+# List of domains allowed for the Squid Proxy.
 # These domains are permitted to ensure proper network access for services running on the Raspberry Pi.
 
-0.debian.pool.ntp.org
-1.debian.pool.ntp.org
-2.debian.pool.ntp.org
-3.debian.pool.ntp.org
 acme-staging-v02.api.letsencrypt.org
 acme-v02.api.letsencrypt.org
 api.cloudflare.com
@@ -26,11 +22,16 @@ objects.githubusercontent.com
 ghcr.io
 avatars.githubusercontent.com
 codeload.github.com
-lb-140-82-121-3-fra.github.com
-lb-140-82-121-5-fra.github.com
 proxy.golang.org
 sum.golang.org
 dl.google.com
 go.googlesource.com
 pkg.go.dev
 golang.org
+.r2.cloudflarestorage.com
+
+.crowdsec.net
+packagecloud.io
+.cloudfront.net
+
+cloudflare.com

@@ -16,6 +16,8 @@ This allows me to easily list the services in a compose file without affecting c
 The setup is designed for **secure self-hosted password management**, with:
 
 * **[Caddy reverse proxy](#caddy-reverse-proxy-caddyfile)** for HTTPS, security headers, a `robots.txt` file, and a `security.txt` file for vulnerability reporting
+* **[CrowdSec integration](#%EF%B8%8F-crowdsec-integration)** for active protection with automatic IP banning of malicious actors
+* **[Squid proxy](#-network-and-proxy-configuration)** for reliable outbound domain allowlisting and traffic control
 * **Encrypted backups** using hybrid encryption
 * **Automated off-site replication** to TrueNAS and Hetzner Storage Box
 * **Strict [Cloudflare](#cloudflare) security policies** for zero trust access
@@ -33,13 +35,17 @@ Vaultwarden/
 ├── .env                              # Environment variables
 ├── Caddyfile                         # Caddy reverse-proxy configuration (HTTPS, headers, robots.txt)
 ├── certbot.conf                      # Certbot DNS configuration for Cloudflare
+├── crowdsec-vaultwarden-bf.yaml      # CrowdSec brute force scenario configuration
+├── crowdsec-vaultwarden-enum.yaml    # CrowdSec user enumeration scenario configuration
 ├── docker-compose.yml                # Compose configuration (used by Podman + Docker for parsing)
 ├── main.sh                           # Daily maintenance and update script
+├── podman_compose_aliases.sh         # Global helper aliases for podman-compose (pcup/pcdown)
+├── poduser_crontab.txt               # Crontab entries for poduser (container startup)
 ├── robots.txt                        # Disallows bots from indexing sensitive paths
 ├── security.txt                      # Contact info for reporting vulnerabilities (served at /.well-known/security.txt)
-├── root_crontab.txt                  # Crontab entries for automation
-├── start-containers.sh               # Startup script (run at boot via crontab)
-├── vault_domains_allow_firewall.txt  # List of domains allowed for the firewall VLAN interface
+├── root_crontab.txt                  # Crontab entries for root automation
+├── start-containers.sh               # Startup script (run at boot via poduser crontab)
+├── vault_domains_allow_proxy.txt     # List of domains allowed for the Squid proxy
 ├── truenas-script.sh                 # Script on TrueNAS to pull backups and logs
 ├── deploy-hook.sh                    # Certbot deploy hook: copies renewed certificates to a directory where `poduser` can access them and restarts the Caddy server
 └── README.md                         # This documentation
@@ -105,7 +111,7 @@ I personally used [Mailjet](https://www.mailjet.com) provider.
 
 | Script                    | Purpose                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
 | ------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **`start-containers.sh`** | Brings up Vaultwarden and Caddy after a reboot (run via root crontab).                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
+| **`start-containers.sh`** | Brings up Vaultwarden and Caddy after a reboot (run via `poduser` crontab with silent output).                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
 | **`main.sh`**             | Full daily maintenance script:<br>1. Stops containers safely<br>2. Creates an **encrypted backup** using hybrid encryption:<br>   • Generates a random AES-256 key<br>   • Encrypts the backup with AES-256<br>   • Encrypts that AES-256 key with a public key<br>   • Records the OpenSSL version used by running `openssl version -a` and saves the output to a `.txt` file<br>   • Packages the encrypted key, the backup, and the OpenSSL version file together into a compressed archive<br>3. Updates images<br>4. Runs a full system update and **does a reboot**. |
 | **`truenas-script.sh`**   | Runs on TrueNAS to fetch daily encrypted backups and logs via `scp` using a restricted SSH user. After fetching locally, it pushes a copy to the **Hetzner Storage Box**, ensuring redundancy:<br>• Local backups on TrueNAS<br>• Cloud backups on Hetzner                                                                                                                                                                                                                                                                                                                 |
 | **`deploy-hook.sh`**      | Certbot deploy hook: **copies renewed certificates to a directory accessible by `poduser`** and **restarts the Caddy server** to apply the new certificates.                                                                                                                                                                                                                                                                                                                                                                                                               |
@@ -129,18 +135,109 @@ The Vaultwarden service is isolated on its **own VLAN (VLAN-DMZ)** behind strict
 
 | # | Action | Protocol  | Source     | Destination                                                                                 | Port     | Description                        | Log |
 |---|--------|-----------|-----------|---------------------------------------------------------------------------------------------|----------|-------------------------------------|-----|
-| 1 | Block  | Any       | VLAN-DMZ  | (Any other VLANs)                                                                           | Any      | Block DMZ to other VLANs           | Yes |
-| 2 | Pass   | TCP/UDP   | VLAN-DMZ  | DNS_Providers (Cloudflare and Quad9)                                                        | 53       | Allow DNS                          | Yes |
-| 3 | Pass   | TCP/UDP   | VLAN-DMZ  | Vaultwarden_Allow (`vault_domains_allow_firewall.txt`), Git Section of [GitHub_IPs](https://api.github.com/meta) | 443      | Allow HTTPS in VLAN-DMZ           | Yes |
-| 4 | Pass   | TCP/UDP   | VLAN-DMZ  | Vaultwarden_Allow (`vault_domains_allow_firewall.txt`), Git Section of [GitHub_IPs](https://api.github.com/meta) | 80       | Allow HTTP in VLAN-DMZ            | Yes |
-| 5 | Pass   | UDP       | VLAN-DMZ  | This Firewall                                                                              | 123      | Allow NTP                          | Yes |
-| 6 | Pass   | TCP/UDP   | VLAN-DMZ  | [Cloudflare_IPs](https://www.cloudflare.com/ips/)                                          | any-7844 | Allow QUIC from Cloudflare         | Yes |
-| 7 | Pass   | TCP       | VLAN-DMZ  | Mailjet_SMTP (`in-v3.mailjet.com`)                                                          | 587      | Allow SMTP                         | Yes |
+| 1 | Pass   | TCP       | VLAN-DMZ  | 192.168.173.9 (SQUID proxy)                                                                 | 3128     | Allow Access to Proxy-Server       | Yes |
+| 2 | Block  | Any       | VLAN-DMZ  | (Any other VLANs)                                                                           | Any      | Block DMZ to other VLANs           | Yes |
+| 3 | Pass   | TCP/UDP   | VLAN-DMZ  | DNS_Providers (Cloudflare and Quad9)                                                        | 53       | Allow DNS                          | Yes |
+| 4 | Pass   | UDP       | VLAN-DMZ  | This Firewall                                                                              | 123      | Allow NTP                          | Yes |
+| 5 | Pass   | UDP       | VLAN-DMZ  | [Cloudflare_IPs](https://www.cloudflare.com/ips/)                                          | any-7844 | Allow QUIC from Cloudflare         | Yes |
+| 6 | Pass   | TCP       | VLAN-DMZ  | Mailjet_SMTP (`in-v3.mailjet.com`)                                                          | 587      | Allow SMTP                         | Yes |
 
 📄 **References**:
-- `vault_domains_allow_firewall.txt` contains all domain allowlists for the Vaultwarden container  
-- [GitHub IPs API](https://api.github.com/meta) is used to maintain allowlists for Git connections  
-- [Cloudflare IP Ranges](https://www.cloudflare.com/ips/) are used to allowed QUIC traffic
+- `vault_domains_allow_proxy.txt` contains all domain allowlists configured in the Squid proxy  
+- [Cloudflare IP Ranges](https://www.cloudflare.com/ips/) are used to allow QUIC traffic
+
+---
+
+## 🛡️ CrowdSec Integration
+
+CrowdSec is integrated into the Vaultwarden stack to provide active protection against brute-force and enumeration attacks by **automatically IP banning malicious actors**. Vaultwarden writes structured logs to `/logs/vaultwarden.log` using extended logging, and CrowdSec parses these logs in real time to detect authentication abuse.
+
+This setup uses the [Vaultwarden collection by Dominic-Wagner](https://app.crowdsec.net/hub/author/Dominic-Wagner/collections/vaultwarden), which provides pre-configured scenarios for detecting common attack patterns against Vaultwarden instances. Ban decisions are enforced at the Cloudflare edge using the [Cloudflare Workers bouncer](https://docs.crowdsec.net/u/bouncers/cloudflare-workers/).
+
+**References**:
+- [Dominic-Wagner's Vaultwarden Collection](https://app.crowdsec.net/hub/author/Dominic-Wagner/collections/vaultwarden)
+- [CrowdSec Cloudflare Workers Bouncer Documentation](https://docs.crowdsec.net/u/bouncers/cloudflare-workers/)
+- [Dominic-Wagner on GitHub](https://github.com/Dominic-Wagner)
+
+### **Vaultwarden Logging Configuration**
+
+Vaultwarden is configured in `docker-compose.yml` with the following options:
+
+* `/srv/vw-logs:/logs` as the dedicated log volume
+* `EXTENDED_LOGGING=true`, `LOG_LEVEL=error`, and a consistent timestamp format
+* Custom rate limits designed to complement CrowdSec:
+
+```bash
+ADMIN_RATELIMIT_MAX_BURST=10
+ADMIN_RATELIMIT_SECONDS=300
+RATELIMIT_MAX_BURST=100
+RATELIMIT_SECONDS=60
+```
+
+This preserves Vaultwarden's own rate limits while allowing CrowdSec to evaluate larger windows of activity.
+
+### **CrowdSec Scenarios for Vaultwarden**
+
+Two custom CrowdSec scenarios are used to analyze the Vaultwarden log file:
+
+#### **Brute Force Scenario** (`crowdsec-vaultwarden-bf.yaml`)
+
+* **leakspeed**: 30m
+* **capacity**: 20
+* **blackhole**: 4h
+
+This means an IP must generate more than 20 failed logins within a 30-minute window for CrowdSec to issue an IP ban.
+
+#### **User Enumeration Scenario** (`crowdsec-vaultwarden-enum.yaml`)
+
+* **leakspeed**: 30m
+* **capacity**: 5
+* **blackhole**: 30m
+
+This detects attempts where a client tries multiple usernames consecutively.
+
+### **Cloudflare Worker Bouncer**
+
+CrowdSec is connected to Cloudflare through the official Cloudflare Worker bouncer. When CrowdSec creates a ban decision, the worker immediately propagates it to Cloudflare, so the block is enforced at the edge before any traffic reaches Vaultwarden.
+
+---
+
+## 🌐 Network and Proxy Configuration
+
+Previously, domain access was restricted using firewall rules with domain allowlisting (`vault_domains_allow_firewall.txt`), but this approach was not reliable. I replaced this with a **dedicated Squid proxy** running in a separate VM on my Proxmox server.
+
+### **Proxy Architecture**
+
+* The Squid proxy VM is located on a **different VLAN** than the Raspberry Pi hosting Vaultwarden and CrowdSec
+* The Raspberry Pi now communicates through Squid (192.168.173.9:3128) for outbound traffic control
+* Domain allowlisting is managed via `vault_domains_allow_proxy.txt` and enforced by Squid
+* This provides more predictable behavior than firewall-based domain filtering
+
+---
+
+## 🐳 Container Startup and Podman User Configuration
+
+Containers are now started by the dedicated Podman user (`poduser`) instead of root to prevent environment variable exposure during startup. When `podman-compose` expands the compose file into raw Podman run commands, sensitive information could leak into logs.
+
+### **Container Launch Configuration**
+
+* Containers are launched at boot using the `poduser` crontab with:
+  ```bash
+  @reboot /bin/bash -lc '/home/poduser/vault/start-containers.sh'
+  ```
+* The `start-containers.sh` script invokes `podman-compose up -d` and redirects all output to `/dev/null`
+* This ensures expanded Podman commands and environment variables never appear in logs or system journals
+
+### **Global Podman Compose Aliases**
+
+To simplify container management while keeping output suppressed globally, helper aliases are available in `podman_compose_aliases.sh`:
+
+```bash
+pcup()    # podman-compose up -d (silent)
+pcdown()  # podman-compose down (silent)
+```
+
+This file is sourced system-wide so any user managing Podman containers can use these aliases without exposing sensitive output.
 
 ---
 

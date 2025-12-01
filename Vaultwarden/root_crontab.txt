@@ -1,2 +1,1 @@
-@reboot /home/pi/vault/start-containers.sh > /dev/null 2>&1
 35 5 * * * /home/pi/vault/main.sh > /dev/null 2>&1
