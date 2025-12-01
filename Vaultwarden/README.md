@@ -44,6 +44,7 @@ Vaultwarden/
 ├── robots.txt                        # Disallows bots from indexing sensitive paths
 ├── security.txt                      # Contact info for reporting vulnerabilities (served at /.well-known/security.txt)
 ├── root_crontab.txt                  # Crontab entries for root automation
+├── squid.conf                        # Squid proxy configuration for domain allowlisting
 ├── start-containers.sh               # Startup script (run at boot via poduser crontab)
 ├── vault_domains_allow_proxy.txt     # List of domains allowed for the Squid proxy
 ├── truenas-script.sh                 # Script on TrueNAS to pull backups and logs
@@ -210,7 +211,8 @@ Previously, domain access was restricted using firewall rules with domain allowl
 
 * The Squid proxy VM is located on a **different VLAN** than the Raspberry Pi hosting Vaultwarden and CrowdSec
 * The Raspberry Pi now communicates through Squid (192.168.173.9:3128) for outbound traffic control
-* Domain allowlisting is managed via `vault_domains_allow_proxy.txt` and enforced by Squid
+* Domain allowlisting is managed via `vault_domains_allow_proxy.txt` and enforced by Squid using the configuration in `squid.conf`
+* The `squid.conf` file implements a whitelist-only approach: allows access to domains in the allowlist file and blocks everything else
 * This provides more predictable behavior than firewall-based domain filtering
 
 ---
