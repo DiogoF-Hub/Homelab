@@ -25,15 +25,18 @@ Homelab/
 │   ├── Caddyfile
 │   ├── README.md
 │   ├── certbot.conf
+│   ├── deploy-hook.sh
 │   ├── docker-compose.yml
 │   ├── main.sh
+│   ├── podman_compose_aliases.sh
+│   ├── poduser_crontab.txt
 │   ├── robots.txt
-│   ├── security.txt
 │   ├── root_crontab.txt
+│   ├── security.txt
+│   ├── squid.conf
 │   ├── start-containers.sh
 │   ├── truenas-script.sh
-│   ├── deploy-hook.sh
-│   ├── vault_domains_allow_firewall.txt
+│   ├── vault_domains_allow_proxy.txt
 │
 └── HTTPS Generator/
   ├── README.md
