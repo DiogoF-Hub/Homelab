@@ -3,4 +3,4 @@
 
 #!/bin/bash
 cd /home/poduser/vault || exit 1
-sudo -u poduser /usr/bin/podman-compose up -d --force-recreate
+/usr/bin/podman-compose up -d --force-recreate >/dev/null 2>&1

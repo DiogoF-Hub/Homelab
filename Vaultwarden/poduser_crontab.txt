@@ -1,0 +1,1 @@
+@reboot /bin/bash -lc '/home/poduser/vault/start-containers.sh'
