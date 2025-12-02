@@ -38,10 +38,16 @@ Homelab/
 │   ├── truenas-script.sh
 │   ├── vault_domains_allow_proxy.txt
 │
-└── HTTPS Generator/
-  ├── README.md
-  ├── generate_cert.sh
-  ├── openssl.cnf
+├── HTTPS Generator/
+│   ├── README.md
+│   ├── generate_cert.sh
+│   ├── openssl.cnf
+│
+└── Tailscale Windows VPN on demand/
+    ├── README.md
+    ├── tailscale.ps1
+    ├── tailscale-launcher.vbs
+    ├── Task Scheduler.xml
 ```
 
 ---
@@ -94,6 +100,26 @@ Homelab/
   * `generate_cert.sh` to create certificates for services or devices
   * `openssl.cnf` template automatically customized by the script
   * Root CA (`rootCA.pem`) can be installed on devices (rename to `.crt` if needed)
+
+---
+
+### **Tailscale Windows VPN On-Demand**
+
+* **Features**
+
+  * Automatic Tailscale VPN connection based on network detection
+  * Disconnects VPN when on trusted home networks (configurable SSIDs)
+  * Connects VPN automatically on untrusted/public networks
+  * Silent background operation using Windows Task Scheduler
+* **Why This Exists**
+
+  * The Windows Tailscale client doesn't natively support network-based auto-connection
+  * This custom solution fills that gap using PowerShell and Task Scheduler
+* **Scripts**
+
+  * `tailscale.ps1` for SSID detection and Tailscale control
+  * `tailscale-launcher.vbs` for silent execution (no console window)
+  * `Task Scheduler.xml` for automatic triggering on network changes
 
 ---
 
