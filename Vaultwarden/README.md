@@ -215,6 +215,57 @@ Previously, domain access was restricted using firewall rules with domain allowl
 * The `squid.conf` file implements a whitelist-only approach: allows access to domains in the allowlist file and blocks everything else
 * This provides more predictable behavior than firewall-based domain filtering
 
+### **System-Wide Proxy Configuration**
+
+To route all outbound traffic through the Squid proxy, three configuration files must be created on the Raspberry Pi. Each file serves a specific purpose to ensure proxy variables are available in different contexts:
+
+#### **1. `/etc/environment`**
+This file sets proxy variables for the entire system so all programs launched normally inherit them. It applies to both root and regular users, but **not** to systemd services.
+
+```bash
+http_proxy="http://192.168.173.9:3128"
+https_proxy="http://192.168.173.9:3128"
+HTTP_PROXY="http://192.168.173.9:3128"
+HTTPS_PROXY="http://192.168.173.9:3128"
+NO_PROXY="localhost,127.0.0.1,::1,caddy,vaultwarden"
+no_proxy="localhost,127.0.0.1,::1,caddy,vaultwarden"
+```
+
+#### **2. `/etc/systemd/system.conf.d/proxy.conf`**
+Systemd does not read `/etc/environment`, so this file forces all systemd services to inherit the proxy variables. It ensures services started at boot use the proxy correctly.
+
+```ini
+[Manager]
+DefaultEnvironment="HTTP_PROXY=http://192.168.173.9:3128"
+DefaultEnvironment="http_proxy=http://192.168.173.9:3128"
+
+DefaultEnvironment="HTTPS_PROXY=http://192.168.173.9:3128"
+DefaultEnvironment="https_proxy=http://192.168.173.9:3128"
+
+DefaultEnvironment="NO_PROXY=localhost,127.0.0.1,::1,caddy,vaultwarden"
+DefaultEnvironment="no_proxy=localhost,127.0.0.1,::1,caddy,vaultwarden"
+```
+
+#### **3. `/etc/profile.d/proxy.sh`**
+This file loads the proxy variables for interactive shells like SSH sessions. It ensures proxy variables exist when a user opens a shell and runs commands manually.
+
+```bash
+# System-wide proxy settings for interactive shells
+
+export http_proxy="http://192.168.173.9:3128"
+export https_proxy="http://192.168.173.9:3128"
+
+export HTTP_PROXY="$http_proxy"
+export HTTPS_PROXY="$https_proxy"
+
+export no_proxy="localhost,127.0.0.1,::1,caddy,vaultwarden"
+export NO_PROXY="$no_proxy"
+```
+
+#### **Critical: `no_proxy` Configuration**
+
+Vaultwarden and Caddy are added to the `no_proxy` list to ensure the Raspberry Pi and Podman containers **do not send internal container-to-container traffic through Squid**. If they were not excluded, DNS and HTTP requests for these internal services would mistakenly go to the proxy, causing failures during container startup. This prevents loops and ensures Podman networks resolve them directly.
+
 ---
 
 ## 🐳 Container Startup and Podman User Configuration
@@ -251,15 +302,18 @@ The Caddy reverse proxy implements comprehensive HTTP security headers, achievin
 
 #### **Implemented Headers**
 
-| Header | Value | Purpose |
-|--------|-------|---------|
-| **`Strict-Transport-Security`** | `max-age=31536000; includeSubDomains; preload` | Enforces HTTPS for 1 year, including all subdomains. Prevents protocol downgrade attacks and cookie hijacking. Domain is [HSTS preloaded](https://hstspreload.org/) in browsers. |
-| **`X-Content-Type-Options`** | `nosniff` | Prevents MIME type sniffing. Stops browsers from interpreting files as a different MIME type than declared, blocking potential XSS attacks. |
-| **`Referrer-Policy`** | `same-origin` | Limits referrer information to same-origin requests only. Prevents leaking sensitive URLs (including tokens/IDs) to external sites. |
-| **`Permissions-Policy`** | `accelerometer=(), ambient-light-sensor=(), autoplay=(), battery=(), camera=(), display-capture=(), document-domain=(), encrypted-media=(), execution-while-not-rendered=(), execution-while-out-of-viewport=(), fullscreen=(), geolocation=(), gyroscope=(), interest-cohort=(), magnetometer=(), microphone=(), midi=(), payment=(), picture-in-picture=(), screen-wake-lock=(), sync-xhr=(), usb=(), web-share=(), xr-spatial-tracking=()` | Disables 24 browser features that are unnecessary for a password manager, reducing attack surface. Notable: blocks FLoC tracking, sensor APIs, media capture, and geolocation. Clipboard and WebAuthn remain enabled for password management functionality. |
-| **`Cross-Origin-Opener-Policy`** | `same-origin` | Isolates the browsing context, preventing other origins from interacting with your windows. Protects against Spectre-like attacks and cross-origin information leaks. |
-| **`X-Frame-Options`** | `SAMEORIGIN` | Prevents clickjacking attacks by disallowing the site from being embedded in iframes from other origins. |
-| **`Content-Security-Policy`** | *(Applied to static files only)* `default-src 'none'; base-uri 'none'; frame-ancestors 'none'` | Strict CSP for `robots.txt` and `security.txt` files, preventing any resource loading or framing. |
+| Header | Value | Source | Purpose |
+|--------|-------|--------|---------|
+| **`Strict-Transport-Security`** | `max-age=31536000; includeSubDomains; preload` | Caddy (global) | Enforces HTTPS for 1 year, including all subdomains. Prevents protocol downgrade attacks and cookie hijacking. Domain is [HSTS preloaded](https://hstspreload.org/) in browsers. |
+| **`Content-Security-Policy`** | *(Vaultwarden default CSP for main app)* Strict policy for static files: `default-src 'none'; base-uri 'none'; frame-ancestors 'none'` | Vaultwarden + Caddy (static files only) | Vaultwarden sets a comprehensive CSP by default for the application. Caddy applies a stricter CSP specifically to `robots.txt` and `security.txt` files, preventing any resource loading or framing. |
+| **`X-Content-Type-Options`** | `nosniff` | Caddy (global) | Prevents MIME type sniffing. Stops browsers from interpreting files as a different MIME type than declared, blocking potential XSS attacks. |
+| **`X-Frame-Options`** | `SAMEORIGIN` | Vaultwarden + Caddy (static files only) | Prevents clickjacking attacks by disallowing the site from being embedded in iframes from other origins. Vaultwarden sets this by default; Caddy also applies it to static files. |
+| **`Referrer-Policy`** | `same-origin` | Caddy (global) | Limits referrer information to same-origin requests only. Prevents leaking sensitive URLs (including tokens/IDs) to external sites. |
+| **`Permissions-Policy`** | `accelerometer=(), ambient-light-sensor=(), autoplay=(), battery=(), camera=(), display-capture=(), document-domain=(), encrypted-media=(), execution-while-not-rendered=(), execution-while-out-of-viewport=(), fullscreen=(), geolocation=(), gyroscope=(), interest-cohort=(), magnetometer=(), microphone=(), midi=(), payment=(), picture-in-picture=(), screen-wake-lock=(), sync-xhr=(), usb=(), web-share=(), xr-spatial-tracking=()` | Caddy (global) | Disables 24 browser features that are unnecessary for a password manager, reducing attack surface. Notable: blocks FLoC tracking, sensor APIs, media capture, and geolocation. Clipboard and WebAuthn remain enabled for password management functionality. |
+| **`Cross-Origin-Opener-Policy`** | `same-origin` | Caddy (global) | Isolates the browsing context, preventing other origins from interacting with your windows. Protects against Spectre-like attacks and cross-origin information leaks. |
+| **`Cross-Origin-Resource-Policy`** | `same-origin` | Vaultwarden + Caddy (static files only) | Prevents other origins from loading resources from this site, protecting against certain cross-origin attacks. Vaultwarden sets this by default; Caddy also applies it to static files. |
+| **`X-Robots-Tag`** | `noindex, nofollow` | Caddy (static files only) | Instructs search engines not to index or follow links in `robots.txt` and `security.txt` files. |
+| **`X-XSS-Protection`** | `0` | Caddy (static files only) | Disables the legacy XSS filter in older browsers, as modern CSP provides better protection and the old XSS filter can introduce vulnerabilities. |
 
 #### **Removed Headers**
 
