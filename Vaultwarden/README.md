@@ -201,6 +201,23 @@ This detects attempts where a client tries multiple usernames consecutively.
 
 CrowdSec is connected to Cloudflare through the official Cloudflare Worker bouncer. When CrowdSec creates a ban decision, the worker immediately propagates it to Cloudflare, so the block is enforced at the edge before any traffic reaches Vaultwarden.
 
+### **Log Rotation**
+
+The Vaultwarden log file (`/srv/vw-logs/vaultwarden.log`) is managed with logrotate to prevent unlimited growth while maintaining log history for CrowdSec analysis. Configuration is in `/etc/logrotate.d/vaultwarden`:
+
+```
+/srv/vw-logs/vaultwarden.log {
+    daily
+    rotate 3
+    compress
+    missingok
+    notifempty
+    copytruncate
+}
+```
+
+This rotates logs daily, keeps 3 days of history, compresses old logs, and uses `copytruncate` to avoid disrupting the running container.
+
 ---
 
 ## 🌐 Network and Proxy Configuration
