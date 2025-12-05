@@ -2,27 +2,30 @@
 
 This folder contains my **Vaultwarden configuration and automation scripts**, originally based on **Docker** but now progressively migrating to **Podman**.
 
-I’ve made a **full switch to running containers with [Podman](https://podman.io/)** for better security and system integration.
+I've made a **full switch to running containers with [Podman](https://podman.io/)** for better security and system integration.
 A **dedicated non-privileged user** (`poduser`) is used to run Podman containers.
 
 However, **Docker remains installed** on the system to use certain commands, such as:
 
 ```bash
 docker compose config --services
-````
+```
 
 This allows me to easily list the services in a compose file without affecting container runtime.
 
+**Important:** `poduser` is **not** in the Docker group and cannot run Docker commands without `sudo`. Since `poduser` also has **no sudo privileges**, only root can execute Docker commands. This isolation ensures `poduser` can only interact with Podman, preventing privilege escalation and maintaining strict separation between the runtime (Podman) and parsing tools (Docker CLI).
+
 The setup is designed for **secure self-hosted password management**, with:
 
+* **[Cloudflare](#cloudflare)** for globally exposing the service with TLS 1.3, HSTS preload, and Zero Trust access control
 * **[Caddy reverse proxy](#caddy-reverse-proxy-caddyfile)** for HTTPS, security headers, a `robots.txt` file, and a `security.txt` file for vulnerability reporting
 * **[CrowdSec integration](#%EF%B8%8F-crowdsec-integration)** for active protection with automatic IP banning of malicious actors
 * **[Squid proxy](#-network-and-proxy-configuration)** for reliable outbound domain allowlisting and traffic control
-* **Encrypted backups** using hybrid encryption
-* **Automated off-site replication** to TrueNAS and Hetzner Storage Box
+* **[Daily automated maintenance](#-automation-scripts)** via `main.sh`: hybrid-encrypted backups, image updates, full system update, and reboot
+* **[Automated off-site replication](#-automation-scripts)** to TrueNAS and Hetzner Storage Box
 * **Strict [Cloudflare](#cloudflare) security policies** for zero trust access
 * **Full network isolation** by running on a dedicated VLAN with [strict firewall rules in OPNsense](#-dmz-firewall-rules)
-* **Hosted on a Raspberry Pi**, keeping the service lightweight and energy-efficient
+* **Hosted on a Raspberry Pi**, keeping the service lightweight and energy-efficient. Future plan: migrate from SD card to SSD for improved reliability and lifespan.
 
 Everything here is public for transparency and to help others learn, but you **must adapt the configuration to your own environment** before using it.
 
@@ -59,6 +62,8 @@ Vaultwarden/
 ### **Environment (`.env`)**
 
 This file defines the core variables for your setup.
+A template is provided as `.env.template` in this repository.
+
 Example template:
 
 ```bash
@@ -84,7 +89,7 @@ I personally used [Mailjet](https://www.mailjet.com) provider.
 ### **Caddy Reverse Proxy (`Caddyfile`)**
 
 * Provides **HTTPS** for Vaultwarden
-* Implements **comprehensive security headers** (see [Security Headers](#-additional-security-layers) section for full details)
+* Implements **additional security headers** beyond what Vaultwarden applies by default (see [Security Headers](#-additional-security-layers) section for full details)
 * Hosts a `robots.txt` file (Vaultwarden does not natively support it)
 * Hosts a `security.txt` file at `/.well-known/security.txt` to provide contact information for vulnerability reporting (see [security.txt standard](https://securitytxt.org/))
 
@@ -103,8 +108,10 @@ I personally used [Mailjet](https://www.mailjet.com) provider.
 ### **Podman + Docker Compose**
 
 * Podman is used to **run all containers** in production.
-* Docker is kept installed to use convenient `docker compose` commands (like `config --services`).
+* Docker is kept installed to use convenient `docker compose` commands (like `config --services`) for parsing compose files.
 * A dedicated non-root user (`poduser`) runs Podman containers, improving security.
+* **Important:** `poduser` is **not** in the Docker group and cannot run Docker commands without `sudo`. Since `poduser` also has **no sudo privileges**, only root can execute Docker commands. This ensures strict separation between the runtime (Podman) and parsing tools (Docker CLI).
+* Docker commands are only executed by root in `main.sh` for automated container image updates.
 
 ---
 
@@ -113,8 +120,8 @@ I personally used [Mailjet](https://www.mailjet.com) provider.
 | Script                    | Purpose                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
 | ------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | **`start-containers.sh`** | Brings up Vaultwarden and Caddy after a reboot (run via `poduser` crontab with silent output).                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
-| **`main.sh`**             | Full daily maintenance script:<br>1. Stops containers safely<br>2. Creates an **encrypted backup** using hybrid encryption:<br>   • Generates a random AES-256 key<br>   • Encrypts the backup with AES-256<br>   • Encrypts that AES-256 key with a public key<br>   • Records the OpenSSL version used by running `openssl version -a` and saves the output to a `.txt` file<br>   • Packages the encrypted key, the backup, and the OpenSSL version file together into a compressed archive<br>3. Updates images<br>4. Runs a full system update and **does a reboot**. |
-| **`truenas-script.sh`**   | Runs on TrueNAS to fetch daily encrypted backups and logs via `scp` using a restricted SSH user. After fetching locally, it pushes a copy to the **Hetzner Storage Box**, ensuring redundancy:<br>• Local backups on TrueNAS<br>• Cloud backups on Hetzner                                                                                                                                                                                                                                                                                                                 |
+| **`main.sh`**             | Full daily maintenance script:<br>1. Stops containers safely<br>2. Creates an **encrypted backup** using hybrid encryption:<br>   • Generates a random AES-256 key<br>   • Encrypts the backup with AES-256<br>   • Encrypts that AES-256 key with a public key<br>   • Records the OpenSSL version used by running `openssl version -a` and saves the output to a `.txt` file<br>   • Packages the encrypted key, the backup, and the OpenSSL version file together into a compressed archive<br>3. Updates images<br>4. Runs a full system update and **does a reboot**.<br>5. Places logs and encrypted backups in a dedicated folder with permissions adjusted for the `fetcher` user to access via `scp`. |
+| **`truenas-script.sh`**   | Runs on TrueNAS to fetch daily encrypted backups and logs via `scp` using a **restricted `fetcher` user** (no sudo privileges). After fetching locally, it pushes a copy to the **Hetzner Storage Box**, ensuring redundancy:<br>• Local backups on TrueNAS<br>• Cloud backups on Hetzner                                                                                                                                                                                                                                                                                                 |
 | **`deploy-hook.sh`**      | Certbot deploy hook: **copies renewed certificates to a directory accessible by `poduser`** and **restarts the Caddy server** to apply the new certificates.                                                                                                                                                                                                                                                                                                                                                                                                               |
 
 ---
@@ -329,8 +336,8 @@ The Caddy reverse proxy implements comprehensive HTTP security headers, achievin
 | **`Permissions-Policy`** | `accelerometer=(), ambient-light-sensor=(), autoplay=(), battery=(), camera=(), display-capture=(), document-domain=(), encrypted-media=(), execution-while-not-rendered=(), execution-while-out-of-viewport=(), fullscreen=(), geolocation=(), gyroscope=(), interest-cohort=(), magnetometer=(), microphone=(), midi=(), payment=(), picture-in-picture=(), screen-wake-lock=(), sync-xhr=(), usb=(), web-share=(), xr-spatial-tracking=()` | Caddy (global) | Disables 24 browser features that are unnecessary for a password manager, reducing attack surface. Notable: blocks FLoC tracking, sensor APIs, media capture, and geolocation. Clipboard and WebAuthn remain enabled for password management functionality. |
 | **`Cross-Origin-Opener-Policy`** | `same-origin` | Caddy (global) | Isolates the browsing context, preventing other origins from interacting with your windows. Protects against Spectre-like attacks and cross-origin information leaks. |
 | **`Cross-Origin-Resource-Policy`** | `same-origin` | Vaultwarden + Caddy (static files only) | Prevents other origins from loading resources from this site, protecting against certain cross-origin attacks. Vaultwarden sets this by default; Caddy also applies it to static files. |
-| **`X-Robots-Tag`** | `noindex, nofollow` | Caddy (static files only) | Instructs search engines not to index or follow links in `robots.txt` and `security.txt` files. |
-| **`X-XSS-Protection`** | `0` | Caddy (static files only) | Disables the legacy XSS filter in older browsers, as modern CSP provides better protection and the old XSS filter can introduce vulnerabilities. |
+| **`X-Robots-Tag`** | `noindex, nofollow` | Vaultwarden + Caddy (static files only) | Instructs search engines not to index or follow links. Vaultwarden applies this to the application; Caddy applies it specifically to `robots.txt` and `security.txt` files. |
+| **`X-XSS-Protection`** | `0` | Vaultwarden + Caddy (static files only) | Disables the legacy XSS filter in older browsers, as modern CSP provides better protection and the old XSS filter can introduce vulnerabilities. Vaultwarden sets this by default; Caddy also applies it to static files. |
 
 #### **Removed Headers**
 
