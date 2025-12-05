@@ -1,7 +1,7 @@
 # This script is a deploy hook for Certbot to copy renewed certificates to a directory where poduser can access them and restart the Caddy server.
 # Real domain is being replaced by test.example.com for privacy reasons.
 
-#!/bin/bash
+#! /bin/bash
 set -e
 
 echo "Certbot deploy hook triggered: $(date)" >> /var/log/certbot-deploy.log
