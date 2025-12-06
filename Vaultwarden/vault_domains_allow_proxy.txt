@@ -35,3 +35,4 @@ packagecloud.io
 .cloudfront.net
 
 cloudflare.com
+www.cloudflare.com
