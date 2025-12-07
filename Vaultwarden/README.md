@@ -25,7 +25,7 @@ The setup is designed for **secure self-hosted password management**, with:
 * **[Automated off-site replication](#-automation-scripts)** to TrueNAS and Hetzner Storage Box
 * **Strict [Cloudflare](#cloudflare) security policies** for zero trust access
 * **Full network isolation** by running on a dedicated VLAN with [strict firewall rules in OPNsense](#-dmz-firewall-rules)
-* **Hosted on a Raspberry Pi**, keeping the service lightweight and energy-efficient. Future plan: migrate from SD card to SSD for improved reliability and lifespan.
+* **Hosted on a Raspberry Pi 4 Model B (2GB RAM)**, running from an SSD for improved reliability and lifespan compared to SD cards, keeping the service lightweight and energy-efficient.
 
 Everything here is public for transparency and to help others learn, but you **must adapt the configuration to your own environment** before using it.
 
