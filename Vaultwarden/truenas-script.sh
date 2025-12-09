@@ -6,6 +6,7 @@
 # === CONFIGURATION ===
 PI_USER="mainuser"
 PI_HOST="192.168.123.4"
+PI_PORT=2222
 SSH_KEY="/root/.ssh/mainuser_automation_rsa"
 
 RETENTION_DAYS=90
@@ -69,7 +70,7 @@ mkdir -p "$DEST_HETZNER_LOG_DIR"
         filename=$(basename "$remote_path")
 
         mkdir -p "$dest_dir"
-        scp -i "$SSH_KEY" "${PI_USER}@${PI_HOST}:${remote_path}" "$dest_dir/"
+        scp -i "$SSH_KEY" -P "$PI_PORT" "${PI_USER}@${PI_HOST}:${remote_path}" "$dest_dir/"
         if [[ $? -eq 0 ]]; then
             echo -e "\n[OK] Fetched $filename to $dest_dir"
             fix_permissions "$dest_dir" "$filename"
