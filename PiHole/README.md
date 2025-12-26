@@ -13,9 +13,11 @@ Everything here is public for transparency and to help others learn, but you **m
 PiHole/
 ├── .env                      # Required environment variable(s)
 ├── blocklist.txt             # Custom blocklists (user-defined)
+├── cookielist_whitelist.txt  # Cookie consent platform whitelist
 ├── docker-compose.yml        # Docker Compose configuration
 ├── main.sh                   # Maintenance/update script (run via crontab everyday)
 ├── manual_domains_block.txt  # Custom manually blocked domains
+├── mycustom_list.txt         # Additional custom blocked domains
 ├── root_crontab.txt          # Crontab entries for automation
 ├── start-containers.sh       # Startup script (run via crontab at boot)
 └── README.md                 # This documentation
@@ -51,7 +53,9 @@ Optional adjustments like network bindings can be added if needed.
 ### **Custom User Files**
 
 * **`blocklist.txt`** – Individually blocklists links to be added manually.
+* **`cookielist_whitelist.txt`** – Cookie consent management platform (CMP) domains to whitelist, preventing cookie banners from breaking.
 * **`manual_domains_block.txt`** – Individually domains to be added manually.
+* **`mycustom_list.txt`** – Additional custom blocked domains list.
 * **`root_crontab.txt`** – Contains the exact crontab entries to:
 
   * Start containers at boot (`start-containers.sh`).
@@ -97,10 +101,11 @@ Optional adjustments like network bindings can be added if needed.
    * URL: `https://pi.hole/admin`
    * Password: Use the one from `.env`.
 
-5. **Add blocklists and domains**
-   Add the blocklists and the domains manually:
+5. **Add blocklists, domains, and whitelist**
+   Add the blocklists, domains, and whitelist manually:
    * Add blocklists from `blocklist.txt`.
-   * Add custom domains from `manual_domains_block.txt`.
+   * Add custom blocked domains from `manual_domains_block.txt` and `mycustom_list.txt`.
+   * Add whitelisted domains from `cookielist_whitelist.txt` to prevent cookie consent banners from breaking.
 
 ---
 
