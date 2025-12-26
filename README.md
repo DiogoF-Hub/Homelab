@@ -14,9 +14,11 @@ Homelab/
 │   ├── .env
 │   ├── README.md
 │   ├── blocklist.txt
+│   ├── cookielist_whitelist.txt
 │   ├── docker-compose.yml
 │   ├── main.sh
 │   ├── manual_domains_block.txt
+│   ├── mycustom_list.txt
 │   ├── root_crontab.txt
 │   ├── start-containers.sh
 │
@@ -61,6 +63,7 @@ Homelab/
   * Network-wide ad and tracker blocking
   * DNS over HTTPS (DoH) support with Cloudflare
   * Custom blocklists and manual domain blocking
+  * Cookie consent platform whitelist to prevent banner breakage
 * **Scripts**
 
   * `main.sh` for maintenance tasks

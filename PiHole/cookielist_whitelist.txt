@@ -672,6 +672,14 @@ cookiemetrix.com                 # Cookie audit consent
 
 
 # ==========================================================
+# COMPANY-SPECIFIC CONSENT DOMAINS
+# Brand-specific cookie consent and privacy preference centers
+# ==========================================================
+
+privacy.easyjet.com              # EasyJet privacy and cookie consent center
+
+
+# ==========================================================
 # ADDITIONAL CMP-SPECIFIC WORDPRESS PLUGINS
 # ==========================================================
 
