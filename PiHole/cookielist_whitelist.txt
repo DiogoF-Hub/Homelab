@@ -1,0 +1,478 @@
+# ==========================================================
+# Cookie Consent Management Platform (CMP) Whitelist
+# Purpose: Prevent cookie banners from breaking due to DNS blocking
+#          Blocking these domains causes sites to hang, hide content,
+#          or display infinite loading screens while waiting for consent UI
+# ==========================================================
+
+
+# --------------------------
+# OneTrust - Market leader, used by Fortune 500 companies worldwide
+# --------------------------
+onetrust.com                     # Main platform API and configuration
+cdn.cookielaw.org                # CRITICAL: Primary banner JavaScript and CSS delivery
+optanon.blob.core.windows.net    # Azure-hosted consent preference storage
+geolocation.onetrust.com         # Auto-detects user region for GDPR/CCPA compliance
+privacyportal-cdn.onetrust.com   # Privacy preference center and do-not-sell pages
+cookie-cdn.cookiepro.com         # CookiePro branded variant (same company)
+
+
+# --------------------------
+# Cookiebot - Popular among SMBs and WordPress sites
+# --------------------------
+cookiebot.com                    # Core platform and admin dashboard
+consent.cookiebot.com            # Real-time consent API and preference storage
+consentcdn.cookiebot.com         # Primary CDN for banner scripts and UI assets
+cdn.cookiebot.net                # Fallback/alternative CDN endpoint
+
+
+# --------------------------
+# TrustArc - Enterprise privacy platform (formerly TRUSTe)
+# --------------------------
+trustarc.com                     # Main platform and privacy certification services
+consent.trustarc.com             # Consent banner delivery and preference API
+consent-pref.trustarc.com        # User preference center for managing cookie choices
+cdn.trustarc.com                 # Static asset delivery for consent UI components
+
+
+# --------------------------
+# Quantcast Choice - Free IAB TCF 2.0 CMP for publishers
+# --------------------------
+quantcast.com                    # Platform core and analytics integration
+quantserve.com                   # Consent state + vendor list synchronization
+cmp.quantcast.com                # Choice consent manager interface
+quantcast.mgr.consensu.org       # IAB-compliant consent string management
+cdn.quantcast.mgr.consensu.org   # High-availability CDN for banner delivery
+
+
+# --------------------------
+# Sourcepoint - Messaging platform with consent + monetization
+# --------------------------
+sourcepoint.com                  # Core messaging and consent orchestration
+cdn.sourcepoint.com              # Banner scripts, UI templates, and custom messages
+cdn.privacy-mgmt.com             # Privacy management and preference center CDN
+ccpa-service.sp-prod.net         # California-specific CCPA "Do Not Sell" flows
+wrapper.sp-prod.net              # Universal wrapper script for multi-regulation support
+
+
+# --------------------------
+# Didomi - Leading CMP in France, Belgium, and Luxembourg
+# --------------------------
+didomi.io                        # Platform core and admin console
+sdk.privacy-center.org           # JavaScript SDK for consent collection
+api.privacy-center.org           # Real-time consent storage and retrieval API
+cdn.didomi.io                    # Static assets for banners and preference centers
+
+
+# --------------------------
+# Complianz - Most popular WordPress GDPR plugin (3M+ installs)
+# --------------------------
+complianz.io                     # Cloud service for policy updates and scanning
+cdn.complianz.io                 # Banner templates and consent script delivery
+
+
+# --------------------------
+# Google Consent Mode - Required for AdSense and YouTube embeds
+# --------------------------
+consent.google.com               # Consent Mode v2 API for analytics and ads
+fundingchoicesmessages.google.com # Funding Choices consent UI (EU ad revenue recovery)
+googlefc.apps.goo.gl             # Short URL redirector for Funding Choices
+pagead2.googlesyndication.com    # Ad consent integration (required for banner display)
+
+
+# --------------------------
+# IAB TCF - Industry standard for publisher consent (CRITICAL)
+# --------------------------
+iabtcf.com                       # IAB Transparency & Consent Framework foundation
+vendorlist.consensu.org          # Global Vendor List (GVL) - blocks ALL TCF banners if missing
+iabeurope.eu                     # Official IAB Europe specifications and documentation
+cmpvendorlist.com                # Mirror/backup for vendor list availability
+
+
+# --------------------------
+# Additional Established CMPs
+# --------------------------
+osano.com                        # Osano - Data privacy platform with consent management
+cookiepro.com                    # CookiePro - Enterprise OneTrust white-label variant
+secureprivacy.ai                 # Secure Privacy - AI-powered compliance automation
+
+
+# --------------------------
+# Usercentrics - German market leader, strong in DACH region
+# --------------------------
+usercentrics.com                 # Global platform and admin interface
+app.usercentrics.eu              # EU-hosted application endpoint for data sovereignty
+privacy-proxy.usercentrics.eu    # GDPR-compliant consent state proxy
+aggregator.service.usercentrics.eu # Consent analytics and reporting aggregator
+
+
+# --------------------------
+# Termly
+# --------------------------
+termly.io                        # Termly consent management
+app.termly.io                    # Termly app platform
+cdn.termly.io                    # Termly CDN for banners
+
+
+# --------------------------
+# Cookieyes
+# --------------------------
+cookieyes.com                    # Cookieyes CMP
+cdn-cookieyes.com                # Cookieyes CDN
+app.cookieyes.com                # Cookieyes consent API
+
+
+# --------------------------
+# Iubenda - Italian compliance leader, popular across Europe
+# --------------------------
+iubenda.com                      # Privacy policy + cookie solution platform
+cdn.iubenda.com                  # Fast CDN delivery for banners and scripts
+consent.iubenda.com              # Consent collection and preference management API
+
+
+# --------------------------
+# Civic (Cookie Control)
+# --------------------------
+civicuk.com                      # Civic UK cookie control
+cc.cdn.civiccomputing.com        # Civic cookie control CDN
+
+
+# --------------------------
+# Axeptio (French CMP)
+# --------------------------
+axeptio.eu                       # Axeptio CMP platform
+static.axept.io                  # Axeptio static assets
+
+
+# --------------------------
+# Klaro (Open-source CMP)
+# --------------------------
+kiprotect.com                    # Klaro CMP backend
+cdn.kiprotect.com                # Klaro CDN
+
+
+# --------------------------
+# Seers (UK-based CMP)
+# --------------------------
+seersco.com                      # Seers CMP platform
+script.seersco.com               # Seers consent scripts
+
+
+# --------------------------
+# Ensighten (Enterprise consent)
+# --------------------------
+ensighten.com                    # Ensighten privacy platform
+nexus.ensighten.com              # Ensighten tag management + consent
+
+
+# --------------------------
+# Evidon (now part of Crownpeak)
+# --------------------------
+evidon.com                       # Evidon consent platform
+c.evidon.com                     # Evidon consent API
+cdn.evidon.com                   # Evidon CDN
+
+
+# --------------------------
+# Admiral - Adblock recovery with consent management integration
+# --------------------------
+getadmiral.com                   # Visitor relationship platform (paywall + consent)
+cdn.getadmiral.com               # Fast delivery for recovery messages and consent UI
+
+
+# --------------------------
+# Consent Manager (consentmanager.net)
+# --------------------------
+consentmanager.net               # Consent Manager CMP
+cdn.consentmanager.mgr.consensu.org # Consent Manager CDN
+delivery.consentmanager.net      # Consent Manager delivery endpoint
+
+
+# --------------------------
+# Sirdata (French consent + data)
+# --------------------------
+sirdata.com                      # Sirdata CMP
+sdk.privacy-center.org           # Sirdata SDK (shared with Didomi)
+
+
+# --------------------------
+# Piwik PRO (Analytics + consent)
+# --------------------------
+piwik.pro                        # Piwik PRO analytics + consent
+consent.piwik.pro                # Piwik PRO consent API
+
+
+# --------------------------
+# Tealium (Enterprise consent orchestration)
+# --------------------------
+tealiumiq.com                    # Tealium consent orchestration
+tags.tiqcdn.com                  # Tealium tag + consent delivery
+
+
+# --------------------------
+# Microsoft Clarity (with consent mode)
+# --------------------------
+clarity.ms                       # Microsoft Clarity analytics + consent
+www.clarity.ms                   # Microsoft Clarity web endpoint
+
+
+# ==========================================================
+# REGIONAL & SPECIALIZED PLATFORMS
+# Coverage: Geographic-specific and industry-focused solutions
+# ==========================================================
+
+
+# --------------------------
+# LiveRamp (ATS - Authenticated Traffic Solution)
+# --------------------------
+liveramp.com                     # LiveRamp consent + identity
+ats.rlcdn.com                    # LiveRamp ATS consent delivery
+cdn.liveramp.com                 # LiveRamp CDN
+
+
+# --------------------------
+# Crownpeak (formerly Evidon parent)
+# --------------------------
+crownpeak.com                    # Crownpeak consent platform
+consent.crownpeak.net            # Crownpeak consent API
+cdn.crownpeak.net                # Crownpeak CDN
+
+
+# --------------------------
+# UniConsent (German/EU focused)
+# --------------------------
+uniconsent.com                   # UniConsent CMP
+cmp.uniconsent.com               # UniConsent consent manager
+cdn.uniconsent.com               # UniConsent CDN
+
+
+# --------------------------
+# CookieScript
+# --------------------------
+cookiescript.com                 # CookieScript CMP
+cdn.cookiescript.com             # CookieScript CDN
+report.cookiescript.com          # CookieScript reporting
+
+
+# --------------------------
+# CookieHub
+# --------------------------
+cookiehub.com                    # CookieHub CMP
+cookiehub.net                    # CookieHub service domain
+cdn.cookiehub.com                # CookieHub CDN
+
+
+# --------------------------
+# Transcend (Privacy infrastructure)
+# --------------------------
+transcend.io                     # Transcend consent platform
+cdn.transcend.io                 # Transcend CDN
+api.transcend.io                 # Transcend API
+
+
+# --------------------------
+# Ketch (US privacy orchestration)
+# --------------------------
+ketch.com                        # Ketch consent platform
+global.ketchcdn.com              # Ketch global CDN
+app.ketch.com                    # Ketch app platform
+
+
+# --------------------------
+# TrustCommander (Commanders Act)
+# --------------------------
+trustcommander.net               # TrustCommander CMP
+cdn.tagcommander.com             # TagCommander + consent CDN
+consent.tagcommander.com         # TagCommander consent API
+
+
+# --------------------------
+# Metomic (Developer-friendly CMP)
+# --------------------------
+metomic.io                       # Metomic CMP
+config.metomic.io                # Metomic config API
+snippet.metomic.io               # Metomic consent snippet
+
+
+# --------------------------
+# Cookiebot Alternatives & Mirrors
+# --------------------------
+consent-management.net           # Generic consent management
+privacy-mgmt.com                 # Privacy management services
+
+
+# --------------------------
+# WP Consent API (WordPress ecosystem)
+# --------------------------
+complianz.io                     # Complianz (already listed but critical)
+really-simple-plugins.com        # Complianz parent company
+
+
+# --------------------------
+# Pandectes (Shopify-focused GDPR)
+# --------------------------
+pandectes.io                     # Pandectes Shopify CMP
+app.pandectes.io                 # Pandectes app endpoint
+
+
+# --------------------------
+# Enzuzo (Small business CMP)
+# --------------------------
+enzuzo.com                       # Enzuzo privacy platform
+app.enzuzo.com                   # Enzuzo app
+
+
+# --------------------------
+# PrivacyPolicies.com
+# --------------------------
+privacypolicies.com              # Privacy policy generator + consent
+cdn.privacypolicies.com          # CDN for consent UI
+
+
+# --------------------------
+# Securiti (Enterprise privacy AI)
+# --------------------------
+securiti.ai                      # Securiti consent + privacy
+consent.securiti.ai              # Securiti consent API
+
+
+# --------------------------
+# BigID (Enterprise data governance)
+# --------------------------
+bigid.com                        # BigID consent + governance
+consent.bigid.com                # BigID consent module
+
+
+# --------------------------
+# OneTrust Competitors - Niche Players
+# --------------------------
+truevault.com                    # TrueVault consent + data governance
+wirewheel.io                     # WireWheel privacy ops
+mine.com                         # Mine privacy rights automation
+
+
+# --------------------------
+# Asian/APAC CMPs
+# --------------------------
+appconsent.io                    # AppConsent (Singapore/APAC)
+trustarcapac.com                 # TrustArc APAC regional
+
+
+# --------------------------
+# Latin America CMPs
+# --------------------------
+lgpd.io                          # Brazilian LGPD consent platforms
+consentimento.com.br             # Brazilian consent services
+
+
+# --------------------------
+# Permutive (Publisher consent + data)
+# --------------------------
+permutive.com                    # Permutive consent + audience
+cdn.permutive.com                # Permutive CDN
+
+
+# --------------------------
+# Speedcurve / Third-party consent proxies
+# --------------------------
+consent.cookiefirst.com          # CookieFirst CMP
+cdn.cookiefirst.com              # CookieFirst CDN
+
+
+# --------------------------
+# FreshRelevance / E-commerce consent
+# --------------------------
+freshrelevance.com               # FreshRelevance + consent
+cdn.freshrelevance.com           # FreshRelevance CDN
+
+
+# --------------------------
+# Consentmanager (German .de variant)
+# --------------------------
+consentmanager.de                # German Consentmanager variant
+cdn.consentmanager.de            # German CDN
+
+
+# --------------------------
+# CookieInformation (Danish CMP)
+# --------------------------
+cookieinformation.com            # CookieInformation CMP
+policy.cookieinformation.com     # CookieInformation policy API
+
+
+# --------------------------
+# CookieScan (Dutch CMP)
+# --------------------------
+cookiescan.com                   # CookieScan CMP
+cdn.cookiescan.com               # CookieScan CDN
+
+
+# --------------------------
+# LegalMonster (Nordic CMP)
+# --------------------------
+legalmonster.com                 # LegalMonster consent
+app.legalmonster.com             # LegalMonster app
+
+
+# --------------------------
+# Consent.ag (German CMP)
+# --------------------------
+consent.ag                       # Consent.ag platform
+cdn.consent.ag                   # Consent.ag CDN
+
+
+# --------------------------
+# Borlabs Cookie - Premium WordPress plugin (Germany-focused)
+# --------------------------
+borlabs.io                       # License validation and update server
+cdn.borlabs.io                   # Cloud-hosted consent scripts (optional premium feature)
+
+
+# --------------------------
+# Canonical (Ubuntu Pro consent)
+# --------------------------
+ubuntu.com                       # Ubuntu/Canonical consent (specific paths)
+assets.ubuntu.com                # Ubuntu assets with consent
+
+
+# --------------------------
+# Privacy Center (SAP-related)
+# --------------------------
+privacy-center.org               # Generic privacy center (used by multiple)
+sdk.privacy-center.org           # Already listed but critical
+
+
+# --------------------------
+# Admiral Alternatives (Anti-adblock + consent)
+# --------------------------
+acceptable.a-msedge.net          # Microsoft acceptable ads consent
+pagefair.com                     # PageFair anti-adblock + consent
+pagefair.net                     # PageFair network
+
+
+# --------------------------
+# Blockthrough (Acceptable ads + consent)
+# --------------------------
+blockthrough.com                 # Blockthrough consent platform
+cdn.blockthrough.com             # Blockthrough CDN
+
+
+# --------------------------
+# GeoEdge (Ad security + consent)
+# --------------------------
+geoedge.com                      # GeoEdge ad verification + consent
+verification.geoedge.com         # GeoEdge verification
+
+
+# ==========================================================
+# MOBILE SDK WEB BRIDGES
+# Mobile attribution platforms with web-based consent components
+# Often load in app webviews for hybrid consent collection
+# ==========================================================
+
+appsflyer.com                    # AppsFlyer - Mobile attribution with web consent SDK
+adjust.com                       # Adjust - Attribution platform with GDPR web module
+branch.io                        # Branch - Deep linking with consent pass-through
+mparticle.com                    # mParticle - Customer data platform with web consent
+segment.com                      # Segment - CDP with JavaScript consent wrapper
+cdn.segment.com                  # Segment high-speed CDN for web analytics consent
