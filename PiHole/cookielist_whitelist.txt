@@ -123,11 +123,12 @@ app.cookieyes.com                # Cookieyes consent API
 
 
 # --------------------------
-# Iubenda - Italian compliance leader, popular across Europe
+# Iubenda - Italian compliance leader, popular across Southern Europe (IT/ES/PT)
 # --------------------------
 iubenda.com                      # Privacy policy + cookie solution platform
 cdn.iubenda.com                  # Fast CDN delivery for banners and scripts
 consent.iubenda.com              # Consent collection and preference management API
+cs.iubenda.com                   # Consent solution API (commonly used in Iberian peninsula)
 
 
 # --------------------------
@@ -302,10 +303,13 @@ privacy-mgmt.com                 # Privacy management services
 
 
 # --------------------------
-# WP Consent API (WordPress ecosystem)
+# WP Consent API (WordPress ecosystem - popular in Portugal)
 # --------------------------
 complianz.io                     # Complianz (already listed but critical)
 really-simple-plugins.com        # Complianz parent company
+cookielawinfo.com                # Cookie Law Info plugin (WebToffee - PT sites)
+webtoffee.com                    # WebToffee cookie consent plugins
+gdpr-wp.com                      # Portuguese WordPress GDPR plugins
 
 
 # --------------------------
@@ -359,10 +363,22 @@ trustarcapac.com                 # TrustArc APAC regional
 
 
 # --------------------------
-# Latin America CMPs
+# Iberian Peninsula (Portugal/Spain specific)
 # --------------------------
-lgpd.io                          # Brazilian LGPD consent platforms
-consentimento.com.br             # Brazilian consent services
+cookiebot.pt                     # Cookiebot Portuguese localized domain
+consentimiento.online            # Spanish/Portuguese consent service
+privacypolicies.com.br           # Portuguese-language privacy tools (BR/PT)
+rgpd.pt                          # Portuguese RGPD (GDPR) compliance platform
+cnpd.pt                          # Portuguese Data Protection Authority resources
+appdconsent.pt                   # Portuguese consent management services
+
+
+# --------------------------
+# Latin America CMPs (also used in Portugal)
+# --------------------------
+lgpd.io                          # Brazilian LGPD consent platforms (Portuguese sites)
+consentimento.com.br             # Brazilian consent services (Portuguese language)
+lgpdconsentimentos.com.br        # LGPD-focused consent management
 
 
 # --------------------------
@@ -394,10 +410,11 @@ cdn.consentmanager.de            # German CDN
 
 
 # --------------------------
-# CookieInformation (Danish CMP)
+# CookieInformation (Danish CMP, strong EU presence including PT/ES)
 # --------------------------
 cookieinformation.com            # CookieInformation CMP
 policy.cookieinformation.com     # CookieInformation policy API
+app.cookieinformation.com        # CookieInformation web app (used by Portuguese sites)
 
 
 # --------------------------
@@ -428,11 +445,7 @@ borlabs.io                       # License validation and update server
 cdn.borlabs.io                   # Cloud-hosted consent scripts (optional premium feature)
 
 
-# --------------------------
-# Canonical (Ubuntu Pro consent)
-# --------------------------
-ubuntu.com                       # Ubuntu/Canonical consent (specific paths)
-assets.ubuntu.com                # Ubuntu assets with consent
+
 
 
 # --------------------------
@@ -465,6 +478,178 @@ verification.geoedge.com         # GeoEdge verification
 
 
 # ==========================================================
+# GLOBAL REGIONAL COVERAGE BY COUNTRY/REGION
+# Country-specific CMPs and localized consent platforms
+# ==========================================================
+
+
+# --------------------------
+# United Kingdom (Post-Brexit specific)
+# --------------------------
+cookiecontrol.com                # Civic Cookie Control (UK market leader)
+cc.cdn.civiccomputing.com        # Already listed above but critical for UK
+termsfeed.com                    # TermsFeed UK privacy generator
+cdn.termsfeed.com                # TermsFeed CDN
+silktide.com                     # Silktide compliance (UK public sector)
+cookieconsent.com                # Cookie Consent by Insites (UK-focused)
+cdn.cookieconsent.com            # Cookie Consent CDN
+
+
+
+
+
+# --------------------------
+# France & Francophone
+# --------------------------
+tarteaucitron.io                 # Tarte au Citron - Popular French open-source CMP
+cdn.tarteaucitron.io             # Tarte au Citron CDN
+
+
+# --------------------------
+# Germany & DACH (Austria, Switzerland)
+# --------------------------
+real-cookie-banner.com           # Real Cookie Banner (German WordPress plugin)
+cdn.devowl.io                    # DevOwl (Real Cookie Banner) CDN
+
+
+# --------------------------
+# Netherlands & Belgium
+# --------------------------
+cookiewalls.nl                   # Dutch cookie wall solutions
+consentstudio.nl                 # Consent Studio (Dutch CMP)
+
+
+
+
+
+# --------------------------
+# Italy
+# --------------------------
+cookielaw.it                     # Italian cookie law solutions
+
+
+# --------------------------
+# Spain & Spanish-speaking Europe
+# --------------------------
+secureprivacy.es                 # Secure Privacy Spanish market
+
+
+# --------------------------
+# Poland & Eastern Europe
+# --------------------------
+consentmanager.pl                # Polish consent manager variant
+cookies.insites.com              # Insites cookies (CEE region)
+
+
+# --------------------------
+# Switzerland (Strict privacy beyond GDPR)
+# --------------------------
+swisscookies.ch                  # Swiss-specific cookie solutions
+
+
+# --------------------------
+# Russia & CIS
+# --------------------------
+consent.yandex.ru                # Yandex consent management
+consent.vk.com                   # VK consent manager
+
+
+
+
+
+# --------------------------
+# India
+# --------------------------
+consent.app                      # Consent.app (India-focused)
+privacypolicy.in                 # Indian privacy policy generators
+
+
+# --------------------------
+# Japan
+# --------------------------
+cmpjapan.com                     # CMP Japan platform
+consent.yahoo.co.jp              # Yahoo Japan consent
+privacy-policy.jp                # Japanese privacy frameworks
+
+
+# --------------------------
+# China (Special requirements)
+# --------------------------
+consent.qq.com                   # Tencent consent management
+consent.baidu.com                # Baidu consent framework
+consent.weibo.com                # Weibo consent system
+privacy.mi.com                   # Xiaomi privacy consent
+consent.alibaba.com              # Alibaba consent platform
+
+
+# --------------------------
+# South Korea
+# --------------------------
+cookieconsent.kr                 # Korean cookie consent solutions
+consentmanager.kr                # Korean consent manager
+
+
+# --------------------------
+# Southeast Asia (Singapore, Malaysia, Indonesia, Thailand, Vietnam)
+# --------------------------
+consent.asia                     # Regional consent platform
+cookieconsent.sg                 # Singapore cookie consent
+consentmanager.asia              # Asian regional consent manager
+
+
+# --------------------------
+# Australia & New Zealand
+# --------------------------
+cookieconsent.com.au             # Australian cookie consent
+consentmanager.com.au            # Australian consent manager
+ezyconsent.com.au                # EzyConsent (Australian CMP)
+
+
+# --------------------------
+# Canada (PIPEDA compliance)
+# --------------------------
+cookieconsent.ca                 # Canadian cookie consent
+consentmanager.ca                # Canadian consent manager
+
+
+
+
+
+# --------------------------
+# Mexico & Central America
+# --------------------------
+consentimiento.mx                # Mexican consent platform
+cookieconsent.lat                # Latin American cookie consent
+
+
+
+
+
+# --------------------------
+# Argentina & Southern Cone
+# --------------------------
+consentimiento.ar                # Argentine consent platform
+cookieconsent.cl                 # Chilean cookie consent
+
+
+# --------------------------
+# South Africa & Sub-Saharan Africa
+# --------------------------
+cookieconsent.co.za              # South African cookie consent
+consentmanager.africa            # African regional consent
+
+
+# --------------------------
+# Middle East (UAE, Saudi Arabia, Israel)
+# --------------------------
+cookieconsent.ae                 # UAE cookie consent
+consent.me                       # Middle East regional consent
+
+
+
+
+
+# ==========================================================
 # MOBILE SDK WEB BRIDGES
 # Mobile attribution platforms with web-based consent components
 # Often load in app webviews for hybrid consent collection
@@ -476,3 +661,20 @@ branch.io                        # Branch - Deep linking with consent pass-throu
 mparticle.com                    # mParticle - Customer data platform with web consent
 segment.com                      # Segment - CDP with JavaScript consent wrapper
 cdn.segment.com                  # Segment high-speed CDN for web analytics consent
+
+
+# ==========================================================
+# CONSENT VERIFICATION & AUDIT TOOLS
+# ==========================================================
+
+consentstring.com                # IAB consent string validator
+cookiemetrix.com                 # Cookie audit consent
+
+
+# ==========================================================
+# ADDITIONAL CMP-SPECIFIC WORDPRESS PLUGINS
+# ==========================================================
+
+mooveagency.com                  # Moove Agency GDPR Cookie Compliance plugin
+hu-manity.co                     # dFactory Cookie Notice for GDPR
+dfactory.co                      # dFactory consent plugins
