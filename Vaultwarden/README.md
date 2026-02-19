@@ -147,7 +147,7 @@ The Vaultwarden service is isolated on its **own VLAN (VLAN-DMZ)** behind strict
 | 2 | Block  | Any       | VLAN-DMZ  | (Any other VLANs)                                                                           | Any      | Block DMZ to other VLANs           | Yes |
 | 3 | Pass   | TCP/UDP   | VLAN-DMZ  | DNS_Providers (Cloudflare and Quad9)                                                        | 53       | Allow DNS                          | Yes |
 | 4 | Pass   | UDP       | VLAN-DMZ  | This Firewall                                                                              | 123      | Allow NTP                          | Yes |
-| 5 | Pass   | UDP       | VLAN-DMZ  | [Cloudflare_IPs](https://www.cloudflare.com/ips/)                                          | any-7844 | Allow QUIC from Cloudflare         | Yes |
+| 5 | Pass   | UDP       | VLAN-DMZ  | [Cloudflare_IPs](https://www.cloudflare.com/ips/)                                          | 7844 | Allow QUIC from Cloudflare         | Yes |
 | 6 | Pass   | TCP       | VLAN-DMZ  | Mailjet_SMTP (`in-v3.mailjet.com`)                                                          | 587      | Allow SMTP                         | Yes |
 
 📄 **References**:
