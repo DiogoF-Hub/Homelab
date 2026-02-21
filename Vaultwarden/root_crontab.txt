@@ -1,1 +1,1 @@
-35 5 * * * /home/pi/vault/main.sh > /dev/null 2>&1
+35 5 * * * /root/vault/main.sh > /dev/null 2>&1

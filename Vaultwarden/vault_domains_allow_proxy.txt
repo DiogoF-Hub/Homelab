@@ -1,38 +1,69 @@
-# List of domains allowed for the Squid Proxy.
-# These domains are permitted to ensure proper network access for services running on the Raspberry Pi.
-
-acme-staging-v02.api.letsencrypt.org
-acme-v02.api.letsencrypt.org
-api.cloudflare.com
-archive.raspberrypi.com
-auth.docker.io
+# ================================
+# Debian system updates
+# ================================
 deb.debian.org
+security.debian.org
+metadata.ftp-master.debian.org
 debian.map.fastlydns.net
-production.cloudflare.docker.com
+.debian.pool.ntp.org
+
+# ================================
+# Let's Encrypt
+# ================================
+acme-v02.api.letsencrypt.org
+acme-staging-v02.api.letsencrypt.org
+
+# ================================
+# Cloudflare / Cloudflared Tunnel
+# ================================
+cloudflare.com
+www.cloudflare.com
+api.cloudflare.com
+argotunnel.com
 protocol-v2.argotunnel.com
 region1.v2.argotunnel.com
 region2.v2.argotunnel.com
+cfd-features.argotunnel.com
+.r2.cloudflarestorage.com
+
+# ================================
+# Docker / Podman / Containers
+# ================================
+auth.docker.io
 registry-1.docker.io
 download.docker.com
-argotunnel.com
+production.cloudflare.docker.com
+dl-cdn.alpinelinux.org
+
+# ================================
+# GitHub / Dev tools
+# ================================
 github.com
 api.github.com
 raw.githubusercontent.com
 objects.githubusercontent.com
-ghcr.io
-avatars.githubusercontent.com
 codeload.github.com
+avatars.githubusercontent.com
+ghcr.io
+
+# ================================
+# Go ecosystem (CrowdSec + tools)
+# ================================
 proxy.golang.org
 sum.golang.org
-dl.google.com
+golang.org
 go.googlesource.com
 pkg.go.dev
-golang.org
-.r2.cloudflarestorage.com
 
-.crowdsec.net
+# ================================
+# Other packages / repos
+# ================================
 packagecloud.io
 .cloudfront.net
+.crowdsec.net
+dl.google.com
 
-cloudflare.com
-www.cloudflare.com
+# ================================
+# Your services
+# ================================
+test.example.com

@@ -1,4 +1,4 @@
-# This script is used to do the maintenance tasks for a Vaultwarden instance running on a Raspberry Pi.
+# This script is used to do the maintenance tasks for a Vaultwarden instance running on a VM.
 # It backs up the Vaultwarden data and it encrypts it using hybrid encryption, updates the instances (docker images), and performs a full system update while logging all actions to 3 different log files.
 
 #! /bin/bash
@@ -234,19 +234,6 @@ done
 
     echo -e "\n[->] Full upgrade (dist-upgrade)..."
     apt-get dist-upgrade -y
-
-    # This is specific to Raspberry Pi OS (firmware updates)
-    echo -e "\n[->] Checking Raspberry Pi EEPROM update..."
-    if command -v rpi-eeprom-update >/dev/null 2>&1; then
-        if rpi-eeprom-update | grep -qiE 'UPDATE (AVAILABLE|REQUIRED)'; then
-            echo "[->] Applying EEPROM update..."
-            rpi-eeprom-update -a
-        else
-            echo "[->] EEPROM is up to date."
-        fi
-    else
-        echo "[i] rpi-eeprom-update not found. Skipping."
-    fi
 
     echo -e "\n[->] Cleaning up..."
     apt-get autoremove --purge -y
