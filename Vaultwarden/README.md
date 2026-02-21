@@ -25,7 +25,7 @@ The setup is designed for **secure self-hosted password management**, with:
 * **[Automated off-site replication](#-automation-scripts)** to TrueNAS and Hetzner Storage Box
 * **Strict [Cloudflare](#cloudflare) security policies** for zero trust access
 * **Full network isolation** by running on a dedicated VLAN with [strict firewall rules in OPNsense](#-dmz-firewall-rules)
-* **Hosted on a Raspberry Pi 4 Model B (2GB RAM)**, running from an SSD for improved reliability and lifespan compared to SD cards, keeping the service lightweight and energy-efficient.
+* **Hosted on a dedicated Debian 13 VM in Proxmox** with dedicated NIC binding for VLAN isolation and full system backup capabilities
 
 Everything here is public for transparency and to help others learn, but you **must adapt the configuration to your own environment** before using it.
 
@@ -54,6 +54,26 @@ Vaultwarden/
 ├── deploy-hook.sh                    # Certbot deploy hook: copies renewed certificates to a directory where `poduser` can access them and restarts the Caddy server
 └── README.md                         # This documentation
 ```
+
+---
+
+## 🖥️ Infrastructure Setup
+
+### **Proxmox VM with Dedicated NIC Binding**
+
+The Vaultwarden service has been migrated from a Raspberry Pi to a **dedicated Debian 13 VM running on Proxmox**. This infrastructure change was implemented to enable **full system backups** while maintaining strict network isolation.
+
+#### **VM Configuration**
+* Runs a clean **Debian 13** installation
+* Assigned to a **dedicated physical NIC** on the Proxmox host (one of two available NICs)
+* The physical network cable for this NIC is connected to a switch port assigned to the **VLAN-DMZ** VLAN group
+* This setup preserves the original VLAN isolation baseline while providing VM stability and backup capabilities
+
+#### **Benefits of This Migration**
+* **Full system backups**: The VM-based approach enables complete system snapshots, ensuring full recovery capability beyond just data backups
+* **Hardware independence**: Decouples Vaultwarden from bare-metal hardware constraints and provides more flexibility for maintenance and scaling
+* **Proxmox integration**: Leverages Proxmox's management tools, monitoring, and resource controls
+* **Network isolation preserved**: Despite the migration, the dedicated NIC binding ensures the VM remains isolated on VLAN-DMZ with the same strict firewall rules applied
 
 ---
 
@@ -119,7 +139,7 @@ I personally used [Mailjet](https://www.mailjet.com) provider.
 
 | Script                    | Purpose                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
 | ------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **`start-containers.sh`** | Brings up Vaultwarden and Caddy after a reboot (run via `poduser` crontab with silent output).                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
+| **`start-containers.sh`** | Starts containers at boot via `poduser` crontab.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
 | **`main.sh`**             | Full daily maintenance script:<br>1. Stops containers safely<br>2. Creates an **encrypted backup** using hybrid encryption:<br>   • Generates a random AES-256 key<br>   • Encrypts the backup with AES-256<br>   • Encrypts that AES-256 key with a public key<br>   • Records the OpenSSL version used by running `openssl version -a` and saves the output to a `.txt` file<br>   • Packages the encrypted key, the backup, and the OpenSSL version file together into a compressed archive<br>3. Updates images<br>4. Runs a full system update and **does a reboot**.<br>5. Places logs and encrypted backups in a dedicated folder with permissions adjusted for the `fetcher` user to access via `scp`. |
 | **`truenas-script.sh`**   | Runs on TrueNAS to fetch daily encrypted backups and logs via `scp` using a **restricted `fetcher` user** (no sudo privileges). After fetching locally, it pushes a copy to the **Hetzner Storage Box**, ensuring redundancy:<br>• Local backups on TrueNAS<br>• Cloud backups on Hetzner                                                                                                                                                                                                                                                                                                 |
 | **`deploy-hook.sh`**      | Certbot deploy hook: **copies renewed certificates to a directory accessible by `poduser`** and **restarts the Caddy server** to apply the new certificates.                                                                                                                                                                                                                                                                                                                                                                                                               |
@@ -294,7 +314,7 @@ Vaultwarden and Caddy are added to the `no_proxy` list to ensure the Raspberry P
 
 ## 🐳 Container Startup and Podman User Configuration
 
-Containers are now started by the dedicated Podman user (`poduser`) instead of root to prevent environment variable exposure during startup. When `podman-compose` expands the compose file into raw Podman run commands, sensitive information could leak into logs.
+Containers are now started by the dedicated Podman user (`poduser`) instead of root to prevent environment variable exposure during startup.
 
 ### **Container Launch Configuration**
 
@@ -302,16 +322,20 @@ Containers are now started by the dedicated Podman user (`poduser`) instead of r
   ```bash
   @reboot /bin/bash -lc '/home/poduser/vault/start-containers.sh'
   ```
-* The `start-containers.sh` script invokes `podman-compose up -d` and redirects all output to `/dev/null`
-* This ensures expanded Podman commands and environment variables never appear in logs or system journals
+* The `start-containers.sh` script performs a few system checks before starting `podman-compose`:
+  - waits for a default network route to be present
+  - waits until `/etc/resolv.conf` contains at least one `nameserver`
+  - optionally waits for DNS resolution (e.g., `cloudflare.com`) to succeed
+  After these checks it runs `podman-compose up -d`.
+* These checks ensure the containers start safely by verifying network and DNS availability.
 
 ### **Global Podman Compose Aliases**
 
 To simplify container management while keeping output suppressed globally, helper aliases are available in `podman_compose_aliases.sh`:
 
 ```bash
-pcup()    # podman-compose up -d (silent)
-pcdown()  # podman-compose down (silent)
+pcup()    # podman-compose up -d
+pcdown()  # podman-compose down
 ```
 
 This file is sourced system-wide so any user managing Podman containers can use these aliases without exposing sensitive output.

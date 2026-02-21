@@ -1,18 +1,18 @@
-# This script is used to automate the backup and logs files retrieval from the Raspberry Pi to the TrueNAS server and sending it to a Hetzner Storage Box in the cloud.
+# This script is used to automate the backup and logs files retrieval from the VM to the TrueNAS server and sending it to a Hetzner Storage Box in the cloud.
 # IPs and user are changed from the original script
 
 #! /bin/bash
 
 # === CONFIGURATION ===
-PI_USER="mainuser"
-PI_HOST="192.168.123.4"
-PI_PORT=2222
+VM_USER="mainuser"
+VM_HOST="192.168.123.4"
+VM_PORT=2222
 SSH_KEY="/root/.ssh/mainuser_automation_rsa"
 
 RETENTION_DAYS=90
 TODAY=$(date +"%Y-%m-%d")
 
-# Remote paths on the Pi
+# Remote paths on the VM
 REMOTE_BASE_LOG="/srv/logs"
 REMOTE_BASE_BACKUP="/srv/backups"
 REMOTE_BACKUP_LOG="${REMOTE_BASE_LOG}/backup/vault-backup-${TODAY}.log"
@@ -70,12 +70,12 @@ mkdir -p "$DEST_HETZNER_LOG_DIR"
         filename=$(basename "$remote_path")
 
         mkdir -p "$dest_dir"
-        scp -i "$SSH_KEY" -P "$PI_PORT" "${PI_USER}@${PI_HOST}:${remote_path}" "$dest_dir/"
+        scp -i "$SSH_KEY" -P "$VM_PORT" "${VM_USER}@${VM_HOST}:${remote_path}" "$dest_dir/"
         if [[ $? -eq 0 ]]; then
             echo -e "\n[OK] Fetched $filename to $dest_dir"
             fix_permissions "$dest_dir" "$filename"
         else
-            echo -e "\n[SKIP] File not found on Pi: $filename"
+            echo -e "\n[SKIP] File not found on VM: $filename"
         fi
     }
 
