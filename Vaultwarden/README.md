@@ -306,6 +306,24 @@ export no_proxy="localhost,127.0.0.1,::1,caddy,vaultwarden"
 export NO_PROXY="$no_proxy"
 ```
 
+#### **4. Preserving Proxy Variables Through `sudo`**
+
+When `main.sh` runs maintenance tasks, it uses `sudo -u poduser` to pull container images. This was failing with timeout errors because `sudo` strips environment variables by default, including the proxy configuration.
+
+**Solution**: Configure `sudo` to preserve proxy variables by editing the sudoers file:
+
+```bash
+visudo
+```
+
+Add this line:
+
+```text
+Defaults env_keep += "HTTP_PROXY HTTPS_PROXY NO_PROXY http_proxy https_proxy no_proxy"
+```
+
+This ensures Podman receives the proxy configuration even when invoked through `sudo`, allowing image pulls to work correctly through the Squid proxy.
+
 #### **Critical: `no_proxy` Configuration**
 
 Vaultwarden and Caddy are added to the `no_proxy` list to ensure the Raspberry Pi and Podman containers **do not send internal container-to-container traffic through Squid**. If they were not excluded, DNS and HTTP requests for these internal services would mistakenly go to the proxy, causing failures during container startup. This prevents loops and ensures Podman networks resolve them directly.
