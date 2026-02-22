@@ -108,7 +108,7 @@ I personally used [Mailjet](https://www.mailjet.com) provider.
 
 ### **Caddy Reverse Proxy (`Caddyfile`)**
 
-* Provides **HTTPS** for Vaultwarden
+* Provides **HTTPS** for Vaultwarden with **TLS 1.3** enforced as the minimum version
 * Implements **additional security headers** beyond what Vaultwarden applies by default (see [Security Headers](#-additional-security-layers) section for full details)
 * Hosts a `robots.txt` file (Vaultwarden does not natively support it)
 * Hosts a `security.txt` file at `/.well-known/security.txt` to provide contact information for vulnerability reporting (see [security.txt standard](https://securitytxt.org/))
@@ -326,7 +326,7 @@ This ensures Podman receives the proxy configuration even when invoked through `
 
 #### **Critical: `no_proxy` Configuration**
 
-Vaultwarden and Caddy are added to the `no_proxy` list to ensure the Raspberry Pi and Podman containers **do not send internal container-to-container traffic through Squid**. If they were not excluded, DNS and HTTP requests for these internal services would mistakenly go to the proxy, causing failures during container startup. This prevents loops and ensures Podman networks resolve them directly.
+Vaultwarden and Caddy are added to the `no_proxy` list to ensure the Podman containers **do not send internal container-to-container traffic through Squid**. If they were not excluded, DNS and HTTP requests for these internal services would mistakenly go to the proxy, causing failures during container startup. This prevents loops and ensures Podman networks resolve them directly.
 
 ---
 
