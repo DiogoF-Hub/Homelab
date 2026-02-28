@@ -20,6 +20,7 @@ cloudflare.com
 www.cloudflare.com
 api.cloudflare.com
 argotunnel.com
+update.argotunnel.com
 protocol-v2.argotunnel.com
 region1.v2.argotunnel.com
 region2.v2.argotunnel.com
@@ -41,6 +42,7 @@ dl-cdn.alpinelinux.org
 github.com
 api.github.com
 raw.githubusercontent.com
+release-assets.githubusercontent.com
 objects.githubusercontent.com
 codeload.github.com
 avatars.githubusercontent.com
