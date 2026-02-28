@@ -24,7 +24,7 @@ AGE_VERSION="v1.3.1"
 AGE_TOOLS_DIR="/srv/tools/age"
 AGE_BINARY="${AGE_TOOLS_DIR}/${AGE_VERSION}/age"
 AGE_BINARY_WIN="${AGE_TOOLS_DIR}/${AGE_VERSION}/age.exe"
-AGE_RECIPIENT_FILE="/srv/age-recipient.txt"
+AGE_RECIPIENT_FILE="/root/vault/age-recipient.txt"
 DECRYPT_TXT="${COMPOSE_DIR}/DECRYPT.txt"
 
 # Data directory for Vaultwarden
