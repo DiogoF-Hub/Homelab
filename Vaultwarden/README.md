@@ -21,11 +21,13 @@ The setup is designed for **secure self-hosted password management**, with:
 * **[Caddy reverse proxy](#caddy-reverse-proxy-caddyfile)** for HTTPS, security headers, a `robots.txt` file, and a `security.txt` file for vulnerability reporting
 * **[CrowdSec integration](#%EF%B8%8F-crowdsec-integration)** for active protection with automatic IP banning of malicious actors
 * **[Squid proxy](#-network-and-proxy-configuration)** for reliable outbound domain allowlisting and traffic control
-* **[Daily automated maintenance](#-automation-scripts)** via `main.sh`: hybrid-encrypted backups, image updates, full system update, and reboot
+* **[Daily automated maintenance](#-automation-scripts)** via `main.sh`: [age](https://github.com/FiloSottile/age)-encrypted backups, image updates, full system update, and reboot
 * **[Automated off-site replication](#-automation-scripts)** to TrueNAS and Hetzner Storage Box
 * **Strict [Cloudflare](#cloudflare) security policies** for zero trust access
 * **Full network isolation** by running on a dedicated VLAN with [strict firewall rules in OPNsense](#-dmz-firewall-rules)
 * **Hosted on a dedicated Debian 13 VM in Proxmox** with dedicated NIC binding for VLAN isolation and full system backup capabilities
+* **[Self-contained backup encryption](#backup-and-redundancy)** using pinned [age](https://github.com/FiloSottile/age) binaries with version-controlled, reproducible, public-key-only encryption
+
 
 Everything here is public for transparency and to help others learn, but you **must adapt the configuration to your own environment** before using it.
 
@@ -40,6 +42,7 @@ Vaultwarden/
 ├── certbot.conf                      # Certbot DNS configuration for Cloudflare
 ├── crowdsec-vaultwarden-bf.yaml      # CrowdSec brute force scenario configuration
 ├── crowdsec-vaultwarden-enum.yaml    # CrowdSec user enumeration scenario configuration
+├── DECRYPT.txt                       # Decryption instructions (also bundled with every backup)
 ├── docker-compose.yml                # Compose configuration (used by Podman + Docker for parsing)
 ├── main.sh                           # Daily maintenance and update script
 ├── podman_compose_aliases.sh         # Global helper aliases for podman-compose (pcup/pcdown)
@@ -52,6 +55,7 @@ Vaultwarden/
 ├── vault_domains_allow_proxy.txt     # List of domains allowed for the Squid proxy
 ├── truenas-script.sh                 # Script on TrueNAS to pull backups and logs
 ├── deploy-hook.sh                    # Certbot deploy hook: copies renewed certificates to a directory where `poduser` can access them and restarts the Caddy server
+├── setup-age.sh                      # Downloads and pins age encryption binaries from GitHub releases
 └── README.md                         # This documentation
 ```
 
@@ -140,7 +144,8 @@ I personally used [Mailjet](https://www.mailjet.com) provider.
 | Script                    | Purpose                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
 | ------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | **`start-containers.sh`** | Starts containers at boot via `poduser` crontab.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
-| **`main.sh`**             | Full daily maintenance script:<br>1. Stops containers safely<br>2. Creates an **encrypted backup** using hybrid encryption:<br>   • Generates a random AES-256 key<br>   • Encrypts the backup with AES-256<br>   • Encrypts that AES-256 key with a public key<br>   • Records the OpenSSL version used by running `openssl version -a` and saves the output to a `.txt` file<br>   • Packages the encrypted key, the backup, and the OpenSSL version file together into a compressed archive<br>3. Updates images<br>4. Runs a full system update and **does a reboot**.<br>5. Places logs and encrypted backups in a dedicated folder with permissions adjusted for the `fetcher` user to access via `scp`. |
+| **`main.sh`**             | Full daily maintenance script:<br>1. Stops containers safely<br>2. Creates an **encrypted backup** using [age](https://github.com/FiloSottile/age) public-key encryption:<br>   • Encrypts the backup archive with a pinned age binary using the recipient public key (X25519)<br>   • Generates a manifest with checksums, age version, and recipient key<br>   • Bundles the encrypted archive, the exact age binary used, a manifest, and decryption instructions into a self-contained archive<br>   • Checks GitHub for newer age releases and logs a warning (never auto-updates)<br>3. Updates images<br>4. Runs a full system update and **does a reboot**.<br>5. Places logs and encrypted backups in a dedicated folder with permissions adjusted for the `fetcher` user to access via `scp`. |
+| **`setup-age.sh`**        | Downloads and pins [age](https://github.com/FiloSottile/age) encryption binaries from GitHub releases into versioned directories at `/srv/tools/age/`. Old versions are never removed. Run with no arguments to download the latest release, or specify a version (e.g., `./setup-age.sh v1.3.1`). After downloading, manually update `AGE_VERSION` in `main.sh` to use the new version. |
 | **`truenas-script.sh`**   | Runs on TrueNAS to fetch daily encrypted backups and logs via `scp` using a **restricted `fetcher` user** (no sudo privileges). After fetching locally, it pushes a copy to the **Hetzner Storage Box**, ensuring redundancy:<br>• Local backups on TrueNAS<br>• Cloud backups on Hetzner                                                                                                                                                                                                                                                                                                 |
 | **`deploy-hook.sh`**      | Certbot deploy hook: **copies renewed certificates to a directory accessible by `poduser`** and **restarts the Caddy server** to apply the new certificates.                                                                                                                                                                                                                                                                                                                                                                                                               |
 
@@ -441,6 +446,216 @@ Password managers are high-value targets. These headers provide defense-in-depth
 
 ### **Backup and Redundancy**
 
-* **Hybrid encryption** for every backup
-* Daily replication to **TrueNAS (local)** and **Hetzner Storage Box (cloud)**
+Backups are encrypted using [age](https://github.com/FiloSottile/age), a modern public-key encryption tool that replaces the previous OpenSSL-based hybrid encryption. This change was made because system updates can silently change OpenSSL behavior and defaults, making old backups difficult to decrypt. The backup system is designed to be **reproducible**, **self-contained**, and **future-proof**:
+
+* **[Key Pair Generation](#-age-key-pair-generation)** for creating age keys on a separate machine (private key never on the VM)
+* **[`setup-age.sh` Usage](#-setup-agesh-usage)** for downloading and pinning age binaries from GitHub releases
+* **[Decrypting a Backup](#-decrypting-a-backup)** for step-by-step restore instructions (Linux + Windows)
+* **[Updating age](#-updating-age)** for safely upgrading to newer versions without breaking old backups
+
+#### **Design Principles**
+
+* **Self-contained bundles**: Every backup bundle includes the exact age binaries (Linux + Windows) used for encryption, a manifest with checksums, and decryption instructions. You only need the private key to decrypt.
+* **Pinned binaries**: age is not installed via `apt`. Instead, a specific version is downloaded from GitHub releases and stored at `/srv/tools/age/{version}/`. System updates cannot silently change the encryption tool.
+* **Version control**: Old age binaries are never removed. `main.sh` references a specific `AGE_VERSION` that you update manually after downloading a new version with `setup-age.sh`.
+* **Public-key only on the server**: The VM only has the recipient public key (`age1...`). The private key (identity file) is generated and stored on a separate machine, never on the backup server.
+* **Update awareness**: Each backup run checks GitHub for newer age releases and logs a warning, but never auto-updates.
+
+#### **Backup Bundle Structure**
+
+Each daily backup produces a self-contained bundle:
+
+```
+vaultwarden-backup-bundle-YYYY-MM-DD.tar.gz
+├── vw-data-backup-YYYY-MM-DD.tar.gz.age   # age-encrypted backup archive
+├── age                                      # age binary (Linux amd64)
+├── age.exe                                  # age binary (Windows amd64)
+├── manifest-YYYY-MM-DD.txt                  # checksums + metadata
+└── DECRYPT.txt                              # step-by-step decryption instructions
+```
+
+The manifest records:
+* `age_version` — the pinned version used (e.g., `v1.3.1`)
+* `archive_sha256` — SHA-256 of the encrypted archive
+* `age_binary_sha256` — SHA-256 of the included Linux age binary
+* `age_binary_win_sha256` — SHA-256 of the included Windows age binary
+* `recipient_public_key` — the full `age1...` public key
+* `timestamp` — backup creation time (UTC)
+
+#### **Replication**
+
+* Daily replication to **TrueNAS (local)** and **Hetzner Storage Box (cloud)** via `truenas-script.sh`
 * Restricted SSH user for backup access, limiting exposure
+
+---
+
+### 🔑 **Age Key Pair Generation**
+
+The age key pair must be generated on a **separate machine** (not the Vaultwarden VM). The private key should **never** be on the backup server.
+
+1. Download age for your OS from [GitHub releases](https://github.com/FiloSottile/age/releases):
+   * **Windows**: `age-v1.3.1-windows-amd64.zip`
+   * **macOS**: `age-v1.3.1-darwin-amd64.tar.gz` (or `darwin-arm64` for Apple Silicon)
+   * **Linux**: `age-v1.3.1-linux-amd64.tar.gz`
+
+2. Extract and open a terminal in the extracted directory
+
+3. Generate a key pair:
+
+   **Windows**:
+   ```
+   .\age-keygen.exe -o identity.txt
+   ```
+
+   **Linux / macOS**:
+   ```bash
+   ./age-keygen -o identity.txt
+   ```
+
+   This prints the public key (starting with `age1...`) and saves the full key pair to `identity.txt`.
+
+4. Copy **only the public key line** (`age1...`) into a file called `age-recipient.txt`
+
+5. Transfer `age-recipient.txt` to the Vaultwarden VM:
+   ```
+   scp -P 2222 age-recipient.txt user@vm-host:/srv/age-recipient.txt
+   ```
+
+6. Store `identity.txt` securely offline (USB drive, encrypted storage, or a separate secure machine). This is the **only** file that can decrypt your backups.
+
+---
+
+### 📦 **`setup-age.sh` Usage**
+
+This script downloads and pins [age](https://github.com/FiloSottile/age) binaries (both Linux and Windows) from GitHub releases into versioned directories. It is used for the initial setup and for downloading newer versions when you choose to update. Old versions are **never** removed.
+
+#### **Commands**
+
+```bash
+# Download the latest release from GitHub
+./setup-age.sh
+
+# Download a specific version
+./setup-age.sh v1.3.1
+```
+
+If no version is specified, the script queries the [GitHub API](https://api.github.com/repos/FiloSottile/age/releases/latest) to determine the latest release automatically.
+
+#### **What It Does**
+
+1. Resolves the target version (from argument or GitHub API)
+2. Checks if that version is already downloaded — skips if so
+3. Downloads both `age-{version}-linux-amd64.tar.gz` and `age-{version}-windows-amd64.zip` from GitHub releases
+4. Extracts `age`, `age-keygen`, `age.exe`, and `age-keygen.exe` into `/srv/tools/age/{version}/`
+5. Computes and stores SHA-256 checksums for all binaries
+6. Prints a summary with checksums and a reminder to update `AGE_VERSION` in `main.sh`
+
+#### **Directory Layout**
+
+After running `./setup-age.sh v1.3.1`:
+
+```
+/srv/tools/age/
+└── v1.3.1/
+    ├── age                  # Linux amd64 binary
+    ├── age.sha256
+    ├── age-keygen           # Linux keygen (included from tarball)
+    ├── age-keygen.sha256
+    ├── age.exe              # Windows amd64 binary
+    ├── age.exe.sha256
+    ├── age-keygen.exe       # Windows keygen (included from zip)
+    └── age-keygen.exe.sha256
+```
+
+Multiple versions can coexist side by side:
+
+```
+/srv/tools/age/
+├── v1.3.0/                  # older version, kept in place
+│   └── ...
+└── v1.3.1/                  # current version
+    └── ...
+```
+
+#### **After Downloading a New Version**
+
+The script only downloads — it does **not** activate the new version automatically. To start using it for backups, manually update the version string in `main.sh`:
+
+```bash
+AGE_VERSION="v1.3.1"
+```
+
+This deliberate step ensures you are always in control of which version encrypts your backups.
+
+---
+
+### 🔓 **Decrypting a Backup**
+
+Each backup bundle is **self-contained** and includes age binaries for both Linux and Windows. See `DECRYPT.txt` (included in every bundle) for detailed step-by-step instructions.
+
+#### **1. Extract the Bundle**
+
+```bash
+tar xzf vaultwarden-backup-bundle-YYYY-MM-DD.tar.gz
+```
+
+On Windows, use `tar` in PowerShell, or extract with 7-Zip / WinRAR.
+
+#### **2. Verify Checksums** *(optional but recommended)*
+
+Check the values in `manifest-YYYY-MM-DD.txt` against the actual files:
+
+**Linux / macOS**:
+```bash
+sha256sum vw-data-backup-YYYY-MM-DD.tar.gz.age
+sha256sum age
+```
+
+**Windows (PowerShell)**:
+```powershell
+Get-FileHash vw-data-backup-YYYY-MM-DD.tar.gz.age -Algorithm SHA256
+Get-FileHash age.exe -Algorithm SHA256
+```
+
+#### **3. Decrypt**
+
+**Linux / macOS**:
+```bash
+chmod +x age
+./age -d -i /path/to/identity.txt -o vw-data-backup-YYYY-MM-DD.tar.gz vw-data-backup-YYYY-MM-DD.tar.gz.age
+```
+
+**Windows (PowerShell / CMD)**:
+```
+.\age.exe -d -i C:\path\to\identity.txt -o vw-data-backup-YYYY-MM-DD.tar.gz vw-data-backup-YYYY-MM-DD.tar.gz.age
+```
+
+Replace the identity path with the actual path to your age private key.
+
+#### **4. Extract the Decrypted Archive**
+
+```bash
+tar xzf vw-data-backup-YYYY-MM-DD.tar.gz
+```
+
+This restores the Vaultwarden data directory contents.
+
+---
+
+### 🔄 **Updating age**
+
+To update to a newer age version:
+
+1. On the Vaultwarden VM, run:
+   ```bash
+   ./setup-age.sh          # downloads latest
+   # or
+   ./setup-age.sh v1.4.0   # downloads specific version
+   ```
+
+2. Update `AGE_VERSION` in `main.sh`:
+   ```bash
+   AGE_VERSION="v1.4.0"
+   ```
+
+The old version remains at `/srv/tools/age/{old-version}/` and is never deleted. Previous backups still include the exact binaries they were encrypted with.

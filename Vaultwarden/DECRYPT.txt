@@ -1,0 +1,103 @@
+================================================================================
+  VAULTWARDEN BACKUP DECRYPTION INSTRUCTIONS
+================================================================================
+
+This backup bundle is self-contained. It includes the exact age binaries
+(Linux and Windows) that match the version used for encryption, so you do
+not need to install anything.
+
+The only thing you need that is NOT in this bundle is your age private key
+(identity file), which should be stored securely offline.
+
+--------------------------------------------------------------------------------
+  BUNDLE CONTENTS
+--------------------------------------------------------------------------------
+
+  vw-data-backup-YYYY-MM-DD.tar.gz.age   Encrypted backup archive
+  age                                     age binary (Linux amd64)
+  age.exe                                 age binary (Windows amd64)
+  manifest-YYYY-MM-DD.txt                 Checksums and metadata
+  DECRYPT.txt                             This file
+
+--------------------------------------------------------------------------------
+  STEP 1: EXTRACT THE BUNDLE
+--------------------------------------------------------------------------------
+
+  Linux / macOS:
+
+    tar xzf vaultwarden-backup-bundle-YYYY-MM-DD.tar.gz
+
+  Windows (PowerShell):
+
+    tar xzf vaultwarden-backup-bundle-YYYY-MM-DD.tar.gz
+
+  Or use 7-Zip / WinRAR to extract the .tar.gz archive.
+
+--------------------------------------------------------------------------------
+  STEP 2: VERIFY CHECKSUMS (OPTIONAL BUT RECOMMENDED)
+--------------------------------------------------------------------------------
+
+  Review manifest-YYYY-MM-DD.txt for the expected checksums, then verify:
+
+  Linux / macOS:
+
+    sha256sum vw-data-backup-YYYY-MM-DD.tar.gz.age
+    sha256sum age
+
+  Windows (PowerShell):
+
+    Get-FileHash vw-data-backup-YYYY-MM-DD.tar.gz.age -Algorithm SHA256
+    Get-FileHash age.exe -Algorithm SHA256
+
+  Compare the output with the values in the manifest file.
+
+--------------------------------------------------------------------------------
+  STEP 3: DECRYPT THE BACKUP
+--------------------------------------------------------------------------------
+
+  Linux / macOS:
+
+    chmod +x age
+    ./age -d -i /path/to/identity.txt -o vw-data-backup-YYYY-MM-DD.tar.gz vw-data-backup-YYYY-MM-DD.tar.gz.age
+
+  Windows (PowerShell / CMD):
+
+    .\age.exe -d -i C:\path\to\identity.txt -o vw-data-backup-YYYY-MM-DD.tar.gz vw-data-backup-YYYY-MM-DD.tar.gz.age
+
+  Replace the identity path with the actual path to your age private key.
+
+--------------------------------------------------------------------------------
+  STEP 4: EXTRACT THE DECRYPTED ARCHIVE
+--------------------------------------------------------------------------------
+
+  Linux / macOS:
+
+    tar xzf vw-data-backup-YYYY-MM-DD.tar.gz
+
+  Windows (PowerShell):
+
+    tar xzf vw-data-backup-YYYY-MM-DD.tar.gz
+
+  Or use 7-Zip / WinRAR to extract the .tar.gz archive.
+
+  This restores the Vaultwarden data directory contents.
+
+--------------------------------------------------------------------------------
+  NOTES
+--------------------------------------------------------------------------------
+
+  - Both Linux (amd64) and Windows (amd64) age binaries are included in
+    this bundle. Use whichever matches your operating system.
+
+  - The manifest file records which age version was used and the SHA-256
+    checksums for both the encrypted archive and the included binaries.
+
+  - age uses X25519 public-key encryption. Any version of age can decrypt
+    files encrypted by any other version (for standard age1... keys).
+
+  - For other OS/architecture builds, download from:
+    https://github.com/FiloSottile/age/releases
+
+  - For more information about age: https://github.com/FiloSottile/age
+
+================================================================================

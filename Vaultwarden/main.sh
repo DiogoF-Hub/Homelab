@@ -1,5 +1,5 @@
 # This script is used to do the maintenance tasks for a Vaultwarden instance running on a VM.
-# It backs up the Vaultwarden data and it encrypts it using hybrid encryption, updates the instances (docker images), and performs a full system update while logging all actions to 3 different log files.
+# It backs up the Vaultwarden data and encrypts it using age public-key encryption, updates the instances (docker images), and performs a full system update while logging all actions to 3 different log files.
 
 #! /bin/bash
 export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
@@ -18,8 +18,14 @@ USER_POD="poduser"
 MAIN_DIR="/srv"
 COMPOSE_DIR="/home/$USER_POD/vault"
 
-# Path to RSA public key (used to encrypt the AES key)
-RSA_PUBLIC_KEY="/home/pi/vault/vaultwarden_public_key.pem"
+# age encryption (pinned binary, never auto-updated)
+# To update: run setup-age.sh with new version, then change AGE_VERSION here
+AGE_VERSION="v1.3.1"
+AGE_TOOLS_DIR="/srv/tools/age"
+AGE_BINARY="${AGE_TOOLS_DIR}/${AGE_VERSION}/age"
+AGE_BINARY_WIN="${AGE_TOOLS_DIR}/${AGE_VERSION}/age.exe"
+AGE_RECIPIENT_FILE="/srv/age-recipient.txt"
+DECRYPT_TXT="${COMPOSE_DIR}/DECRYPT.txt"
 
 # Data directory for Vaultwarden
 vw_DATA_DIR="/srv/vw-data"
@@ -85,42 +91,99 @@ done
     echo "Vaultwarden Backup started at: $(date)"
     echo "-----------------------------------------------------------"
 
+    # --- Validate age prerequisites ---
+    echo -e "\n[->] Validating age encryption prerequisites..."
+
+    if [ ! -x "$AGE_BINARY" ]; then
+        echo "[ERROR] age binary not found or not executable at $AGE_BINARY"
+        echo "        Run setup-age.sh $AGE_VERSION to download it."
+        exit 1
+    fi
+
+    if [ ! -f "$AGE_RECIPIENT_FILE" ]; then
+        echo "[ERROR] age recipient file not found at $AGE_RECIPIENT_FILE"
+        echo "        Generate a key pair on a separate machine and place the public key here."
+        exit 1
+    fi
+
+    AGE_RECIPIENT=$(grep -m1 '^age1' "$AGE_RECIPIENT_FILE" || true)
+    if [ -z "$AGE_RECIPIENT" ]; then
+        echo "[ERROR] No valid age public key (age1...) found in $AGE_RECIPIENT_FILE"
+        exit 1
+    fi
+
+    echo "[OK] Using age $AGE_VERSION with recipient ${AGE_RECIPIENT:0:20}..."
+
+    # --- Create backup archive ---
     ARCHIVE_NAME="vw-data-backup-${TODAY_DATE}.tar.gz"
     ARCHIVE_PATH="${BACKUP_DIR}/${ARCHIVE_NAME}"
-    AES_KEY_FILE="${BACKUP_DIR}/aes-${TODAY_DATE}.key"
-
-    ENCRYPTED_ARCHIVE="${ARCHIVE_PATH}.enc"
-    ENCRYPTED_AES_KEY="${BACKUP_DIR}/aes-${TODAY_DATE}.key.enc"
-    OPENSSL_VERSION_NOTE="${BACKUP_DIR}/openssl-version-${TODAY_DATE}.txt"
-
+    ENCRYPTED_ARCHIVE="${ARCHIVE_PATH}.age"
+    MANIFEST="${BACKUP_DIR}/manifest-${TODAY_DATE}.txt"
+    BUNDLE_AGE_BINARY="${BACKUP_DIR}/age"
+    BUNDLE_AGE_BINARY_WIN="${BACKUP_DIR}/age.exe"
+    BUNDLE_DECRYPT_TXT="${BACKUP_DIR}/DECRYPT.txt"
     FINAL_BUNDLE="${BACKUP_DIR}/vaultwarden-backup-bundle-${TODAY_DATE}.tar.gz"
 
     echo -e "\n[->] Creating backup archive..."
     tar -czvf "$ARCHIVE_PATH" -C "$vw_DATA_DIR" . || { echo "[ERROR] Backup archive creation failed!"; exit 1; }
     echo "[OK] Archive created at $ARCHIVE_PATH"
 
-    echo -e "\n[->] Generating random AES-256 key..."
-    openssl rand 32 > "$AES_KEY_FILE" || { echo "[ERROR] Failed to generate AES key."; exit 1; }
+    # --- Encrypt with age ---
+    echo -e "\n[->] Encrypting archive with age (X25519 public-key encryption)..."
+    "$AGE_BINARY" -r "$AGE_RECIPIENT" -o "$ENCRYPTED_ARCHIVE" "$ARCHIVE_PATH" || { echo "[ERROR] age encryption failed!"; exit 1; }
+    echo "[OK] Encrypted archive created at $ENCRYPTED_ARCHIVE"
 
-    # NOTE: AES-256-GCM not supported by 'openssl enc' — using AES-256-CBC instead
-    echo -e "\n[->] Encrypting archive using AES-256-CBC..."
-    openssl enc -aes-256-cbc -salt -pbkdf2 -in "$ARCHIVE_PATH" -out "$ENCRYPTED_ARCHIVE" -pass file:"$AES_KEY_FILE"|| { echo "[ERROR] Archive encryption failed."; exit 1; }
+    # --- Generate manifest ---
+    echo -e "\n[->] Generating manifest..."
+    ARCHIVE_SHA256=$(sha256sum "$ENCRYPTED_ARCHIVE" | awk '{print $1}')
+    AGE_BINARY_SHA256=$(sha256sum "$AGE_BINARY" | awk '{print $1}')
+    AGE_BINARY_WIN_SHA256=$(sha256sum "$AGE_BINARY_WIN" | awk '{print $1}')
+    {
+        echo "timestamp=$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+        echo "age_version=$AGE_VERSION"
+        echo "archive_sha256=$ARCHIVE_SHA256"
+        echo "age_binary_sha256=$AGE_BINARY_SHA256"
+        echo "age_binary_win_sha256=$AGE_BINARY_WIN_SHA256"
+        echo "recipient_public_key=$AGE_RECIPIENT"
+    } > "$MANIFEST"
+    echo "[OK] Manifest written to $MANIFEST"
 
-    # NOTE: EC not supported by 'openssl pkeyutl' for encryption, using RSA instead
-    echo -e "\n[->] Encrypting AES key using RSA public key..."
-    openssl pkeyutl -encrypt -inkey "$RSA_PUBLIC_KEY" -pubin -pkeyopt rsa_padding_mode:oaep -pkeyopt rsa_oaep_md:sha256 -pkeyopt rsa_mgf1_md:sha256 -in "$AES_KEY_FILE" -out "$ENCRYPTED_AES_KEY" || { echo "[ERROR] AES key encryption failed."; exit 1; }
+    # --- Prepare bundle contents ---
+    echo -e "\n[->] Copying age binaries (Linux + Windows) and DECRYPT.txt into bundle..."
+    cp "$AGE_BINARY" "$BUNDLE_AGE_BINARY"
+    cp "$AGE_BINARY_WIN" "$BUNDLE_AGE_BINARY_WIN"
+    if [ -f "$DECRYPT_TXT" ]; then
+        cp "$DECRYPT_TXT" "$BUNDLE_DECRYPT_TXT"
+    else
+        echo "[WARN] DECRYPT.txt not found at $DECRYPT_TXT, skipping."
+    fi
 
-    echo -e "\n[->] Recording OpenSSL version only..."
-    openssl version -a > "$OPENSSL_VERSION_NOTE" || true
+    # --- Create final self-contained bundle ---
+    echo -e "\n[->] Packaging final backup bundle..."
+    BUNDLE_FILES=("$(basename "$ENCRYPTED_ARCHIVE")" "$(basename "$MANIFEST")" "age" "age.exe")
+    if [ -f "$BUNDLE_DECRYPT_TXT" ]; then
+        BUNDLE_FILES+=("DECRYPT.txt")
+    fi
+    tar -czvf "$FINAL_BUNDLE" -C "$BACKUP_DIR" "${BUNDLE_FILES[@]}" || { echo "[ERROR] Final bundle creation failed."; exit 1; }
 
-    echo -e "\n[->] Packaging encrypted archive and key..."
-    tar -czvf "$FINAL_BUNDLE" -C "$BACKUP_DIR" "$(basename "$ENCRYPTED_ARCHIVE")" "$(basename "$ENCRYPTED_AES_KEY")" "$(basename "$OPENSSL_VERSION_NOTE")" || { echo "[ERROR] Final bundle creation failed."; exit 1; }
-
+    # --- Clean up temporary files ---
     echo -e "\n[->] Cleaning up temporary files..."
-    rm -f "$ARCHIVE_PATH" "$AES_KEY_FILE" "$ENCRYPTED_ARCHIVE" "$ENCRYPTED_AES_KEY" "$OPENSSL_VERSION_NOTE"
+    rm -f "$ARCHIVE_PATH" "$ENCRYPTED_ARCHIVE" "$MANIFEST" "$BUNDLE_AGE_BINARY" "$BUNDLE_AGE_BINARY_WIN" "$BUNDLE_DECRYPT_TXT"
 
-    echo -e "\n[OK] Final encrypted backup bundle stored at $FINAL_BUNDLE."
+    echo -e "\n[OK] Final encrypted backup bundle stored at $FINAL_BUNDLE"
 
+    # --- Check for newer age version ---
+    echo -e "\n[->] Checking for newer age releases..."
+    LATEST_TAG=$(curl -sf --max-time 10 "https://api.github.com/repos/FiloSottile/age/releases/latest" 2>/dev/null | grep '"tag_name"' | head -1 | sed 's/.*"tag_name": *"//;s/".*//' || true)
+    if [ -n "$LATEST_TAG" ] && [ "$LATEST_TAG" != "$AGE_VERSION" ]; then
+        echo "[WARN] age $LATEST_TAG is available (currently using $AGE_VERSION). Run setup-age.sh to download it."
+    elif [ -n "$LATEST_TAG" ]; then
+        echo "[OK] age $AGE_VERSION is the latest release."
+    else
+        echo "[WARN] Could not check for age updates (GitHub API unreachable)."
+    fi
+
+    # --- Retention cleanup ---
     echo -e "\n[->] Cleaning old backups and logs..."
     find "$BACKUP_DIR" -maxdepth 1 -name "vaultwarden-backup-bundle-*.tar.gz" -mtime +$RETENTION_DAYS -exec rm -f {} \;
     find "$BACKUP_LOG_DIR" -name "vault-backup-*.log" -mtime +$RETENTION_DAYS -exec rm -f {} \;
