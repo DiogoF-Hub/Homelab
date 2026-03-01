@@ -23,8 +23,9 @@ Homelab/
 │   ├── start-containers.sh
 │
 ├── Vaultwarden/
-│   ├── .env
+│   ├── .env.template
 │   ├── Caddyfile
+│   ├── DECRYPT.txt
 │   ├── README.md
 │   ├── certbot.conf
 │   ├── deploy-hook.sh
@@ -35,6 +36,7 @@ Homelab/
 │   ├── robots.txt
 │   ├── root_crontab.txt
 │   ├── security.txt
+│   ├── setup-age.sh
 │   ├── squid.conf
 │   ├── start-containers.sh
 │   ├── truenas-script.sh
@@ -47,9 +49,6 @@ Homelab/
 │
 └── Tailscale Windows VPN on demand/
     ├── README.md
-    ├── tailscale.ps1
-    ├── tailscale-launcher.vbs
-    ├── Task Scheduler.xml
 ```
 
 ---
