@@ -258,15 +258,15 @@ Previously, domain access was restricted using firewall rules with domain allowl
 
 ### **Proxy Architecture**
 
-* The Squid proxy VM is located on a **different VLAN** than the Raspberry Pi hosting Vaultwarden and CrowdSec
-* The Raspberry Pi now communicates through Squid (192.168.173.9:3128) for outbound traffic control
+* The Squid proxy VM is located on a **different VLAN** than the VM with Debian 13 hosting Vaultwarden and CrowdSec
+* The VM with Debian 13 now communicates through Squid (192.168.173.9:3128) for outbound traffic control
 * Domain allowlisting is managed via `vault_domains_allow_proxy.txt` and enforced by Squid using the configuration in `squid.conf`
 * The `squid.conf` file implements a whitelist-only approach: allows access to domains in the allowlist file and blocks everything else
 * This provides more predictable behavior than firewall-based domain filtering
 
 ### **System-Wide Proxy Configuration**
 
-To route all outbound traffic through the Squid proxy, three configuration files must be created on the Raspberry Pi. Each file serves a specific purpose to ensure proxy variables are available in different contexts:
+To route all outbound traffic through the Squid proxy, four configuration files must be created/edited on the VM with Debian 13. Each file serves a specific purpose to ensure proxy variables are available in different contexts:
 
 #### **1. `/etc/environment`**
 This file sets proxy variables for the entire system so all programs launched normally inherit them. It applies to both root and regular users, but **not** to systemd services.
@@ -430,7 +430,7 @@ Password managers are high-value targets. These headers provide defense-in-depth
 
 * **Icon fetching disabled**: Vaultwarden can normally fetch favicons from the domains of saved logins.
 
-  * This feature is disabled to prevent outbound requests to arbitrary websites, simplify firewall rules, and reduce external visibility of the instance.
+  * This feature is disabled to prevent outbound requests to arbitrary websites, simplify squid (proxy) allowed domains, and reduce external visibility of the instance.
   * The environment variable **`ICON_CACHE_TTL=0`** is set so that previously downloaded icons remain served locally without refresh or re-fetch, while no new outbound requests are made.
 
 * **Sends disabled**: The optional Sends feature for file and note sharing is not required in this setup.
@@ -518,7 +518,7 @@ The age key pair must be generated on a **separate machine** (not the Vaultwarde
 
 5. Transfer `age-recipient.txt` to the Vaultwarden VM:
    ```
-   scp -P 2222 age-recipient.txt user@vm-host:/srv/age-recipient.txt
+   scp -P 2222 age-recipient.txt user@vm-host:/root/vault/age-recipient.txt
    ```
 
 6. Store `identity.txt` securely offline (USB drive, encrypted storage, or a separate secure machine). This is the **only** file that can decrypt your backups.
