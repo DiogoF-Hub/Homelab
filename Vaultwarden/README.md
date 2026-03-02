@@ -79,6 +79,21 @@ The Vaultwarden service has been migrated from a Raspberry Pi to a **dedicated D
 * **Proxmox integration**: Leverages Proxmox's management tools, monitoring, and resource controls
 * **Network isolation preserved**: Despite the migration, the dedicated NIC binding ensures the VM remains isolated on VLAN-DMZ with the same strict firewall rules applied
 
+#### **Host Tuning**
+
+The QUIC UDP receive buffer must be increased on the VM for cloudflared tunnel performance. Without this, cloudflared logs a warning about insufficient buffer size and QUIC connections may drop packets under load.
+
+```bash
+sysctl -w net.core.rmem_max=7500000
+sysctl -w net.core.wmem_max=7500000
+
+# Persist across reboots
+echo "net.core.rmem_max=7500000" | tee -a /etc/sysctl.d/99-udp-buffer.conf
+echo "net.core.wmem_max=7500000" | tee -a /etc/sysctl.d/99-udp-buffer.conf
+```
+
+This is a host-level kernel setting — it applies to all containers running on the VM.
+
 ---
 
 ## ⚙️ Configuration Overview
