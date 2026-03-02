@@ -1,7 +1,7 @@
+#!/bin/bash
+
 # This script is used to automate the backup and logs files retrieval from the VM to the TrueNAS server and sending it to a Hetzner Storage Box in the cloud.
 # IPs and user are changed from the original script
-
-#! /bin/bash
 
 # === CONFIGURATION ===
 VM_USER="mainuser"
