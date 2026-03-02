@@ -4,6 +4,9 @@ services:
     image: vaultwarden/server:latest
     container_name: vaultwarden
     restart: unless-stopped
+    # Prevent privilege escalation inside the container
+    security_opt:
+      - no-new-privileges
     volumes:
       - /srv/vw-data:/data
       - /srv/vw-logs:/logs
@@ -56,6 +59,9 @@ services:
     image: caddy:latest
     container_name: caddy
     restart: unless-stopped
+    # Prevent privilege escalation inside the container
+    security_opt:
+      - no-new-privileges
     environment:
       - TZ=Europe/Luxembourg
     volumes:
@@ -74,6 +80,9 @@ services:
     image: cloudflare/cloudflared:latest
     container_name: cloudflared
     restart: unless-stopped
+    # Prevent privilege escalation inside the container
+    security_opt:
+      - no-new-privileges
     environment:
       # Correct Timezone for the logs
       - TZ=Europe/Luxembourg
