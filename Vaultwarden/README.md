@@ -81,7 +81,7 @@ The Vaultwarden service has been migrated from a Raspberry Pi to a **dedicated D
 
 #### **Host Tuning**
 
-The QUIC UDP receive buffer must be increased on the VM for cloudflared tunnel performance. Without this, cloudflared logs a warning about insufficient buffer size and QUIC connections may drop packets under load.
+The QUIC UDP receive buffer must be increased on the VM for cloudflared tunnel performance. Without this, cloudflared logs a warning about insufficient buffer size and QUIC connections may drop packets under load. See [quic-go UDP Buffer Sizes](https://github.com/quic-go/quic-go/wiki/UDP-Buffer-Sizes) for details.
 
 ```bash
 sysctl -w net.core.rmem_max=7500000
