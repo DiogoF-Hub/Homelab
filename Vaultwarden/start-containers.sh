@@ -1,4 +1,5 @@
 #! /bin/bash
+
 # This script runs via poduser crontab @reboot to start the Podman containers for Vaultwarden
 # All output is suppressed to prevent environment variable leakage in logs
 
