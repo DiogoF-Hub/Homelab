@@ -194,6 +194,8 @@ The Vaultwarden service is isolated on its **own VLAN (VLAN-DMZ)** behind strict
 - `vault_domains_allow_proxy.txt` contains all domain allowlists configured in the Squid proxy  
 - [Cloudflare IP Ranges](https://www.cloudflare.com/ips/) are used to allow QUIC traffic
 
+> **Note on Rule 5 (QUIC):** Cloudflare publishes their IP ranges as a single aggregated list covering all of their services — they do not provide separate ranges per product (e.g., Tunnels, CDN, Workers). Because of this, the firewall rule must allow the entire [Cloudflare IP list](https://www.cloudflare.com/ips/) on UDP port 7844 so the `cloudflared` tunnel can be established. While this is broader than ideal, the rule is scoped to a single port (QUIC 7844) and only permits outbound UDP from the DMZ, limiting the effective exposure.
+
 ---
 
 ## 🛡️ CrowdSec Integration
