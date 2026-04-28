@@ -1,0 +1,128 @@
+# Squid outbound allowlist for the Vaultwarden VM
+
+# ================================
+# Debian system updates
+# ================================
+deb.debian.org
+security.debian.org
+metadata.ftp-master.debian.org
+debian.map.fastlydns.net
+.debian.pool.ntp.org
+
+# ================================
+# Let's Encrypt (ACME + OCSP + issuer certs)
+# ================================
+acme-v02.api.letsencrypt.org
+acme-staging-v02.api.letsencrypt.org
+# OCSP responders (r10/r11 = RSA, e5/e6 = ECDSA) and issuer CA chain
+# (x1/x2.c.lencr.org). Needed because BunkerWeb does its own ACME + OCSP
+# stapling on every served cert — not handled externally by certbot anymore.
+.lencr.org
+
+# ================================
+# Cloudflare / Cloudflared Tunnel
+# ================================
+cloudflare.com
+www.cloudflare.com
+api.cloudflare.com
+argotunnel.com
+update.argotunnel.com
+protocol-v2.argotunnel.com
+region1.v2.argotunnel.com
+region2.v2.argotunnel.com
+cfd-features.argotunnel.com
+.r2.cloudflarestorage.com
+
+# ================================
+# Docker / Podman / Containers
+# ================================
+auth.docker.io
+registry-1.docker.io
+download.docker.com
+production.cloudflare.docker.com
+dl-cdn.alpinelinux.org
+
+# ================================
+# GitHub / Dev tools
+# ================================
+# Used by main.sh / setup-age.sh to pull pinned age binaries from GitHub
+# releases, and by BunkerWeb's scheduler to fetch the nginx-ultimate-bad-bot
+# user-agent list from raw.githubusercontent.com.
+github.com
+api.github.com
+raw.githubusercontent.com
+release-assets.githubusercontent.com
+objects.githubusercontent.com
+codeload.github.com
+avatars.githubusercontent.com
+ghcr.io
+
+# ================================
+# Go ecosystem
+# ================================
+# Was required when CrowdSec's Cloudflare Worker bouncer was built on the host.
+# Unused by the new stack (CrowdSec is containerized, bouncing done by
+# BunkerWeb's built-in plugin). Left in so any future host-side Go tooling
+# still works; safe to prune if you prefer a tighter surface.
+proxy.golang.org
+sum.golang.org
+golang.org
+go.googlesource.com
+pkg.go.dev
+
+# ================================
+# BunkerWeb — project infrastructure
+# ================================
+# assets.bunkerity.com — static assets / blacklist feeds fetched by the scheduler.
+# api.bunkerweb.io    — anonymous update-check + telemetry ping on startup.
+# Leading dot = apex + all subdomains, intentional so we don't churn this list
+# every time BunkerWeb adds a new subdomain.
+.bunkerity.com
+.bunkerweb.io
+
+# ================================
+# BunkerWeb — GeoIP database
+# ================================
+# DB-IP Lite MMDB backs the country plugin (BLACKLIST_COUNTRY). Refreshed
+# weekly by the BunkerWeb scheduler. Not MaxMind — no license key needed.
+# Apex is hit during the redirect chain, so we allow the whole zone.
+.db-ip.com
+
+# ================================
+# BunkerWeb — Tor exit node list
+# ================================
+# www.dan.me.uk publishes the canonical Tor exit list. Pulled by BunkerWeb
+# when the default blacklist is enabled.
+www.dan.me.uk
+
+# ================================
+# CrowdSec hub + console
+# ================================
+# Covers api.crowdsec.net, hub-cdn.crowdsec.net, app.crowdsec.net — used for
+# collection installs, community blocklist sync, and console enrollment.
+.crowdsec.net
+
+# ================================
+# Vaultwarden — Bitwarden icon service
+# ================================
+# Required because ICON_SERVICE=bitwarden is set in the compose files. Single
+# known host instead of Vaultwarden fetching favicons from every arbitrary
+# website a user saves a login for.
+icons.bitwarden.net
+
+# ================================
+# Other packages / repos
+# ================================
+packagecloud.io
+.cloudfront.net
+dl.google.com
+
+# ================================
+# Wazuh agent — apt repo for install + updates
+# ================================
+packages.wazuh.com
+
+# ================================
+# Your services
+# ================================
+test.example.com

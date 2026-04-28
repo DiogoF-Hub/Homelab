@@ -70,24 +70,37 @@ fi
 echo "[OK] Downloaded Windows binary"
 
 # === EXTRACT ===
+# Using find to locate the binaries inside the extracted archives —
+# keeps us resilient to upstream changing the internal directory layout
+# (setup-minisign.sh hit this with 0.12). Linux + Windows builds are
+# disambiguated by extracting into separate temp subdirs.
 echo "[->] Extracting binaries..."
 mkdir -p "$VERSION_DIR"
 
-# Linux tarball contains an "age/" directory with the binaries
-tar -xzf "${TMP_DIR}/${LINUX_TARBALL}" -C "$TMP_DIR"
-cp "${TMP_DIR}/age/age" "${VERSION_DIR}/age"
-cp "${TMP_DIR}/age/age-keygen" "${VERSION_DIR}/age-keygen"
+# Linux
+mkdir -p "${TMP_DIR}/linux"
+tar -xzf "${TMP_DIR}/${LINUX_TARBALL}" -C "${TMP_DIR}/linux"
+LIN_AGE=$(find "${TMP_DIR}/linux" -type f -name age | head -1 || true)
+LIN_KEYGEN=$(find "${TMP_DIR}/linux" -type f -name age-keygen | head -1 || true)
+[[ -z "$LIN_AGE" ]]    && { echo "[ERROR] age binary not found in $LINUX_TARBALL";    rm -rf "$TMP_DIR"; exit 1; }
+[[ -z "$LIN_KEYGEN" ]] && { echo "[ERROR] age-keygen binary not found in $LINUX_TARBALL"; rm -rf "$TMP_DIR"; exit 1; }
+cp "$LIN_AGE"    "${VERSION_DIR}/age"
+cp "$LIN_KEYGEN" "${VERSION_DIR}/age-keygen"
 chmod +x "${VERSION_DIR}/age" "${VERSION_DIR}/age-keygen"
 
-# Windows zip contains an "age/" directory with .exe binaries
-# Using unzip if available, otherwise Python as fallback
+# Windows — using unzip if available, otherwise Python as fallback
+mkdir -p "${TMP_DIR}/win"
 if command -v unzip >/dev/null 2>&1; then
     unzip -q -o "${TMP_DIR}/${WINDOWS_ZIP}" -d "${TMP_DIR}/win"
 else
     python3 -c "import zipfile; zipfile.ZipFile('${TMP_DIR}/${WINDOWS_ZIP}').extractall('${TMP_DIR}/win')"
 fi
-cp "${TMP_DIR}/win/age/age.exe" "${VERSION_DIR}/age.exe"
-cp "${TMP_DIR}/win/age/age-keygen.exe" "${VERSION_DIR}/age-keygen.exe"
+WIN_AGE=$(find "${TMP_DIR}/win" -type f -name age.exe | head -1 || true)
+WIN_KEYGEN=$(find "${TMP_DIR}/win" -type f -name age-keygen.exe | head -1 || true)
+[[ -z "$WIN_AGE" ]]    && { echo "[ERROR] age.exe not found in $WINDOWS_ZIP";    rm -rf "$TMP_DIR"; exit 1; }
+[[ -z "$WIN_KEYGEN" ]] && { echo "[ERROR] age-keygen.exe not found in $WINDOWS_ZIP"; rm -rf "$TMP_DIR"; exit 1; }
+cp "$WIN_AGE"    "${VERSION_DIR}/age.exe"
+cp "$WIN_KEYGEN" "${VERSION_DIR}/age-keygen.exe"
 
 # === COMPUTE CHECKSUMS ===
 echo "[->] Computing checksums..."
@@ -118,5 +131,5 @@ echo "Installed versions:"
 ls -1d "${AGE_TOOLS_DIR}"/v* 2>/dev/null | xargs -I{} basename {} || true
 
 echo ""
-echo "[!] To use this version for backups, update AGE_VERSION in main.sh:"
+echo "[!] To use this version for backups, update AGE_VERSION in lib.sh:"
 echo "    AGE_VERSION=\"$VERSION\""

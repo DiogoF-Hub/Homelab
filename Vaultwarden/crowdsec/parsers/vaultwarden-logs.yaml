@@ -1,0 +1,55 @@
+# =============================================================================
+# CREDITS
+# Original parser by Dominic-Wagner (CrowdSec Hub author):
+#   https://app.crowdsec.net/hub/author/Dominic-Wagner/collections/vaultwarden
+#
+# Slightly adapted from the upstream version for our setup. Keeping the
+# upstream `name:` (Dominic-Wagner/vaultwarden-logs) so the corresponding
+# hub scenario continues to match `evt.Meta.log_type` against this parser's
+# output. All credit for the regex/grok logic and the original log-type
+# taxonomy belongs to Dominic-Wagner — we just tweaked it locally.
+# =============================================================================
+
+onsuccess: next_stage
+filter: "Upper(evt.Parsed.program) == 'VAULTWARDEN'"
+name: Dominic-Wagner/vaultwarden-logs
+description: "Parse vaultwarden logs"
+pattern_syntax:
+  DATE_YMD: "%{YEAR:year}-%{MONTHNUM:month}-%{MONTHDAY:day}"
+nodes:
+  - grok:
+      pattern: '^\[%{TIMESTAMP_ISO8601:datetimestamp}\]\[vaultwarden::api::identity\]\[ERROR\] Username or password is incorrect\. Try again\. IP: %{IP:source_ip}\. Username: %{EMAILADDRESS:username}\.$'
+      apply_on: message
+      statics:
+        - meta: log_type
+          value: vaultwarden_failed_auth
+        - meta: username
+          expression: evt.Parsed.username
+  - grok:
+      pattern: '^\[%{TIMESTAMP_ISO8601:datetimestamp}\]\[vaultwarden::api::admin\]\[ERROR\] Invalid admin token. IP: %{IP:source_ip}'
+      apply_on: message
+      statics:
+        - meta: log_type
+          value: vaultwarden_failed_admin_auth
+  - grok:
+      pattern: '^\[%{TIMESTAMP_ISO8601:datetimestamp}\]\[vaultwarden::api::core::two_factor::authenticator\]\[ERROR\] Invalid TOTP code! Server time: %{DATE_YMD:server_date} %{TIME:server_time} %{TZ:server_tz} IP: %{IP:source_ip}'
+      apply_on: message
+      statics:
+        - meta: log_type
+          value: vaultwarden_failed_2fa_totp
+  - grok:
+      pattern: '^\[%{TIMESTAMP_ISO8601:datetimestamp}\]\[vaultwarden::api::core::two_factor::email\]\[ERROR\] Token is invalid! IP: %{IP:source_ip}'
+      apply_on: message
+      statics:
+        - meta: log_type
+          value: vaultwarden_failed_2fa_email
+
+statics:
+  - meta: service
+    value: vaultwarden
+  - meta: source_ip
+    expression: "evt.Parsed.source_ip"
+  - target: evt.StrTimeFormat
+    value: "2006-01-02 15:04:05.000-0700"
+  - target: evt.StrTime
+    expression: evt.Parsed.datetimestamp
