@@ -3,21 +3,40 @@
 ================================================================================
 
 This backup bundle is self-contained. It includes the exact age binaries
-(Linux and Windows) that match the version used for encryption, so you do
-not need to install anything.
+AND the exact minisign binaries (Linux and Windows) that match the
+versions used for signing/encryption, so you do not need to install
+anything.
 
-The only thing you need that is NOT in this bundle is your age private key
-(identity file), which should be stored securely offline.
+The things you need that are NOT in this bundle:
+
+  1. Your age private key (identity file)    -- stored offline
+  2. Your minisign public key                 -- stored separately
+
+Both MUST live somewhere other than the Vaultwarden VM. The minisign
+public key is DELIBERATELY not included in the bundle: verifying a
+signature against a pubkey extracted from the same bundle proves
+nothing. You need an externally-stored, trusted copy.
+
+To find out which pubkey was used to sign a given bundle, read the
+`minisign_pubkey=` line in the manifest file. Match that value against
+your archive of trusted pubkeys (useful if you ever rotate keys).
 
 --------------------------------------------------------------------------------
   BUNDLE CONTENTS
 --------------------------------------------------------------------------------
 
-  vw-data-backup-YYYY-MM-DD.tar.gz.age   Encrypted backup archive
-  age                                     age binary (Linux amd64)
-  age.exe                                 age binary (Windows amd64)
-  manifest-YYYY-MM-DD.txt                 Checksums and metadata
-  DECRYPT.txt                             This file
+  vw-data-backup-YYYY-MM-DD.tar.gz.age           Encrypted backup archive
+  vw-data-backup-YYYY-MM-DD.tar.gz.age.minisig   Minisign signature (optional)
+  age                                            age binary (Linux amd64)
+  age.exe                                        age binary (Windows amd64)
+  minisign                                       minisign binary (Linux amd64)
+  minisign.exe                                   minisign binary (Windows amd64)
+  manifest-YYYY-MM-DD.txt                        Checksums, metadata, signer pubkey
+  DECRYPT.txt                                    This file
+
+Older bundles (produced before minisign signing was enabled) will not
+contain the .minisig / minisign / minisign.exe entries. Skip straight
+to STEP 3 (checksums) in that case.
 
 --------------------------------------------------------------------------------
   STEP 1: EXTRACT THE BUNDLE
@@ -34,7 +53,47 @@ The only thing you need that is NOT in this bundle is your age private key
   Or use 7-Zip / WinRAR to extract the .tar.gz archive.
 
 --------------------------------------------------------------------------------
-  STEP 2: VERIFY CHECKSUMS (OPTIONAL BUT RECOMMENDED)
+  STEP 2: VERIFY THE SIGNATURE (CRITICAL -- DO NOT SKIP)
+--------------------------------------------------------------------------------
+
+  The signature proves the bundle was produced by your signing key and
+  has not been tampered with at the backup destination. If verification
+  fails -- STOP. Do not decrypt. The bundle is compromised or corrupt.
+
+  You need your OWN copy of minisign.pub (stored on a verifier machine
+  separate from the Vaultwarden VM). The pubkey is NOT included in the
+  bundle by design -- bring your own trusted copy.
+
+  If you maintain multiple signing keys (rotation): check the
+  `minisign_pubkey=` line in manifest-YYYY-MM-DD.txt to see which pubkey
+  signed this bundle, then pick the matching file from your archive.
+
+  Linux / macOS:
+
+    chmod +x minisign
+    ./minisign -V -p /path/to/your-trusted-minisign.pub -m vw-data-backup-YYYY-MM-DD.tar.gz.age
+
+  Windows (PowerShell / CMD):
+
+    .\minisign.exe -V -p C:\path\to\your-trusted-minisign.pub -m vw-data-backup-YYYY-MM-DD.tar.gz.age
+
+  Expected output:  "Signature and comment signature verified"
+
+  Any other output = STOP. Do not proceed. Investigate tampering or
+  corruption at the backup destination.
+
+  If you did NOT set up minisign signing yet, and the .minisig /
+  minisign binaries are absent from this bundle, skip this step. Older
+  unsigned bundles fall back to checksum-only integrity (Step 3).
+
+  Note about signer identity: if you ever lose or forget which pubkey
+  was used, you can still extract the signer's key ID from the .minisig
+  file itself (the signature carries it natively). The manifest line is
+  a human-readable convenience -- the .minisig is the authoritative
+  source.
+
+--------------------------------------------------------------------------------
+  STEP 3: VERIFY CHECKSUMS (OPTIONAL BUT RECOMMENDED)
 --------------------------------------------------------------------------------
 
   Review manifest-YYYY-MM-DD.txt for the expected checksums, then verify:
@@ -43,16 +102,22 @@ The only thing you need that is NOT in this bundle is your age private key
 
     sha256sum vw-data-backup-YYYY-MM-DD.tar.gz.age
     sha256sum age
+    sha256sum minisign
 
   Windows (PowerShell):
 
     Get-FileHash vw-data-backup-YYYY-MM-DD.tar.gz.age -Algorithm SHA256
     Get-FileHash age.exe -Algorithm SHA256
+    Get-FileHash minisign.exe -Algorithm SHA256
 
   Compare the output with the values in the manifest file.
 
+  Note: if Step 2 (signature) already passed, Step 3 is redundant --
+  the signature covers the encrypted archive's contents cryptographically.
+  Checksums stay useful for older unsigned bundles.
+
 --------------------------------------------------------------------------------
-  STEP 3: DECRYPT THE BACKUP
+  STEP 4: DECRYPT THE BACKUP
 --------------------------------------------------------------------------------
 
   Linux / macOS:
@@ -67,37 +132,53 @@ The only thing you need that is NOT in this bundle is your age private key
   Replace the identity path with the actual path to your age private key.
 
 --------------------------------------------------------------------------------
-  STEP 4: EXTRACT THE DECRYPTED ARCHIVE
+  STEP 5: EXTRACT THE DECRYPTED ARCHIVE
 --------------------------------------------------------------------------------
+
+  The archive contents (db.sqlite3, icon_cache/, attachments/, ...) sit at
+  the top level. Extracting in the current directory would dump them in
+  among the bundle files. Extract into a fresh sub-directory instead:
 
   Linux / macOS:
 
-    tar xzf vw-data-backup-YYYY-MM-DD.tar.gz
+    mkdir vw-data-restore-YYYY-MM-DD
+    tar xzf vw-data-backup-YYYY-MM-DD.tar.gz -C vw-data-restore-YYYY-MM-DD
 
   Windows (PowerShell):
 
-    tar xzf vw-data-backup-YYYY-MM-DD.tar.gz
+    mkdir vw-data-restore-YYYY-MM-DD
+    tar xzf vw-data-backup-YYYY-MM-DD.tar.gz -C vw-data-restore-YYYY-MM-DD
 
-  Or use 7-Zip / WinRAR to extract the .tar.gz archive.
+  Or use 7-Zip / WinRAR pointed at vw-data-backup-YYYY-MM-DD.tar.gz with a
+  custom destination folder.
 
-  This restores the Vaultwarden data directory contents.
+  This restores the Vaultwarden data directory contents into the new
+  sub-directory you just created.
 
 --------------------------------------------------------------------------------
   NOTES
 --------------------------------------------------------------------------------
 
-  - Both Linux (amd64) and Windows (amd64) age binaries are included in
-    this bundle. Use whichever matches your operating system.
+  - Both Linux (amd64) and Windows (amd64) age + minisign binaries are
+    included. Use whichever matches your operating system.
 
-  - The manifest file records which age version was used and the SHA-256
-    checksums for both the encrypted archive and the included binaries.
+  - The manifest file records which age and minisign versions were used
+    and the SHA-256 checksums for the encrypted archive, the signature,
+    and every included binary.
 
-  - age uses X25519 public-key encryption. Any version of age can decrypt
-    files encrypted by any other version (for standard age1... keys).
+  - age uses X25519 public-key encryption. Any version of age can
+    decrypt files encrypted by any other version (for standard age1...
+    keys).
 
-  - For other OS/architecture builds, download from:
-    https://github.com/FiloSottile/age/releases
+  - minisign uses Ed25519 signatures. Any version of minisign can verify
+    a signature produced by any other version.
 
-  - For more information about age: https://github.com/FiloSottile/age
+  - For other OS/architecture builds:
+      age:      https://github.com/FiloSottile/age/releases
+      minisign: https://github.com/jedisct1/minisign/releases
+
+  - More information:
+      age:      https://github.com/FiloSottile/age
+      minisign: https://jedisct1.github.io/minisign/
 
 ================================================================================

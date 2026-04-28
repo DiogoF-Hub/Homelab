@@ -1,0 +1,4 @@
+filenames:
+  - /var/log/vaultwarden/vaultwarden.log
+labels:
+  type: vaultwarden

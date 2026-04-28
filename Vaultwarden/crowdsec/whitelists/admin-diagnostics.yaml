@@ -1,0 +1,27 @@
+# Vaultwarden's /admin/diagnostics page deliberately fires GETs that return
+# 400/401/403/404/etc to verify the server's error handlers work end-to-end.
+# CrowdSec's `crowdsecurity/http-admin-interface-probing` scenario reads
+# those (5+ admin endpoints returning 4xx in one second from one IP) as
+# textbook probing and bans the source. This whitelist drops the relevant
+# requests at the s02-enrich stage so scenarios never count them.
+#
+# Stage: s02-enrich (whitelists always live here)
+# Mounted via compose at /etc/crowdsec/parsers/s02-enrich/vaultwarden/...
+#
+# Field names assume the bunkerity/bunkerweb-logs parser populates
+# evt.Parsed.request the same way crowdsecurity/nginx-logs does (it does;
+# bunkerweb-logs is a child of nginx-logs). If `cscli alerts list` still
+# shows admin-interface-probing alerts after deploying this, check the
+# actual field name with:
+#   podman exec crowdsec cscli explain --file /var/log/bunkerweb/access.log -t nginx | head -40
+# and adjust the expression below.
+
+name: vaultwarden/admin-diagnostics-whitelist
+description: "Drop Vaultwarden /admin/diagnostics intentional 4xx probes before scenarios see them"
+whitelist:
+  reason: "vaultwarden /admin/diagnostics intentional 4xx tests"
+  expression:
+    # Anything under /admin/diagnostics/* (including /admin/diagnostics/http?code=...)
+    - "evt.Parsed.request startsWith '/admin/diagnostics'"
+    # The intentional 404 test endpoint VW also fires from the diagnostics page
+    - "evt.Parsed.request == '/admin/does-not-exist'"

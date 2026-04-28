@@ -1,4 +1,3 @@
-# Domain and email were replaced by test.domain.com
 Contact: mailto:test@domain.com
 Preferred-Languages: en, pt, fr
 Canonical: https://test.domain.com/.well-known/security.txt

@@ -4,10 +4,10 @@
 # IPs and user are changed from the original script
 
 # === CONFIGURATION ===
-VM_USER="mainuser"
+VM_USER="fetcher"
 VM_HOST="192.168.123.4"
 VM_PORT=2222
-SSH_KEY="/root/.ssh/mainuser_automation_rsa"
+SSH_KEY="/root/.ssh/fetcher_automation_rsa"
 
 RETENTION_DAYS=90
 TODAY=$(date +"%Y-%m-%d")
@@ -18,6 +18,7 @@ REMOTE_BASE_BACKUP="/srv/backups"
 REMOTE_BACKUP_LOG="${REMOTE_BASE_LOG}/backup/vault-backup-${TODAY}.log"
 REMOTE_DOCKER_LOG="${REMOTE_BASE_LOG}/docker/update-${TODAY}.log"
 REMOTE_SYSTEM_LOG="${REMOTE_BASE_LOG}/system/system-autoupdate-${TODAY}.log"
+REMOTE_MAIN_LOG="${REMOTE_BASE_LOG}/main/main-${TODAY}.log"
 REMOTE_BACKUP_FILE="${REMOTE_BASE_BACKUP}/vaultwarden-backup-bundle-${TODAY}.tar.gz"
 
 # Destination paths on TrueNAS
@@ -26,6 +27,7 @@ DEST_BACKUP_FILE="${DEST_MAIN}/Backups/vaultwarden"
 DEST_DOCKER_LOG="${DEST_MAIN}/Logs/vaultwarden/docker"
 DEST_BACKUP_LOG="${DEST_MAIN}/Logs/vaultwarden/backup"
 DEST_SYSTEM_LOG="${DEST_MAIN}/Logs/vaultwarden/system"
+DEST_MAIN_LOG="${DEST_MAIN}/Logs/vaultwarden/main"
 
 DEST_HETZNER_LOG_DIR="${DEST_MAIN}/Logs/vaultwarden/Hetzner"
 LOG_FILE="${DEST_HETZNER_LOG_DIR}/hetzner-upload-${TODAY}.log"
@@ -85,6 +87,7 @@ mkdir -p "$DEST_HETZNER_LOG_DIR"
         find "$DEST_BACKUP_FILE" -type f -name "*.tar.gz" -mtime +$RETENTION_DAYS -exec rm -f {} \;
         find "$DEST_DOCKER_LOG" -type f -name "*.log" -mtime +$RETENTION_DAYS -exec rm -f {} \;
         find "$DEST_SYSTEM_LOG" -type f -name "*.log" -mtime +$RETENTION_DAYS -exec rm -f {} \;
+        find "$DEST_MAIN_LOG" -type f -name "*.log" -mtime +$RETENTION_DAYS -exec rm -f {} \;
 
         find "$DEST_HETZNER_LOG_DIR" -type f -name "*.log" -mtime +$RETENTION_DAYS -exec rm -f {} \;
     }
@@ -94,6 +97,7 @@ mkdir -p "$DEST_HETZNER_LOG_DIR"
     copy_file "$REMOTE_BACKUP_FILE" "$DEST_BACKUP_FILE"
     copy_file "$REMOTE_DOCKER_LOG" "$DEST_DOCKER_LOG"
     copy_file "$REMOTE_SYSTEM_LOG" "$DEST_SYSTEM_LOG"
+    copy_file "$REMOTE_MAIN_LOG" "$DEST_MAIN_LOG"
 
     local_file_path="${DEST_BACKUP_FILE}/vaultwarden-backup-bundle-${TODAY}.tar.gz"
 

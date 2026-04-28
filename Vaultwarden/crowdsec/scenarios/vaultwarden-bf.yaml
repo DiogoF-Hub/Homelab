@@ -1,0 +1,65 @@
+# =============================================================================
+# CREDITS
+# Original scenarios by Dominic-Wagner (CrowdSec Hub author):
+#   https://app.crowdsec.net/hub/author/Dominic-Wagner/collections/vaultwarden
+#
+# Slightly adapted from the upstream versions for our setup — capacity /
+# leakspeed are tighter than the hub defaults to suit our 5-user homelab
+# (rationale below). The filter logic, log_type taxonomy, MITRE labels,
+# and overall design are Dominic-Wagner's — we just tuned the thresholds.
+# =============================================================================
+
+# vaultwarden bruteforce
+# Tightened from hub defaults (capacity 20, leakspeed 3m). Paired with
+# Vaultwarden's LOGIN_RATELIMIT_MAX_BURST=3 / 60s in the compose file —
+# attacker effectively gets ~6 password attempts before this scenario
+# overflows and bans for 4h. Legit users with a few typos drain the
+# bucket within ~25 minutes (5 events * 5m leakspeed) and never see a
+# ban. Bump capacity if false positives appear in cscli alerts.
+type: leaky
+name: Dominic-Wagner/vaultwarden-bf
+description: "Detect vaultwarden bruteforce"
+filter: "evt.Meta.log_type in ['vaultwarden_failed_auth', 'vaultwarden_failed_admin_auth', 'vaultwarden_failed_2fa_totp', 'vaultwarden_failed_2fa_email']"
+leakspeed: 5m
+capacity: 5
+groupby: evt.Meta.source_ip
+blackhole: 4h
+reprocess: true
+labels:
+  service: vaultwarden
+  behavior: "generic:bruteforce"
+  classification:
+    - attack.T1110
+  label: "Vaultwarden Bruteforce"
+  spoofable: 0
+  confidence: 3
+  remediation: true
+---
+# vaultwarden user-enum
+# Tightened from hub default (capacity 20). Distinct usernames is the
+# discriminator here — a normal user (and even a forgetful one) will
+# touch 1-2 distinct emails. An attacker enumerating accounts hits
+# many. Note Vaultwarden doesn't leak account existence in error
+# responses, so this scenario mostly catches the *pattern* of probing
+# rather than a successful enumeration. Long leakspeed (30m) protects
+# against patient time-spread enumeration sweeps.
+type: leaky
+name: Dominic-Wagner/vaultwarden-bf_user-enum
+description: "Detect vaultwarden user enum bruteforce"
+filter: evt.Meta.log_type == 'vaultwarden_failed_auth'
+groupby: evt.Meta.source_ip
+distinct: evt.Meta.username
+leakspeed: 30m
+capacity: 5
+blackhole: 4h
+reprocess: true
+labels:
+  service: vaultwarden
+  behavior: "generic:bruteforce"
+  classification:
+    - attack.T1589
+    - attack.T1110
+  label: "Vaultwarden User Enumeration"
+  spoofable: 0
+  confidence: 3
+  remediation: true
