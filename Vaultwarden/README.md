@@ -231,6 +231,7 @@ The image used in both compose flavors is the **`bunkerity/bunkerweb-all-in-one`
 | **CrowdSec bouncer** | `USE_CROWDSEC: yes`, `CROWDSEC_API: http://crowdsec:8080`, `CROWDSEC_MODE: stream`, `CROWDSEC_UPDATE_FREQUENCY: 15` | Polls CrowdSec LAPI every 15s for the active decisions list; enforces bans inline (returns 403). |
 | **Server header suppression** | `REMOVE_HEADERS: Server Via X-Powered-By X-AspNet-Version X-AspNetMvc-Version` | Removes server-identification headers. |
 | **Error-body passthrough** | `INTERCEPTED_ERROR_CODES: ""` | Empty override, BW does NOT replace upstream 4xx/5xx responses with branded HTML pages. Required so Vaultwarden's API JSON error bodies pass through to Bitwarden clients. |
+| **Allowed HTTP methods** | `ALLOWED_METHODS: "GET\|POST\|HEAD\|PUT\|PATCH\|DELETE\|OPTIONS"` | Override BW's default (`GET\|POST\|HEAD`). Vaultwarden's API uses PUT (cipher edit + soft-delete to trash via `/api/ciphers/<id>/delete`), PATCH, DELETE, and OPTIONS (CORS preflight from web vault + browser extensions). Without this override, every vault edit 405s at the nginx layer before ModSec or Vaultwarden ever sees the request. Pipe-separated (regex alternation, not commas/spaces). |
 
 ### **Custom configs (`bunkerweb/custom-configs/`)**
 
@@ -259,7 +260,7 @@ Three custom configs in `bunkerweb/custom-configs/` carry the CRS tuning:
 | File | Type / scope | Purpose |
 |------|--------------|---------|
 | `modsec-crs/paranoia.conf` | modsec-crs | Sets CRS's `tx.detection_paranoia_level` and `tx.blocking_paranoia_level`. Detection at **PL2**, blocking at **PL1** to start. `blocking_paranoia_level` gets bumped to PL2 once exclusions are stable at PL2 detection. |
-| `modsec-crs/exclusions-before-crs.conf` | modsec-crs (phase 1) | **Preferred location** for request-side exclusions (rule IDs <950). Already sets `tx.allowed_methods` to include PUT/PATCH/DELETE, required by the Vaultwarden API; CRS rule 911100 would otherwise block every vault edit. |
+| `modsec-crs/exclusions-before-crs.conf` | modsec-crs (phase 1) | **Preferred location** for request-side exclusions (rule IDs <950). Sets `tx.allowed_methods` to include PUT/PATCH/DELETE — a layered fallback at the ModSec layer. The actual upstream method gate is BunkerWeb's own `ALLOWED_METHODS` env-var (set in compose); this exclusion ensures that once `MODSECURITY_SEC_RULE_ENGINE` flips from `DetectionOnly` to `On`, CRS rule 911100 doesn't re-introduce a block on Vaultwarden's PUT/PATCH/DELETE traffic. |
 | `modsec/exclusions-after-crs.conf` | modsec (phase 3) | Response-side exclusions (rule IDs 95x / 98x). Files ship with commented templates for the common Vaultwarden false positives, uncomment them only after the matching rule actually fires in `modsec_audit.log`. |
 
 ### Tuning workflow
@@ -282,7 +283,7 @@ This section will grow as false positives are identified and exclusions land. Ea
 
 | Rule ID | Phase | Trigger | Reason kept |
 |---------|-------|---------|-------------|
-| 911100 | 1 (request) | Vaultwarden API uses `PUT` / `PATCH` / `DELETE` for vault edits and item deletes; CRS default `tx.allowed_methods` is `GET HEAD POST OPTIONS`. | Without this, every cipher edit returns 403 from the WAF. |
+| 911100 | 1 (request) | Vaultwarden API uses `PUT` / `PATCH` / `DELETE` for vault edits and item deletes; CRS default `tx.allowed_methods` is `GET HEAD POST OPTIONS`. | Preemptive: BW's `ALLOWED_METHODS` plugin is today's upstream method gate (set in compose, returns 405 if violated). This ModSec-layer exclusion ensures that once the engine flips from `DetectionOnly` to `On`, rule 911100 doesn't re-introduce a 403 block on PUT/PATCH/DELETE. |
 | _(more to come)_ | | | |
 
 ### When the audit log is too noisy

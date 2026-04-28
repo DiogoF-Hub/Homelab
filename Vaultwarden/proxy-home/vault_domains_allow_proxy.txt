@@ -123,6 +123,14 @@ dl.google.com
 packages.wazuh.com
 
 # ================================
+# Healthchecks.io — backup deadman's switch
+# ================================
+# Pinged by main.sh after a successful nightly backup; see lib.sh DEADMAN_URL
+# and ideas.md #2. Without this, Squid silently drops the ping and the
+# monitor would alert daily despite the backup running fine.
+hc-ping.com
+
+# ================================
 # Your services
 # ================================
 test.example.com

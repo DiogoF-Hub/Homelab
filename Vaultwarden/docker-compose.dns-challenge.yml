@@ -107,6 +107,14 @@ services:
       # through untouched (clients parse them).
       INTERCEPTED_ERROR_CODES: ""
 
+      # Vaultwarden API uses PUT (cipher edit + soft-delete to trash via
+      # /api/ciphers/<id>/delete), PATCH, DELETE, and OPTIONS (CORS preflight
+      # from web vault + browser extensions). BunkerWeb's default
+      # ALLOWED_METHODS is GET|POST|HEAD, which 405s every vault edit at the
+      # nginx layer before ModSec or Vaultwarden ever sees the request.
+      # Pipe-separated (regex alternation, not commas/spaces).
+      ALLOWED_METHODS: "GET|POST|HEAD|PUT|PATCH|DELETE|OPTIONS"
+
       # Country blacklist
       BLACKLIST_COUNTRY: "CN RU KP IR SY CU VE BY"
 
