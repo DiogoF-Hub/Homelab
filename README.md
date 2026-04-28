@@ -1,6 +1,6 @@
 # Homelab
 
-This repository contains my personal **homelab configurations and scripts** for services like **Vaultwarden**, **Pi-hole**, and **custom HTTPS certificate generation**. It includes everything from Docker Compose files to automation scripts that make deploying, updating, and maintaining these services much easier.
+This repository contains my personal **homelab configurations and scripts** for services like **Vaultwarden**, **Pi-hole**, and **custom HTTPS certificate generation**. It includes everything from Docker / Podman Compose files to automation scripts that make deploying, updating, and maintaining these services much easier.
 
 The goal is to **share my setup publicly** so others can learn, adapt, or get inspiration for their own homelab environments. The only thing I kindly ask is that if you find something that could improve security or make the setup better, please let me know so I can learn and improve as well.
 
@@ -20,35 +20,53 @@ Homelab/
 │   ├── manual_domains_block.txt
 │   ├── mycustom_list.txt
 │   ├── root_crontab.txt
-│   ├── start-containers.sh
+│   └── start-containers.sh
 │
 ├── Vaultwarden/
 │   ├── .env.template
-│   ├── Caddyfile
-│   ├── DECRYPT.txt
 │   ├── README.md
-│   ├── certbot.conf
-│   ├── deploy-hook.sh
-│   ├── docker-compose.yml
-│   ├── main.sh
-│   ├── podman_compose_aliases.sh
+│   ├── REBUILD.md
+│   ├── DECRYPT.txt
+│   ├── ideas.md
+│   ├── docker-compose.dns-challenge.yml      # production (Cloudflare Tunnel + ACME DNS-01)
+│   ├── docker-compose.http-challenge.yml     # alternate (direct host ports + ACME HTTP-01)
 │   ├── poduser_crontab.txt
-│   ├── robots.txt
 │   ├── root_crontab.txt
-│   ├── security.txt
-│   ├── setup-age.sh
-│   ├── squid.conf
-│   ├── start-containers.sh
-│   ├── truenas-script.sh
-│   ├── vault_domains_allow_proxy.txt
+│   ├── bunkerweb/                            # mounted into the BunkerWeb container
+│   │   ├── robots.txt
+│   │   ├── security.txt
+│   │   └── custom-configs/                   # http / server-http / modsec / modsec-crs overlays
+│   ├── crowdsec/                             # mounted into the CrowdSec container
+│   │   ├── acquis.d/                         # log acquisition (BunkerWeb + Vaultwarden)
+│   │   ├── parsers/                          # custom Vaultwarden log parser
+│   │   ├── scenarios/                        # tightened bruteforce + user-enum scenarios
+│   │   └── whitelists/                       # admin-diagnostics false-positive drop
+│   ├── proxy-home/                           # targets the separate proxy-home VM
+│   │   ├── docker-compose.yml                # adguard/dnsproxy (DNS gateway, DoH upstream)
+│   │   ├── squid.conf
+│   │   └── vault_domains_allow_proxy.txt
+│   └── scripts/
+│       ├── root_scripts/                     # nightly orchestrator + phase scripts
+│       │   ├── lib.sh
+│       │   ├── main.sh
+│       │   ├── backup.sh
+│       │   ├── docker-update.sh
+│       │   ├── system-update.sh
+│       │   └── reboot.sh
+│       ├── setups_scripts/                   # one-time installers (age + minisign pinning)
+│       │   ├── setup-age.sh
+│       │   └── setup-minisign.sh
+│       ├── poduser_scripts/
+│       │   └── start-containers.sh
+│       └── truenas_scripts/
+│           └── truenas-script.sh
 │
 ├── HTTPS Generator/
 │   ├── README.md
-│   ├── generate_cert.sh
-│   ├── openssl.cnf
+│   └── generate_cert.sh
 │
 └── Tailscale Windows VPN on demand/
-    ├── README.md
+    └── README.md                             # migrated to a dedicated repo (read-only reference)
 ```
 
 ---
@@ -60,30 +78,48 @@ Homelab/
 * **Features**
 
   * Network-wide ad and tracker blocking
-  * DNS over HTTPS (DoH) support with Cloudflare
-  * Custom blocklists and manual domain blocking
-  * Cookie consent platform whitelist to prevent banner breakage
+  * DNS-over-HTTPS (DoH) to Cloudflare Family via `adguard/dnsproxy`
+  * HTTPS-only web interface on port 443
+  * Custom blocklists, manual domain blocking, and a cookie-consent platform whitelist to prevent banner breakage
 * **Scripts**
 
-  * `main.sh` for maintenance tasks
-  * `start-containers.sh` to bring services up
-  * `root_crontab.txt` for automated scheduling
+  * `main.sh` for daily maintenance (gravity update → stop containers → image update → system update → reboot)
+  * `start-containers.sh` to bring services up at boot
+  * `root_crontab.txt` documenting the cron entries
 
 ---
 
 ### **Vaultwarden**
 
-* **Features**
+Self-hosted password manager running on a **dedicated Debian 13 VM in Proxmox**, with a dedicated NIC bound to **VLAN-DMZ**. Containers run under **rootless Podman** as a non-privileged `poduser`. The reverse-proxy / WAF / bouncer layer was migrated from **Caddy + Certbot + a Cloudflare Workers bouncer (host-installed CrowdSec)** to a single **BunkerWeb** all-in-one container, with CrowdSec also moved into a container.
 
-  * Self-hosted password manager
-  * Reverse-proxied with **Caddy** and HTTPS enabled
-  * Cloudflare Tunnel-ready configuration
-* **Scripts**
+* **Edge & proxy**
 
-  * `main.sh` for updates and maintenance
-  * `start-containers.sh` for container startup
-  * `truenas-script.sh` for automated backups to TrueNAS
-  * `root_crontab.txt` for automated tasks
+  * **Cloudflare Tunnel (`cloudflared`)** as the public-facing edge — no host ports exposed; all inbound traffic arrives via an outbound-initiated tunnel
+  * **BunkerWeb** handles ACME (Let's Encrypt DNS-01), TLS termination, security headers, country / user-agent blacklists, rate limiting, ModSecurity / CRS WAF, and the CrowdSec bouncer in one place
+  * Two mutually-exclusive compose flavors: `docker-compose.dns-challenge.yml` (canonical / production, behind Cloudflare Tunnel) and `docker-compose.http-challenge.yml` (alternate, direct host-port exposure with ACME HTTP-01)
+* **Intrusion prevention**
+
+  * **Containerized CrowdSec** with custom Vaultwarden parsers, tightened bruteforce + user-enumeration scenarios, and an admin-diagnostics whitelist
+  * Bans enforced **inline at BunkerWeb** (returns 403) — no separate Cloudflare Worker
+* **Outbound isolation**
+
+  * Egress is default-deny on the VM and routed through a separate **`proxy-home` VM** which provides a unified outbound proxy:
+
+    * **Squid** for HTTP / HTTPS egress, enforced against a domain allowlist (`vault_domains_allow_proxy.txt`)
+    * **`adguard/dnsproxy`** as a DNS gateway for the VM, DoH-encrypted upstream to Cloudflare Family and fully logged
+* **Backups & redundancy**
+
+  * Daily encrypted backups via **[age](https://github.com/FiloSottile/age)** (pinned binaries, public-key-only on the VM) and cryptographically signed with **[minisign](https://jedisct1.github.io/minisign/)** for tamper detection
+  * Automated off-site replication to **TrueNAS** (local) and a **Hetzner Storage Box** (cloud)
+* **Automation**
+
+  * `scripts/root_scripts/main.sh` orchestrates the nightly cycle: stop containers → encrypted + signed backup → image update → full system update → unconditional reboot, with per-phase logs and 30-day retention
+  * `scripts/setups_scripts/` pins the `age` and `minisign` binaries during VM rebuild / version bumps
+  * `scripts/poduser_scripts/start-containers.sh` runs at `@reboot` to bring the stack back up
+  * `scripts/truenas_scripts/truenas-script.sh` runs on the TrueNAS host to pull backups + logs and push them to Hetzner
+
+See [`Vaultwarden/README.md`](./Vaultwarden/README.md) for the full deployment, log-pipeline, and firewall documentation, [`Vaultwarden/REBUILD.md`](./Vaultwarden/REBUILD.md) for the VM rebuild procedure, and [`Vaultwarden/DECRYPT.txt`](./Vaultwarden/DECRYPT.txt) for backup-restore instructions.
 
 ---
 
@@ -91,37 +127,23 @@ Homelab/
 
 * **Features**
 
-  * Creates a **root CA** for signing device certificates
-  * Generates **device-specific certificates** with proper SAN support
+  * Creates a **root CA** (ECDSA P-384, 20-year validity) for signing device certificates
+  * Generates **device-specific certificates** (825-day validity for iOS compatibility) with proper SAN support
 
-    * Hostname, `.local`, `.localdomain`, and optional **Tailscale domains**
-    * Optional IP entries
-  * Certificates are **iOS-compatible**, respecting the 825-day limit
+    * Hostname, `.localdomain`, optional **Tailscale tailnet** entries
+    * Optional IP addresses
+  * Single self-contained script — no external `openssl.cnf`; the configuration is generated inline at runtime
+  * Configuration cached in `generator.conf` (gitignored)
 * **Usage**
 
   * `generate_cert.sh` to create certificates for services or devices
-  * `openssl.cnf` template automatically customized by the script
   * Root CA (`rootCA.pem`) can be installed on devices (rename to `.crt` if needed)
 
 ---
 
 ### **Tailscale Windows VPN On-Demand**
 
-* **Features**
-
-  * Automatic Tailscale VPN connection based on network detection
-  * Disconnects VPN when on trusted home networks (configurable SSIDs)
-  * Connects VPN automatically on untrusted/public networks
-  * Silent background operation using Windows Task Scheduler
-* **Why This Exists**
-
-  * The Windows Tailscale client doesn't natively support network-based auto-connection
-  * This custom solution fills that gap using PowerShell and Task Scheduler
-* **Scripts**
-
-  * `tailscale.ps1` for SSID detection and Tailscale control
-  * `tailscale-launcher.vbs` for silent execution (no console window)
-  * `Task Scheduler.xml` for automatic triggering on network changes
+This setup has been **migrated to its own dedicated repository**; the folder here is kept only as a read-only pointer. See [`Tailscale Windows VPN on demand/README.md`](./Tailscale%20Windows%20VPN%20on%20demand/README.md) for the link.
 
 ---
 
@@ -129,7 +151,7 @@ Homelab/
 
 * Keep configurations version-controlled and organized
 * Share a reproducible and secure setup for self-hosted services
-* Create a well-documented setup that is easy to manage and evolve as I learn and improve my homelab.
+* Maintain well-documented automation that's easy to manage and evolve as the homelab grows
 
 ---
 
