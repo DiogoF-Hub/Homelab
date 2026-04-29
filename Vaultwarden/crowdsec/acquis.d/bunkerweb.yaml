@@ -1,6 +1,15 @@
+# BunkerWeb access + error logs route to the bunkerity/bunkerweb-logs parser.
+#
+# modsec_audit.log is INTENTIONALLY NOT included here. The upstream
+# crowdsecurity/modsecurity parser only handles inline modsec messages
+# embedded in nginx error.log (apache/nginx error-log grok patterns), NOT
+# the dedicated audit log file in any format (Native or JSON). Feeding
+# modsec_audit.log to CrowdSec was tested and produced 100% unparsed — see
+# bunkerweb/custom-configs/modsec/audit-log-format.conf for context.
+# CrowdSec already gets modsec signal indirectly because BunkerWeb writes
+# inline modsec warnings to error.log, which bunkerity/bunkerweb-logs sees.
 filenames:
   - /var/log/bunkerweb/access.log
   - /var/log/bunkerweb/error.log
-  - /var/log/bunkerweb/modsec_audit.log
 labels:
   type: bunkerweb

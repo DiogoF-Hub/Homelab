@@ -138,6 +138,10 @@ services:
       # Change to "on" once you've reviewed modsec_audit.log and tuned exclusions
       MODSECURITY_SEC_RULE_ENGINE: "DetectionOnly"
       MODSECURITY_SEC_AUDIT_ENGINE: "RelevantOnly"
+      # NOTE: audit log format (JSON vs Native) is NOT exposed as a BW env
+      # var — the equivalent libmodsecurity directive `SecAuditLogFormat`
+      # is set via a custom config at
+      # bunkerweb/custom-configs/modsec/audit-log-format.conf instead.
 
       # CrowdSec bouncer
       USE_CROWDSEC: "yes"
