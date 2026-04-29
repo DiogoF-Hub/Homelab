@@ -3,3 +3,4 @@ CLAUDE.md
 .github
 generator.conf
 .DS_Store
+*.local.md
