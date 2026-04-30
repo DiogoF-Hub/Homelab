@@ -464,7 +464,7 @@ HTTP/HTTPS proxy and §Outbound DNS gateway for the full setup.
 Things to verify on the proxy-home VM before continuing:
 
 - Squid running, allowlist applied, port 3128 reachable from VLAN-DMZ.
-- dnsproxy container running (`docker logs dnsproxy` should show
+- dnsproxy container running (`podman logs dnsproxy` should show
   `listening on 0.0.0.0:53`).
 - `systemd-resolved`'s stub listener on `127.0.0.53:53` is **disabled**
   on proxy-home (via `DNSStubListener=no`, see README §Host
@@ -620,7 +620,7 @@ mirror in `/etc/apt/sources.list`.
 sudo adduser --disabled-password --gecos "" poduser
 sudo apt install -y podman podman-compose uidmap slirp4netns fuse-overlayfs
 sudo loginctl enable-linger poduser
-sudo -u poduser -H bash -c 'podman info'   # should run without root, no errors
+sudo su - poduser -c 'podman info'   # should run without root, no errors; exit back to your previous shell after
 ```
 
 Add the `pcup` / `pcdown` helpers system-wide so any user managing the
@@ -866,7 +866,7 @@ scp -i /root/.ssh/fetcher_automation_rsa -P 2222 \
 ## Phase 10, Repo checkout (poduser side) + `.env`
 
 ```bash
-sudo -u poduser -H bash
+sudo su - poduser
 cd ~
 git clone <repo-url> vault                   # use this repo's clone URL (or your own fork). NOT 'vaultwarden', the dir name must match COMPOSE_DIR's basename in lib.sh
 cd vault/bunkerweb
@@ -1118,7 +1118,9 @@ should pick it up on the next 15-second poll, and you should get a
 403. Unban via:
 
 ```bash
-sudo -u poduser podman exec crowdsec cscli decisions delete --ip <your-ip>
+sudo su - poduser
+podman exec crowdsec cscli decisions delete --ip <your-ip>
+exit   # back to your previous shell
 ```
 
 ## Phase 17, ModSecurity / CRS tuning (still WIP)
