@@ -70,8 +70,8 @@ fi
 echo "[OK] Downloaded Windows binary"
 
 # === EXTRACT ===
-# Using find to locate the binaries inside the extracted archives —
-# keeps us resilient to upstream changing the internal directory layout
+# Using find to locate the binaries inside the extracted archives keeps us
+# resilient to upstream changing the internal directory layout
 # (setup-minisign.sh hit this with 0.12). Linux + Windows builds are
 # disambiguated by extracting into separate temp subdirs.
 echo "[->] Extracting binaries..."
@@ -88,7 +88,7 @@ cp "$LIN_AGE"    "${VERSION_DIR}/age"
 cp "$LIN_KEYGEN" "${VERSION_DIR}/age-keygen"
 chmod +x "${VERSION_DIR}/age" "${VERSION_DIR}/age-keygen"
 
-# Windows — using unzip if available, otherwise Python as fallback
+# Windows: unzip if available, otherwise Python as fallback
 mkdir -p "${TMP_DIR}/win"
 if command -v unzip >/dev/null 2>&1; then
     unzip -q -o "${TMP_DIR}/${WINDOWS_ZIP}" -d "${TMP_DIR}/win"

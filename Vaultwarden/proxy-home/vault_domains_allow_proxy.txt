@@ -16,7 +16,7 @@ acme-v02.api.letsencrypt.org
 acme-staging-v02.api.letsencrypt.org
 # OCSP responders (r10/r11 = RSA, e5/e6 = ECDSA) and issuer CA chain
 # (x1/x2.c.lencr.org). Needed because BunkerWeb does its own ACME + OCSP
-# stapling on every served cert — not handled externally by certbot anymore.
+# stapling on every served cert; not handled externally by certbot anymore.
 .lencr.org
 
 # ================================
@@ -71,25 +71,25 @@ go.googlesource.com
 pkg.go.dev
 
 # ================================
-# BunkerWeb — project infrastructure
+# BunkerWeb: project infrastructure
 # ================================
-# assets.bunkerity.com — static assets / blacklist feeds fetched by the scheduler.
-# api.bunkerweb.io    — anonymous update-check + telemetry ping on startup.
+# assets.bunkerity.com: static assets / blacklist feeds fetched by the scheduler.
+# api.bunkerweb.io   : anonymous update-check + telemetry ping on startup.
 # Leading dot = apex + all subdomains, intentional so we don't churn this list
 # every time BunkerWeb adds a new subdomain.
 .bunkerity.com
 .bunkerweb.io
 
 # ================================
-# BunkerWeb — GeoIP database
+# BunkerWeb: GeoIP database
 # ================================
 # DB-IP Lite MMDB backs the country plugin (BLACKLIST_COUNTRY). Refreshed
-# weekly by the BunkerWeb scheduler. Not MaxMind — no license key needed.
+# weekly by the BunkerWeb scheduler. Not MaxMind, no license key needed.
 # Apex is hit during the redirect chain, so we allow the whole zone.
 .db-ip.com
 
 # ================================
-# BunkerWeb — Tor exit node list
+# BunkerWeb: Tor exit node list
 # ================================
 # www.dan.me.uk publishes the canonical Tor exit list. Pulled by BunkerWeb
 # when the default blacklist is enabled.
@@ -98,12 +98,12 @@ www.dan.me.uk
 # ================================
 # CrowdSec hub + console
 # ================================
-# Covers api.crowdsec.net, hub-cdn.crowdsec.net, app.crowdsec.net — used for
+# Covers api.crowdsec.net, hub-cdn.crowdsec.net, app.crowdsec.net; used for
 # collection installs, community blocklist sync, and console enrollment.
 .crowdsec.net
 
 # ================================
-# Vaultwarden — Bitwarden icon service
+# Vaultwarden: Bitwarden icon service
 # ================================
 # Required because ICON_SERVICE=bitwarden is set in the compose files. Single
 # known host instead of Vaultwarden fetching favicons from every arbitrary
@@ -118,12 +118,12 @@ packagecloud.io
 dl.google.com
 
 # ================================
-# Wazuh agent — apt repo for install + updates
+# Wazuh agent: apt repo for install + updates
 # ================================
 packages.wazuh.com
 
 # ================================
-# Healthchecks.io — backup deadman's switch
+# Healthchecks.io: backup deadman's switch
 # ================================
 # Pinged by main.sh after a successful nightly backup; see lib.sh DEADMAN_URL
 # and ideas.md #2. Without this, Squid silently drops the ping and the

@@ -5,7 +5,7 @@
 # Old versions are never removed, allowing you to keep multiple versions
 # side by side.
 #
-# Parity with setup-age.sh — same layout, same flow, same
+# Parity with setup-age.sh: same layout, same flow, same
 # "update MINISIGN_VERSION in lib.sh" ending.
 #
 # Usage:
@@ -23,13 +23,13 @@ GITHUB_RELEASE_URL="https://github.com/jedisct1/minisign/releases/download"
 # === RESOLVE VERSION ===
 if [ -n "${1:-}" ]; then
     VERSION="$1"
-    # Normalize: minisign tags are plain "0.12" (no leading "v") — strip it if present
+    # Normalize: minisign tags are plain "0.12" (no leading "v"), strip it if present
     VERSION="${VERSION#v}"
     echo "[->] Using specified version: $VERSION"
 else
     echo "[->] No version specified, fetching latest from GitHub..."
     VERSION=$(curl -sf "$GITHUB_API_URL" | grep '"tag_name"' | head -1 | sed 's/.*"tag_name": *"//;s/".*//')
-    # Strip leading "v" if the tag happens to have one (defensive — jedisct1's
+    # Strip leading "v" if the tag happens to have one (defensive; jedisct1's
     # tags are plain numbers today, but costs nothing).
     VERSION="${VERSION#v}"
     if [ -z "$VERSION" ]; then
@@ -78,8 +78,8 @@ fi
 echo "[OK] Downloaded Windows zip"
 
 # === EXTRACT ===
-# Using find to locate the binaries inside the extracted archives —
-# upstream has shifted internal directory names in the past (e.g. 0.12
+# Using find to locate the binaries inside the extracted archives.
+# Upstream has shifted internal directory names in the past (e.g. 0.12
 # changed the win64 zip layout, breaking the prior hard-coded path).
 # find -type f -name minisign(.exe) -path '*linux*'/'*win*' is enough
 # to disambiguate between Linux and Windows builds.
@@ -94,7 +94,7 @@ LIN_BIN=$(find "${TMP_DIR}/linux" -type f -name minisign | head -1 || true)
 cp "$LIN_BIN" "${VERSION_DIR}/minisign"
 chmod +x "${VERSION_DIR}/minisign"
 
-# Windows — using unzip if available, otherwise Python as fallback
+# Windows: unzip if available, otherwise Python as fallback
 mkdir -p "${TMP_DIR}/win"
 if command -v unzip >/dev/null 2>&1; then
     unzip -q -o "${TMP_DIR}/${WINDOWS_ZIP}" -d "${TMP_DIR}/win"

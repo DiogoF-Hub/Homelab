@@ -150,7 +150,7 @@ CLOUDFLARE_API_TOKEN=''        # Scoped Cloudflare token for DNS-01 challenges
 CLOUD_TOKEN=''                 # cloudflared tunnel token
 
 # --- CrowdSec ---
-CROWDSEC_BOUNCER_KEY=''        # API key shared between CrowdSec LAPI and BunkerWeb's bouncer plugin
+CROWDSEC_BOUNCER_KEY=''        # API key shared between CrowdSec LAPI and BunkerWeb's bouncer plugin (generate with `openssl rand -base64 48`)
 CROWDSEC_ENROLL_KEY=''         # Console-enrollment key for app.crowdsec.net (one-time)
 
 # --- Vaultwarden ---
@@ -260,7 +260,7 @@ Three custom configs in `bunkerweb/custom-configs/` carry the CRS tuning:
 | File | Type / scope | Purpose |
 |------|--------------|---------|
 | `modsec-crs/paranoia.conf` | modsec-crs | Sets CRS's `tx.detection_paranoia_level` and `tx.blocking_paranoia_level`. Detection at **PL2**, blocking at **PL1** to start. `blocking_paranoia_level` gets bumped to PL2 once exclusions are stable at PL2 detection. |
-| `modsec-crs/exclusions-before-crs.conf` | modsec-crs (phase 1) | **Preferred location** for request-side exclusions (rule IDs <950). Sets `tx.allowed_methods` to include PUT/PATCH/DELETE — a layered fallback at the ModSec layer. The actual upstream method gate is BunkerWeb's own `ALLOWED_METHODS` env-var (set in compose); this exclusion ensures that once `MODSECURITY_SEC_RULE_ENGINE` flips from `DetectionOnly` to `On`, CRS rule 911100 doesn't re-introduce a block on Vaultwarden's PUT/PATCH/DELETE traffic. |
+| `modsec-crs/exclusions-before-crs.conf` | modsec-crs (phase 1) | **Preferred location** for request-side exclusions (rule IDs <950). Sets `tx.allowed_methods` to include PUT/PATCH/DELETE; a layered fallback at the ModSec layer. The actual upstream method gate is BunkerWeb's own `ALLOWED_METHODS` env-var (set in compose); this exclusion ensures that once `MODSECURITY_SEC_RULE_ENGINE` flips from `DetectionOnly` to `On`, CRS rule 911100 doesn't re-introduce a block on Vaultwarden's PUT/PATCH/DELETE traffic. |
 | `modsec/exclusions-after-crs.conf` | modsec (phase 3) | Response-side exclusions (rule IDs 95x / 98x). Files ship with commented templates for the common Vaultwarden false positives, uncomment them only after the matching rule actually fires in `modsec_audit.log`. |
 
 ### Tuning workflow
@@ -287,7 +287,7 @@ This section will grow as false positives are identified and exclusions land. Ea
 | 942120 | 2 (request body) | Base64 padding `==` in encrypted cipher fields (`ARGS:json.login.password`, `json.login.username`, `json.login.fido2Credentials.*.counter`, etc.) on `POST/PUT /api/ciphers[/<uuid>]` is matched as a SQL operator. | Verified from `modsec_audit.log` (7 hits / 4 days). Without this, every cipher add/edit emits an `SQL Injection Attack: SQL Operator Detected` warning. Scoped narrowly to `/api/ciphers`. |
 | 942430 | 2 (request body) | JWT `access_token` query arg on `/notifications/hub` (Bitwarden WebSocket live-sync) contains many `.`, `-`, `_`, `=` chars, exceeding the rule's 12-special-character threshold. | Verified from `modsec_audit.log` (10 hits / 4 days). Fires on every client connect/refresh. Scoped to `/notifications/hub`. |
 | 932240 | 2 (request body) | Argon2id-hashed admin_token (`$argon2id$v=19$m=...$<base64>$<base64>`) trips the rule's digit/quote/digit pattern on `POST /admin/config`. | Verified from `modsec_audit.log` (4 hits / 4 days). Scoped narrowly to `/admin/config`; other 932xxx RCE rules still apply on the same endpoint. |
-| 953101 | 4 (response body) | Vaultwarden's English `/locales/<lang>/messages.json` legitimately contains the literal phrase "file size is" in i18n error messages, which 953101 looks for as a PHP error-string signature. | Verified from `modsec_audit.log` (4 hits / 4 days). Vaultwarden is Rust, not PHP — rule is structurally an FP for this app. Scoped to `/locales/`. Lives in `exclusions-after-crs.conf`. |
+| 953101 | 4 (response body) | Vaultwarden's English `/locales/<lang>/messages.json` legitimately contains the literal phrase "file size is" in i18n error messages, which 953101 looks for as a PHP error-string signature. | Verified from `modsec_audit.log` (4 hits / 4 days). Vaultwarden is Rust, not PHP, so the rule is structurally an FP for this app. Scoped to `/locales/`. Lives in `exclusions-after-crs.conf`. |
 | _(more to come)_ | | | |
 
 ### When the audit log is too noisy

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# system-update.sh — apt update / upgrade / dist-upgrade / autoremove /
+# system-update.sh: apt update / upgrade / dist-upgrade / autoremove /
 # clean on the VM. Ensures unattended-upgrades is installed + enabled so
 # security patches still land between manual runs. Preserves sshd_config
 # on openssh-server upgrades (UCF_FORCE_CONFFOLD=1) so an unattended run
@@ -10,10 +10,10 @@
 # Called from main.sh:   /root/vault/system-update.sh
 #
 # Exit codes (see EXIT_CODE_DESC in lib.sh):
-#   30 — dpkg --configure -a failed
-#   31 — apt-get update failed
-#   32 — apt-get upgrade failed
-#   33 — apt-get dist-upgrade failed
+#   30: dpkg --configure -a failed
+#   31: apt-get update failed
+#   32: apt-get upgrade failed
+#   33: apt-get dist-upgrade failed
 
 set -euo pipefail
 source "$(dirname "$(readlink -f "$0")")/lib.sh"
@@ -54,7 +54,7 @@ apt-get update -y >> "$PHASE_LOG" 2>&1 \
 log "ensuring unattended-upgrades is installed + enabled"
 if ! dpkg -s unattended-upgrades >/dev/null 2>&1; then
     apt-get install -y unattended-upgrades >> "$PHASE_LOG" 2>&1 \
-        || warn "failed to install unattended-upgrades — continuing"
+        || warn "failed to install unattended-upgrades, continuing"
 fi
 dpkg-reconfigure -f noninteractive unattended-upgrades >> "$PHASE_LOG" 2>&1 || true
 systemctl enable --now unattended-upgrades.service apt-daily.timer apt-daily-upgrade.timer \
@@ -69,7 +69,7 @@ systemctl enable --now unattended-upgrades.service apt-daily.timer apt-daily-upg
 log "upgrading openssh-server (keeping existing config)"
 UCF_FORCE_CONFFOLD=1 apt-get install --only-upgrade openssh-server -y \
     >> "$PHASE_LOG" 2>&1 \
-    || warn "openssh-server upgrade had issues — review log"
+    || warn "openssh-server upgrade had issues, review log"
 
 # --- main upgrades --------------------------------------------------------
 

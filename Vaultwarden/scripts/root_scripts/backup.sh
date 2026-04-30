@@ -1,17 +1,17 @@
 #!/usr/bin/env bash
 #
-# backup.sh — tar /srv/vw-data, encrypt with age, sign with minisign (if
+# backup.sh: tar /srv/vw-data, encrypt with age, sign with minisign (if
 # enabled), package into a self-contained bundle, apply retention.
 #
 # Runnable standalone:   sudo /root/vault/backup.sh
 # Called from main.sh:   /root/vault/backup.sh
 #
 # Exit codes:
-#   10 — age prerequisites missing
-#   11 — tar failed
-#   12 — age encryption failed
-#   13 — minisign prerequisites missing or signing failed
-#   14 — bundle creation failed
+#   10: age prerequisites missing
+#   11: tar failed
+#   12: age encryption failed
+#   13: minisign prerequisites missing or signing failed
+#   14: bundle creation failed
 
 set -euo pipefail
 source "$(dirname "$(readlink -f "$0")")/lib.sh"
@@ -40,7 +40,7 @@ verify_age_prereqs
 if $SIGN_BACKUPS; then
     verify_minisign_prereqs
 else
-    warn "SIGN_BACKUPS=false — bundle will NOT be signed. Set it to true once minisign is configured."
+    warn "SIGN_BACKUPS=false, bundle will NOT be signed. Set it to true once minisign is configured."
 fi
 
 # --- stop containers (idempotent) -----------------------------------------
@@ -168,7 +168,7 @@ rm -f "$ARCHIVE_PATH" "$ENCRYPTED_ARCHIVE" "$SIGNATURE_FILE" "$MANIFEST" \
 # --- check for newer upstream releases (informational only) ---------------
 #
 # Query both GitHub APIs, then emit one tightly-grouped status block so the
-# result is easy to scan at a glance — especially on a phone screen. Status
+# result is easy to scan at a glance, especially on a phone screen. Status
 # markers in a fixed column ([OK] / [!!] / [??]) make any non-OK row jump
 # out from the vertical strip.
 

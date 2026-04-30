@@ -3,7 +3,7 @@
 This folder contains a **tool to generate HTTPS certificates** signed by your own root Certificate Authority (CA).
 It is ideal for securing services in a homelab environment, with full **Subject Alternative Name (SAN)** support, including IP addresses, `.localdomain`, and **Tailscale tailnet domains**.
 
-The script is **self-contained** — only the single `generate_cert.sh` file is needed. It handles configuration, root CA creation, and device certificate generation.
+The script is **self-contained**: only the single `generate_cert.sh` file is needed. It handles configuration, root CA creation, and device certificate generation.
 
 Device certificates are **adapted for iOS compatibility**, which enforces a maximum certificate lifetime of **825 days** and requires proper SAN entries.
 
@@ -55,8 +55,8 @@ You will be prompted for:
 | City | `Washington` | |
 | Organization | `Homelab` | |
 | Root CA name | `Homelab Root CA` | |
-| Local domain suffix | `localdomain` | e.g., `home.lan`, `local`, `internal` — leave blank to disable |
-| Tailscale suffix | *(empty)* | e.g., `taile2aadd.ts.net` — leave blank to disable |
+| Local domain suffix | `localdomain` | e.g., `home.lan`, `local`, `internal`; leave blank to disable |
+| Tailscale suffix | *(empty)* | e.g., `taile2aadd.ts.net`; leave blank to disable |
 
 Settings are saved to `generator.conf`. Run `./generate_cert.sh setup` at any time to change them.
 
@@ -70,8 +70,8 @@ Settings are saved to `generator.conf`. Run `./generate_cert.sh setup` at any ti
 
 This creates:
 
-* `rootCA.key` — Keep this file private and secure.
-* `rootCA.pem` — This **is the root certificate** to be installed on all devices.
+* `rootCA.key`: keep this file private and secure.
+* `rootCA.pem`: this **is the root certificate** to be installed on all devices.
   * Optionally rename it to `rootCA.crt` for easier installation.
   * Valid for **20 years**.
 
@@ -166,6 +166,6 @@ certs/<device-hostname>/
 * Always **keep your `rootCA.key` private**; if compromised, regenerate a new CA.
 * Distribute `rootCA.pem` or `rootCA.crt` to all devices that need to trust your certificates.
 * Re-run the script whenever you need to issue a new certificate or update SAN entries.
-* If you regenerate the root CA, **all existing device certificates become untrusted** — you will need to re-trust the new root CA on every device and regenerate device certificates.
-* `generator.conf` contains your settings — do not commit it if it has sensitive info.
+* If you regenerate the root CA, **all existing device certificates become untrusted**; you will need to re-trust the new root CA on every device and regenerate device certificates.
+* `generator.conf` contains your settings; do not commit it if it has sensitive info.
 * Requires **OpenSSL 1.1.1+** (for `-addext` support). Debian 13 and modern distros ship with OpenSSL 3.x.
