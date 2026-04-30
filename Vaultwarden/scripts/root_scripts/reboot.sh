@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
 #
-# reboot.sh — always reboot the VM at the end of the nightly cycle.
+# reboot.sh: always reboot the VM at the end of the nightly cycle.
 #
 # Policy decision: we always reboot, not just when Debian's
 # /var/run/reboot-required is present. That flag only covers
 # kernel/libc/etc. and misses reasons like "container service image got
-# updated" — rebooting unconditionally is simpler and safer than trying
+# updated"; rebooting unconditionally is simpler and safer than trying
 # to reason about "is a reboot really needed right now?".
 #
 # Writes into the MAIN log rather than a separate reboot log, so the
@@ -16,15 +16,15 @@
 # Called from main.sh:   /root/vault/reboot.sh
 #
 # Exit codes (see EXIT_CODE_DESC in lib.sh):
-#   0  — rebooted (only visible in the log — /sbin/reboot replaces the
+#   0:  rebooted (only visible in the log; /sbin/reboot replaces the
 #        process before we return here)
-#   40 — reboot blocked by safety check (containers still running or
+#   40: reboot blocked by safety check (containers still running or
 #        apt/dpkg lock held)
 
 set -euo pipefail
 source "$(dirname "$(readlink -f "$0")")/lib.sh"
 
-# Write into the main log — no separate reboot log file.
+# Write into the main log, no separate reboot log file.
 PHASE_LOG="$MAIN_LOG"
 
 require_root
@@ -51,7 +51,7 @@ if (( running > 0 )); then
     fail "refusing to reboot: $running containers still running (stop them first)" 40
 fi
 
-# Refuse to reboot if a dpkg/apt lock is held — mid-upgrade reboot bricks
+# Refuse to reboot if a dpkg/apt lock is held. Mid-upgrade reboot bricks
 # the package database.
 if fuser /var/lib/dpkg/lock-frontend >/dev/null 2>&1 \
    || fuser /var/lib/apt/lists/lock    >/dev/null 2>&1; then
@@ -60,7 +60,7 @@ fi
 
 # --- do it -----------------------------------------------------------------
 
-log "all safety checks passed — REBOOT COMMAND being issued in 5 seconds"
+log "all safety checks passed, REBOOT COMMAND being issued in 5 seconds"
 
 sync
 sleep 5

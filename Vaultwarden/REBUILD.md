@@ -181,9 +181,16 @@ Secret inventory you must have on hand before Phase 10:
   Zero Trust dashboard, Phase 11 walks through getting it).
 - CrowdSec enroll key (new one from app.crowdsec.net, or the existing
   one if you're re-enrolling the same instance).
-- CrowdSec bouncer key (generate fresh; it's local-only, used by
-  BunkerWeb's bouncer plugin).
-- Vaultwarden `ADMIN_TOKEN`, generate with `openssl rand -base64 48`.
+- CrowdSec bouncer key, generate with `openssl rand -base64 48`. It's
+  local-only, used by both CrowdSec LAPI (`BOUNCER_KEY_PROXY` env var,
+  pre-creates a bouncer with this key on first start) and BunkerWeb's
+  bouncer plugin (`CROWDSEC_API_KEY` env var). Same value in both places.
+- Vaultwarden `ADMIN_TOKEN`, an Argon2id hash of your admin password.
+  Generate inside the running vaultwarden container with
+  `podman exec -it vaultwarden /vaultwarden hash` (prompts twice for the
+  password, prints the hash). Wrap the entire `$argon2id$...` value in
+  single quotes in `.env` so the shell doesn't try to interpolate the
+  `$argon2id`, `$v`, `$m` segments as variables.
 - Mailjet (or equivalent) SMTP credentials.
 - Wazuh agent registration secret (only if matching the reference
   setup, obtained from your `wazuh-home` manager).

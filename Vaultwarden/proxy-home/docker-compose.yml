@@ -1,5 +1,5 @@
 ##
-## adguard/dnsproxy — DNS-over-HTTPS gateway for the Vaultwarden VM
+## adguard/dnsproxy: DNS-over-HTTPS gateway for the Vaultwarden VM
 ## (and any other LAN client pointed here).
 ##
 ## --- why this exists -----------------------------------------------------
@@ -12,21 +12,21 @@
 ## Before this was added, the Vaultwarden VM resolved names by plaintext
 ## UDP straight to an upstream resolver (1.1.1.3). That left two gaps:
 ##
-##   1. No visibility — every DNS query the VM made (Let's Encrypt
+##   1. No visibility: every DNS query the VM made (Let's Encrypt
 ##      endpoints, Cloudflare tunnel, CrowdSec hub, apt mirrors, the
 ##      Vaultwarden domain itself) was invisible to us, so a compromise
 ##      that started phoning home would not show up in any log.
-##   2. In-LAN sniffability — anything on the DMZ segment that could
+##   2. In-LAN sniffability: anything on the DMZ segment that could
 ##      MITM the link saw every hostname the vault resolved.
 ##
 ## Pointing the Vaultwarden VM's /etc/resolv.conf at this host closes
 ## both gaps. Every query is logged verbosely to /srv/dnsproxy-logs/ on
-## this host (tailed by the Wazuh agent — see README "LAN DoH gateway"),
+## this host (tailed by the Wazuh agent, see README "LAN DoH gateway"),
 ## and the upstream hop is encrypted DoH instead of plaintext UDP.
 ##
 ## Operationally paired with the Vaultwarden compose, even though it
 ## lives on a different VM with its own compose file. If this container
-## is down, the Vaultwarden VM loses DNS — it does not fall back to a
+## is down, the Vaultwarden VM loses DNS; it does not fall back to a
 ## plaintext resolver.
 ##
 ## --- mechanics -----------------------------------------------------------
@@ -35,7 +35,7 @@
 ## clients can use this host as their resolver. Outbound queries are
 ## encrypted to Cloudflare Family DNS-over-HTTPS. Bootstrap resolvers
 ## (1.1.1.1 / 1.0.0.1) are used to resolve `family.cloudflare-dns.com`
-## itself before the DoH connection is established — without them the
+## itself before the DoH connection is established; without them the
 ## resolver can't get off the ground (it would need DNS to look up the
 ## DNS server).
 ##
@@ -85,7 +85,7 @@ services:
           memory: 64M
           cpus: "0.25"
 
-    # host network — required so 0.0.0.0:53 binds to the host's actual
+    # host network: required so 0.0.0.0:53 binds to the host's actual
     # interfaces, reachable by other VMs on the LAN.
     network_mode: "host"
 
@@ -97,7 +97,7 @@ services:
       - /srv/dnsproxy-logs:/var/log/dnsproxy
 
     # Note: dnsproxy has no built-in client-IP ACL flag (no --allowed-clients
-    # or equivalent). Source-IP filtering is enforced by ufw on the host —
+    # or equivalent). Source-IP filtering is enforced by ufw on the host,
     # `sudo ufw status numbered` to inspect the active rules.
     command: >
       -l 0.0.0.0

@@ -95,13 +95,13 @@ Self-hosted password manager running on a **dedicated Debian 13 VM in Proxmox**,
 
 * **Edge & proxy**
 
-  * **Cloudflare Tunnel (`cloudflared`)** as the public-facing edge — no host ports exposed; all inbound traffic arrives via an outbound-initiated tunnel
+  * **Cloudflare Tunnel (`cloudflared`)** as the public-facing edge: no host ports exposed; all inbound traffic arrives via an outbound-initiated tunnel
   * **BunkerWeb** handles ACME (Let's Encrypt DNS-01), TLS termination, security headers, country / user-agent blacklists, rate limiting, ModSecurity / CRS WAF, and the CrowdSec bouncer in one place
   * Two mutually-exclusive compose flavors: `docker-compose.dns-challenge.yml` (canonical / production, behind Cloudflare Tunnel) and `docker-compose.http-challenge.yml` (alternate, direct host-port exposure with ACME HTTP-01)
 * **Intrusion prevention**
 
   * **Containerized CrowdSec** with custom Vaultwarden parsers, tightened bruteforce + user-enumeration scenarios, and an admin-diagnostics whitelist
-  * Bans enforced **inline at BunkerWeb** (returns 403) — no separate Cloudflare Worker
+  * Bans enforced **inline at BunkerWeb** (returns 403), no separate Cloudflare Worker
 * **Outbound isolation**
 
   * Egress is default-deny on the VM and routed through a separate **`proxy-home` VM** which provides a unified outbound proxy:
@@ -132,7 +132,7 @@ See [`Vaultwarden/README.md`](./Vaultwarden/README.md) for the full deployment, 
 
     * Hostname, `.localdomain`, optional **Tailscale tailnet** entries
     * Optional IP addresses
-  * Single self-contained script — no external `openssl.cnf`; the configuration is generated inline at runtime
+  * Single self-contained script, no external `openssl.cnf`; the configuration is generated inline at runtime
   * Configuration cached in `generator.conf` (gitignored)
 * **Usage**
 

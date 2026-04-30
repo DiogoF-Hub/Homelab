@@ -1,15 +1,37 @@
 # BunkerWeb access + error logs route to the bunkerity/bunkerweb-logs parser.
-#
-# modsec_audit.log is INTENTIONALLY NOT included here. The upstream
-# crowdsecurity/modsecurity parser only handles inline modsec messages
-# embedded in nginx error.log (apache/nginx error-log grok patterns), NOT
-# the dedicated audit log file in any format (Native or JSON). Feeding
-# modsec_audit.log to CrowdSec was tested and produced 100% unparsed — see
-# bunkerweb/custom-configs/modsec/audit-log-format.conf for context.
-# CrowdSec already gets modsec signal indirectly because BunkerWeb writes
-# inline modsec warnings to error.log, which bunkerity/bunkerweb-logs sees.
 filenames:
   - /var/log/bunkerweb/access.log
   - /var/log/bunkerweb/error.log
 labels:
   type: bunkerweb
+---
+# error.log is ALSO routed to crowdsecurity/modsecurity, which extracts the
+# inline ModSecurity warnings BunkerWeb writes (`[error] ... ModSecurity:
+# Warning. Matched ... [id "NNN"] ...`). Same file, two parser chains, each
+# extracts its own subset:
+#   - bunkerity/bunkerweb-logs: nginx access-style entries, internal errors
+#   - crowdsecurity/modsecurity: rule_id, modsec_message, source_ip,
+#     ruleseverity (sets evt.Meta.log_type=modsecurity).
+#
+# modsec_audit.log is INTENTIONALLY NOT routed here. It's JSON-format and
+# the parser only handles text-format inline messages (verified: 100%
+# unparsed when fed audit.log). The audit log stays JSON for operator-side
+# jq pipelines (see MONITORING.local.md and custom-configs/modsec/
+# audit-log-format.conf).
+#
+# Caveats:
+#   1. The hub page for crowdsecurity/modsecurity says "tested only with
+#      Apache". The nginx grok branches LOOK correct but aren't officially
+#      validated. Verify via `cscli metrics` after a probe; Parser Metrics
+#      should show crowdsecurity/modsecurity with parsed > 0.
+#   2. The matching scenario (crowdsecurity/modsecurity) is NOT installed
+#      yet. It triggers on a single CRITICAL-severity rule match (sev 2),
+#      which would self-ban us on legit /admin/config and /api/ciphers
+#      traffic while MODSECURITY_SEC_RULE_ENGINE is DetectionOnly. Install
+#      the scenario only AFTER flipping the engine to "On" so BW-level
+#      exclusions (in custom-configs/modsec-crs/exclusions-before-crs.conf)
+#      suppress those rules at the WAF layer before they reach the parser.
+filenames:
+  - /var/log/bunkerweb/error.log
+labels:
+  type: modsecurity

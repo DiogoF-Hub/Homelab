@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# main.sh — orchestrator for the nightly Vaultwarden maintenance run.
+# main.sh: orchestrator for the nightly Vaultwarden maintenance run.
 #
 # This is the ONLY script that cron should invoke. It:
 #   1. Acquires a lock (prevents concurrent/overlapping cron runs).
@@ -21,10 +21,10 @@
 # explain_exit_code().
 #
 # Exit codes of main.sh itself:
-#   0  — everything OK (or gracefully degraded)
-#   1  — lock already held by another run
-#   2  — lib.sh missing or malformed
-#   10-127 — propagated from a sub-script (see lib.sh)
+#   0:  everything OK (or gracefully degraded)
+#   1:  lock already held by another run
+#   2:  lib.sh missing or malformed
+#   10-127: propagated from a sub-script (see lib.sh)
 
 set -euo pipefail
 
@@ -65,13 +65,13 @@ log "orchestrator starting"
 # Usage: run_phase "backup" "${SCRIPTS_DIR}/backup.sh"
 run_phase() {
     local label="$1" script="$2"
-    log "phase: ${label} — running ${script##*/}"
+    log "phase: ${label}, running ${script##*/}"
     local rc=0
     "$script" || rc=$?
     if (( rc == 0 )); then
-        log "phase: ${label} — OK"
+        log "phase: ${label}, OK"
     else
-        log "phase: ${label} — FAILED $(explain_exit_code "$rc")"
+        log "phase: ${label}, FAILED $(explain_exit_code "$rc")"
     fi
     return "$rc"
 }
@@ -82,7 +82,7 @@ if run_phase "backup" "${SCRIPTS_DIR}/backup.sh"; then
     BACKUP_OK=1
 else
     RC=$?
-    log "aborting maintenance run — backup is non-negotiable"
+    log "aborting maintenance run, backup is non-negotiable"
     echo "STATUS: BACKUP_FAILED $(explain_exit_code "$RC") at $(date)" >> "$PHASE_LOG"
     exit "$RC"
 fi
@@ -102,7 +102,7 @@ if run_phase "system-update" "${SCRIPTS_DIR}/system-update.sh"; then
 fi
 
 # ---- deadman ping (only after a successful backup) ----------------------
-# The backup is the thing that actually matters — a failed update cycle
+# The backup is the thing that actually matters; a failed update cycle
 # does not invalidate the signal that the backup ran.
 
 (( BACKUP_OK == 1 )) && deadman_ping
@@ -112,7 +112,7 @@ fi
 REBOOT_OK=0
 # reboot.sh always reboots unless a safety gate (containers still running
 # or apt/dpkg lock held) blocks it. On a successful reboot, /sbin/reboot
-# replaces the process and we never return — so REBOOT_OK=1 only ever
+# replaces the process and we never return, so REBOOT_OK=1 only ever
 # lands if the script exited 0 without actually rebooting (which should
 # not happen in the current implementation, but we keep the branch so
 # future reboot.sh changes don't silently break the summary block).
