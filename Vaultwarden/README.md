@@ -4,15 +4,9 @@ This folder contains my **Vaultwarden configuration and automation scripts**, ru
 
 The reverse proxy / WAF / bouncer layer was previously **Caddy + Certbot + Cloudflare Workers bouncer (host-installed CrowdSec)**, and is now a single **[BunkerWeb](https://www.bunkerweb.io/) all-in-one container** that handles ACME (Let's Encrypt), TLS termination, security headers, country blacklist, user-agent blacklist, rate limiting, ModSecurity/CRS WAF, and the CrowdSec bouncer in one place. CrowdSec itself is also now containerized.
 
-[Docker](https://docs.docker.com/engine/install/debian/) remains installed on the system **only** as a parsing tool for the `docker compose config --services` command used by the maintenance scripts. It does not run any workloads.
+All container orchestration runs through `podman-compose` under `poduser`; no docker daemon is installed or needed. (Earlier iterations of this stack on Ubuntu Server kept docker installed as a fallback parser because `podman-compose config --services` produced noisy output on older podman releases; on Debian 13 with podman 5.x the output is clean and the docker dependency was dropped.)
 
-```bash
-docker compose config --services
-```
-
-This allows the maintenance scripts to easily list the services in a compose file without affecting the container runtime.
-
-**Important:** `poduser` is **not** in the Docker group and cannot run Docker commands without `sudo`. Since `poduser` also has **no sudo privileges**, only root can execute Docker commands. This isolation ensures `poduser` can only interact with Podman, preventing privilege escalation and maintaining strict separation between the runtime (Podman) and parsing tools (Docker CLI).
+`poduser` has **no sudo privileges** and is not in any privileged group. To touch containers manually, drop into a poduser login shell with `sudo su - poduser` and run `podman-compose ...` directly. The non-interactive maintenance scripts use the equivalent `sudo -u poduser podman-compose ...` form. Either way, root-mediated user-switching is the only path in.
 
 The setup is designed for **secure self-hosted password management**, with:
 
@@ -199,12 +193,13 @@ Subnets are pinned in the compose file so the aardvark-dns gateway IPs (`10.89.0
 
 ---
 
-### **Podman + Docker Compose**
+### **Container runtime**
 
-* **Podman** runs all containers in production. The whole stack is rootless under the dedicated `poduser` account.
-* **Docker** is kept installed only to use convenient `docker compose config --services` for parsing compose files in the maintenance scripts. It does not run any workloads.
-* `poduser` is **not** in the Docker group and cannot run Docker commands without `sudo`. Since `poduser` also has **no sudo privileges**, only root can execute Docker commands. This ensures strict separation between the runtime (Podman) and the parsing tool (Docker CLI).
-* Docker commands are only executed by root in `docker-update.sh` for image pulls.
+* **Podman** runs all containers, rootless, under the dedicated `poduser` account.
+* **`podman-compose`** handles compose-file orchestration: parsing (`config --services` to enumerate services in `docker-update.sh`), `up`/`down`/`restart` for lifecycle, and image pulls.
+* For interactive use, drop into a poduser login shell first (`sudo su - poduser`) then run `podman-compose ...` directly. The maintenance scripts use the non-interactive `sudo -u poduser podman-compose ...` form because they can't open a shell from within a script.
+* `poduser` has **no sudo privileges** and is not in any privileged group, so the only way to touch containers is through root user-switching. Clean privilege boundary between the orchestrator (root scripts) and the runtime (poduser).
+* No docker daemon installed on this VM. Earlier Ubuntu-based versions of this stack kept docker installed only because `podman-compose config --services` produced noisy header output on older podman; the Debian 13 + podman 5.x combination outputs cleanly and docker is no longer a dependency. (The PiHole VM, on Ubuntu Server, still uses `docker compose` because that's what its scripts were written against, separate stack, separate decision.)
 
 ---
 
@@ -864,8 +859,7 @@ Sourcing this system-wide means any user managing Podman containers can call `pc
 ## 🔒 Security Features
 
 * Running containers with **a dedicated Podman user** (not root)
-* **Docker group not used**, minimizing unnecessary privileges
-* Docker kept only for parsing compose files, not running workloads
+* **No docker daemon installed**, podman-compose (under `poduser`) handles all compose parsing and lifecycle
 * All certificate issuance + renewal happens **inside the BunkerWeb container** (no host-level Certbot exposure)
 * Strong separation between privileged and unprivileged operations
 * **Resource limits** on every container (memory + CPU caps via `deploy.resources.limits`)
@@ -873,6 +867,58 @@ Sourcing this system-wide means any user managing Podman containers can call `pc
 * **`security_opt: no-new-privileges`** on every container, child processes can never gain privileges via setuid binaries
 * **Read-only rootfs** on `cloudflared` and `vaultwarden` (BunkerWeb and CrowdSec need writable rootfs for their internal ops; named volumes still isolate writable state)
 * **Backup signing** via [minisign](https://jedisct1.github.io/minisign/), every backup bundle is cryptographically signed; restore-time verification detects tampering at the storage layer
+
+---
+
+## 🛡️ Host hardening (Lynis, work in progress)
+
+Periodically auditing the VM with [Lynis](https://cisofy.com/lynis/) and tracking the hardening index over time. Lynis catches OS-layer drift the container-level hardening doesn't touch: kernel sysctls, PAM, SSH config, package integrity, filesystem perms, etc. Run with `sudo lynis audit system` (`apt install lynis` from Debian's repo).
+
+**Current baseline: 76 / 100** on this single-purpose Debian 13 VM running rootless Podman + BunkerWeb + CrowdSec + Vaultwarden.
+
+### Base hardening pass (done)
+
+* `/etc/sudoers.d` permissions tightened to mode 750
+* Docker daemon removed entirely (was leftover from earlier debugging; on Debian 13's podman 5.x, `podman-compose config --services` produces clean output so docker is no longer needed for compose parsing)
+* SSH already hardened in `sshd_config`: `AllowUsers` restriction, tightened `MaxAuthTries`, `ClientAliveInterval` / `ClientAliveCountMax` for stale-session timeout, `LoginGraceTime`, `PermitRootLogin`, `X11Forwarding off`, etc. Lynis flags only one remaining tweak (`PrintLastLog yes`, SSH-7408), tracked under "next pass" below.
+* `libpam-tmpdir` for per-session `$TMPDIR` isolation (mitigates `/tmp` symlink and info-leak attacks)
+* `apt-listbugs` installed to warn on critical/grave bugs in packages before each apt install
+* `debsums` installed (the tool only; run on demand with `sudo debsums -c` to verify installed package files against their recorded checksums). The weekly automated run + matching ignore file are pending, see the next-pass list and the dedicated note below.
+
+### Next pass (pending)
+
+* Sysctl hardening (`kptr_restrict`, `bpf_jit_harden`, `rp_filter`, `log_martians`, `accept_redirects`, etc.) via `/etc/sysctl.d/99-hardening.conf` (KRNL-6000)
+* Module blacklists for `usb-storage`, `firewire-ohci`, `dccp`, `sctp`, `rds`, `tipc` via `/etc/modprobe.d/99-blacklist-unused.conf` (USB-1000, STRG-1846, NETW-3200)
+* Default umask `027` in `/etc/login.defs` (AUTH-9328)
+* SSH `PrintLastLog yes` in `sshd_config` (SSH-7408)
+* Legal banners on `/etc/issue` and `/etc/issue.net` (BANN-7126, BANN-7130)
+* Weekly `debsums` cron via `/etc/default/debsums` (`CRON_CHECK=weekly`), plus an `/etc/debsums-ignore` file to filter wazuh-agent's installer-staging noise so the weekly run surfaces only genuine anomalies (see note below for the filter contents)
+
+### Deliberate skips
+
+A handful of Lynis suggestions are intentionally not acted on:
+
+* **Single nameserver** (NETW-2705): the `proxy-home` dnsproxy is the unified trusted DNS gateway; adding a fallback would defeat the encrypted-DNS architecture.
+* **Separate /home, /var partitions** (FILE-6310): overkill for a single-purpose 30 GB VM.
+* **GRUB password** (BOOT-5122): low value when only the Proxmox console can boot the VM.
+* **Remote logging** (LOGG-2154) and **malware scanner** (HRDN-7230): the Wazuh agent + syscheck cover both layers.
+* **auditd / sysstat / process accounting** (ACCT-9622-9628): heavy maintenance burden for marginal value beyond what Wazuh already provides.
+* **Locked accounts** (AUTH-9284): the one locked human-style account on this VM is `poduser`, intentionally locked since it's a service account that should never log in interactively (only `sudo su - poduser` from root). All other "locked" accounts in `/etc/shadow` are stock Debian system accounts (`systemd-network`, `dhcpcd`, `messagebus`, `sshd`, etc.) which is normal.
+* **Password aging / hashing rounds** (AUTH-9286 / AUTH-9230): bureaucratic for a single-admin VM.
+
+### Note on `debsums` noise from the Wazuh agent
+
+When `debsums` checks installed packages, it flags ~150 "missing" files under `/var/ossec/packages_files/`. These aren't real anomalies. The wazuh-agent `.deb` package ships installer-staging files (templates for every distro Wazuh supports, CIS benchmark YAMLs, init scripts, etc.) that the installer uses during the agent setup and then cleans up because they're irrelevant once the agent is running on this specific distro. The package's recorded file list still references them, so `debsums` reports them as missing.
+
+When the weekly `debsums` cron lands (in the pending list above), it'll be paired with an `/etc/debsums-ignore` file (one path per line, glob patterns OK) to suppress that noise so each run surfaces only genuine package-integrity issues. Planned contents:
+
+```
+/var/ossec/packages_files/*
+/etc/init.d/wazuh-agent
+/etc/systemd/system/wazuh-agent.service
+```
+
+Not yet created on this VM; tracked alongside the cron-scheduling task above.
 
 ---
 
