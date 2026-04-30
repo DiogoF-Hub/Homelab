@@ -9,4 +9,4 @@ The new dedicated repository includes:
 - Better documentation and setup guides
 - Active maintenance and updates
 
-Please visit the new repository for the latest version and full documentation.
+Please visit the new repository for the latest version and full documentation!
