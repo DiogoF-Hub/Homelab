@@ -222,18 +222,18 @@ services:
       # it would self-ban us on legit /admin/config and /api/ciphers
       # traffic while MODSECURITY_SEC_RULE_ENGINE is DetectionOnly.
       #
-      # ╔════════════════════════════════════════════════════════════════╗
-      # ║ TODO when MODSECURITY_SEC_RULE_ENGINE flips DetectionOnly→On:  ║
-      # ║   1. Delete the `PARSERS:` line below.                         ║
-      # ║   2. Change the COLLECTIONS line above to:                     ║
-      # ║      COLLECTIONS: "bunkerity/bunkerweb crowdsecurity/modsecurity"
-      # ║   3. `podman-compose up -d` to recreate crowdsec.              ║
-      # ║                                                                ║
-      # ║ This pulls in the parser AND the scenario. Scenario fires on   ║
-      # ║ any CRITICAL-severity (sev 2) modsec rule match; by then the  ║
-      # ║ BW-level exclusions in custom-configs/modsec-crs/ stop those   ║
-      # ║ rules firing on legit traffic, so only real probes get banned. ║
-      # ╚════════════════════════════════════════════════════════════════╝
+      # ╔══════════════════════════════════════════════════════════════════╗
+      # ║ TODO when MODSECURITY_SEC_RULE_ENGINE flips DetectionOnly→On:    ║
+      # ║   1. Delete the `PARSERS:` line below.                           ║
+      # ║   2. Change the COLLECTIONS line above to:                       ║
+      # ║      COLLECTIONS: "bunkerity/bunkerweb crowdsecurity/modsecurity"║
+      # ║   3. `podman-compose up -d` to recreate crowdsec.                ║
+      # ║                                                                  ║
+      # ║ This pulls in the parser AND the scenario. Scenario fires on     ║
+      # ║ any CRITICAL-severity (sev 2) modsec rule match; by then the     ║
+      # ║ BW-level exclusions in custom-configs/modsec-crs/ stop those     ║
+      # ║ rules firing on legit traffic, so only real probes get banned.   ║
+      # ╚══════════════════════════════════════════════════════════════════╝
       # See acquis.d/bunkerweb.yaml for the full reasoning.
       PARSERS: "crowdsecurity/modsecurity"
       BOUNCER_KEY_PROXY: "${CROWDSEC_BOUNCER_KEY}"
