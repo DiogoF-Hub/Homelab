@@ -1,67 +1,73 @@
 # Pi-hole allowlist for the Vaultwarden VM
 #
-# This file is the source of truth for what domains the Vault VM is
-# allowed to resolve. It mirrors proxy-home/vault_domains_allow_proxy.txt
-# (the Squid HTTP/HTTPS allowlist) in a Pi-hole-compatible format
-# (gravity / ABP syntax) so it can be consumed directly via Pi-hole's
-# "Add allowlist" URL feature.
+# Source of truth for what domains the Vault VM is allowed to resolve.
+# Mirrors proxy-home/vault_domains_allow_proxy.txt (Squid HTTP/HTTPS
+# allowlist) in a Pi-hole-compatible format.
 #
-# DEPLOY (one-time):
-#   1. Push this repo so the file is reachable at:
-#        https://raw.githubusercontent.com/DiogoF-Hub/Homelab/main/Vaultwarden/vault_domains_allow_dns.txt
-#   2. Pi-hole web UI -> Lists -> click "Add allowlist" (green button).
-#        - Address: paste the raw.githubusercontent.com URL above
-#        - Group assignment: ONLY vaultwarden-vm (untick Default)
-#        - Comment: "vault VM allowlist (mirror of Squid)"
-#   3. Tools -> Update Gravity (or wait for the next scheduled run).
-#      Confirm the new entries land in the gravity DB by clicking the
-#      list; the entry count should match the non-comment lines below.
-#   4. Add ONE Deny Regex manually so anything NOT in the allowlist gets
-#      blocked at DNS time:
-#        Domain Management -> Domains -> Add a new domain
-#        - Type:    Deny Regex
-#        - Domain:  .*
-#        - Group:   ONLY vaultwarden-vm (untick Default)
-#        - Comment: "vault-deny-all: catches everything not allowlisted"
+# DEPLOY (three steps, all group-scoped to vaultwarden-vm):
+#
+# STEP 1: bulk exact-match entries via Pi-hole's "Add allowlist" URL.
+#   Pi-hole web UI -> Lists -> click "Add allowlist" (green button).
+#     Address: https://raw.githubusercontent.com/DiogoF-Hub/Homelab/main/Vaultwarden/vault_domains_allow_dns.txt
+#     Group:   ONLY vaultwarden-vm (untick Default)
+#     Comment: "vault VM allowlist (mirror of Squid)"
+#   Then Tools -> Update Gravity. Pi-hole parses the bare-domain lines
+#   below (everything in the "BULK" section) and adds each as an
+#   exact-match allow.
+#
+# STEP 2: apex+subdomain entries, added manually as Allow Regex.
+#   Pi-hole's allowlist URL parser does NOT accept ABP syntax (||apex^),
+#   even though the blocklist URL parser does. So apex matches have to
+#   go in by hand. For each line in the "APEX (manual regex)" section
+#   at the bottom of this file:
+#     Domain Management -> Domains -> Add a new domain
+#       Type:   Allow Regex
+#       Domain: <paste the (^|\.)...$ regex>
+#       Group:  ONLY vaultwarden-vm (untick Default)
+#       Comment: free-form (e.g. the section header from this file)
+#
+# STEP 3: the deny-everything-else.
+#   Domain Management -> Domains -> Add a new domain
+#     Type:   Deny Regex
+#     Domain: .*
+#     Group:  ONLY vaultwarden-vm (untick Default)
+#     Comment: "vault-deny-all: catches everything not allowed above"
 #
 # Pi-hole evaluation order: Allow > Deny. So the Vault VM resolves only
-# domains matched by an entry below; everything else hits the .* deny
-# and returns 0.0.0.0.
+# domains matched by step 1 OR step 2; everything else hits the .* deny
+# from step 3 and returns 0.0.0.0.
 #
 # UPDATING (after the initial deploy):
-#   Edit this file in the repo, push, then in Pi-hole UI run "Update
-#   Gravity" (or wait for the next scheduled gravity run, default daily).
-#   Pi-hole re-fetches the URL and reconciles the allow entries against
-#   it. No need to re-add the list or restart anything.
+#   - Bulk entries (step 1): edit this file in the repo, push, then in
+#     Pi-hole UI run "Update Gravity" (or wait for the next scheduled
+#     gravity run, default daily). Pi-hole re-fetches the URL and
+#     reconciles the gravity DB.
+#   - Apex regex entries (step 2): add/remove via UI by hand. The list
+#     below is the source of truth, refer to it when adding new ones.
+#   - When you add a new outbound destination, mirror it in
+#     proxy-home/vault_domains_allow_proxy.txt as well.
 #
-# SYNTAX (Pi-hole / gravity):
-#   exact.host.example     - exact-match allow (no subdomains)
-#   ||apex.example^        - ABP-style; allow apex + ALL subdomains
-#
-# Comments via `#` are stripped by gravity. Inline `# blah` after an
-# entry is fine; gravity just keeps the domain/ABP token.
-#
-# SYNC NOTE: paired by hand with proxy-home/vault_domains_allow_proxy.txt
-# (Squid HTTP/HTTPS gate). Drift between the two files breaks resolution
-# silently in one direction or the other (Squid lets HTTP through but
-# DNS fails, or vice versa). The future single-source-of-truth
-# automation that would emit both formats from one input is tracked in
-# ideas.md.
+# Future improvement: a generator that emits BOTH this file (with
+# apex entries enumerated as exact subdomains, or pushed directly to
+# Pi-hole's gravity DB / Allow Regex table) AND the Squid file from a
+# single source. Tracked in ideas.md. Until then, two-file sync.
+
+# ================================================================
+# BULK (exact-match, via the "Add allowlist" URL feature)
+# ================================================================
 
 # === Debian system updates ===
 deb.debian.org
 security.debian.org
 metadata.ftp-master.debian.org
 debian.map.fastlydns.net
-||debian.pool.ntp.org^
 bugs.debian.org
 
-# === Let's Encrypt (ACME + OCSP + issuer certs) ===
+# === Let's Encrypt (ACME endpoints; OCSP / issuer chain is in apex section) ===
 acme-v02.api.letsencrypt.org
 acme-staging-v02.api.letsencrypt.org
-||lencr.org^
 
-# === Cloudflare / Cloudflared Tunnel ===
+# === Cloudflare / Cloudflared Tunnel (R2 storage is in apex section) ===
 cloudflare.com
 www.cloudflare.com
 api.cloudflare.com
@@ -71,7 +77,6 @@ protocol-v2.argotunnel.com
 region1.v2.argotunnel.com
 region2.v2.argotunnel.com
 cfd-features.argotunnel.com
-||r2.cloudflarestorage.com^
 
 # === Docker / Podman / Containers ===
 auth.docker.io
@@ -97,25 +102,14 @@ golang.org
 go.googlesource.com
 pkg.go.dev
 
-# === BunkerWeb: project infrastructure ===
-||bunkerity.com^
-||bunkerweb.io^
-
-# === BunkerWeb: GeoIP database ===
-||db-ip.com^
-
 # === BunkerWeb: Tor exit node list ===
 www.dan.me.uk
-
-# === CrowdSec hub + console ===
-||crowdsec.net^
 
 # === Vaultwarden: Bitwarden icon service ===
 icons.bitwarden.net
 
 # === Other packages / repos ===
 packagecloud.io
-||cloudfront.net^
 dl.google.com
 
 # === Wazuh agent: apt repo for install + updates ===
@@ -126,3 +120,21 @@ hc-ping.com
 
 # === Your services ===
 test.example.com
+
+# ================================================================
+# APEX (manual regex, add via Domain Management -> Allow Regex)
+# ================================================================
+#
+# These can't be ingested via the URL feature, see the deploy steps
+# at the top of this file. Add each as an Allow Regex scoped to the
+# vaultwarden-vm group only. Listed here so the source of truth lives
+# in the repo even though Pi-hole stores the deployed copy.
+#
+#   (^|\.)debian\.pool\.ntp\.org$        # Debian NTP pool (0./1./2./3.)
+#   (^|\.)lencr\.org$                    # Let's Encrypt OCSP + issuer chain (r10/r11/e5/e6/x1/x2)
+#   (^|\.)r2\.cloudflarestorage\.com$    # Cloudflare R2 bucket-prefix subdomains
+#   (^|\.)bunkerity\.com$                # BunkerWeb assets / blacklist feeds (apex + subs)
+#   (^|\.)bunkerweb\.io$                 # BunkerWeb update + telemetry (apex + subs)
+#   (^|\.)db-ip\.com$                    # DB-IP MMDB (apex + download.)
+#   (^|\.)crowdsec\.net$                 # CrowdSec hub + console + community blocklist
+#   (^|\.)cloudfront\.net$               # AWS CloudFront-hosted content (random subdomains)

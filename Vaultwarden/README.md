@@ -641,25 +641,28 @@ Quick summary of what's in `wazuh-home/`:
 
 This is **defense-in-depth on top of Squid**. Squid (`proxy-home/squid.conf` + `vault_domains_allow_proxy.txt`) is the actual content gate for HTTP/HTTPS egress. The Pi-hole DNS allowlist gives a second enforcement layer, plus catches DNS-only reconnaissance (a compromised host resolving names to enumerate services without ever opening a connection). Both lists must stay in sync; see [`vault_domains_allow_dns.txt`](./vault_domains_allow_dns.txt) for the Pi-hole-format mirror of the Squid allowlist, and `ideas.md` for the planned single-source-of-truth automation.
 
-`vault_domains_allow_dns.txt` is in **gravity / ABP syntax** (one domain per line, with `||apex^` for apex-plus-subdomains entries) so Pi-hole can ingest it directly via the "Add allowlist" URL feature. No regex bulk-paste needed.
+`vault_domains_allow_dns.txt` is split into two sections: a **bulk** section of bare-domain exact-match entries (consumed by Pi-hole's "Add allowlist" URL feature) and an **apex** section listing regex entries for apex+subdomain matches that have to be added by hand. The apex section is necessary because Pi-hole 6's allowlist URL parser doesn't accept ABP syntax (`||apex^`), even though the same parser does accept it for blocklist URLs.
 
 How to wire it in Pi-hole's web UI:
 
 1. **Group Management → Groups**: create a `vaultwarden-vm` group.
 2. **Group Management → Clients**: add the Vault VM's IP and assign it to that group, with **only** that group ticked (untick `Default`). Otherwise the Default group's adlists also apply and you'll see surprise blocks.
-3. **Group Management → Adlists**: leave the `vaultwarden-vm` group with **no adlists ticked**. The Squid allowlist + Pi-hole's allowlist URL replace adlist filtering for this client.
+3. **Group Management → Adlists**: leave the `vaultwarden-vm` group with **no adlists ticked**. The Squid allowlist + this allowlist replace adlist filtering for this client.
 4. **Lists → Add allowlist** (green button): paste the **raw GitHub URL** of the file as the address, scope to `vaultwarden-vm` group only:
    ```
    https://raw.githubusercontent.com/DiogoF-Hub/Homelab/main/Vaultwarden/vault_domains_allow_dns.txt
    ```
-   Then **Tools → Update Gravity** to fetch and apply. The list's entry count should match the non-comment lines in the file.
-5. **Domain Management → Domains**: add **one** Deny Regex entry, value `.*`, scoped to `vaultwarden-vm` group only. This is the default-deny that catches everything not allowed by step 4. Pi-hole evaluates Allow before Deny, so the `.*` only applies to lookups that didn't match the allowlist.
+   Then **Tools → Update Gravity** to fetch and apply. Pi-hole parses the bare-domain lines as exact-match allows. Lines starting with `#` are comments and ignored; the regex lines in the "APEX (manual regex)" section at the bottom of the file are also `#`-prefixed so gravity skips them.
+5. **Domain Management → Domains**: for each line in the **APEX section** at the bottom of `vault_domains_allow_dns.txt`, add an Allow Regex entry, scoped to `vaultwarden-vm` group only. There are 8 of them at time of writing (Let's Encrypt OCSP, Cloudflare R2, BunkerWeb apex, etc.), one-time setup.
+6. **Domain Management → Domains**: add **one** Deny Regex entry, value `.*`, scoped to `vaultwarden-vm` group only. This is the default-deny that catches everything not allowed by steps 4 + 5. Pi-hole evaluates Allow before Deny, so `.*` only applies to lookups that didn't match.
 
 Net effect: full resolution for allowlisted domains via Pi-hole's DoH upstream; every other domain returns `0.0.0.0` at DNS time. Each blocked attempt becomes a level-6 Wazuh alert (rule 100252, `status=blocked-regex`) so misconfigurations and unknown unknowns are immediately visible.
 
 #### Updating the allowlist later
 
-Edit `vault_domains_allow_dns.txt` in the repo, push, then **Tools → Update Gravity** in Pi-hole (or wait for the next scheduled gravity run, default daily). Pi-hole re-fetches the URL and reconciles. No need to re-add the list or restart anything; entries in the gravity DB are added/removed to match the updated file.
+- **Bulk section (step 4)**: edit the file in the repo, push, then **Tools → Update Gravity** in Pi-hole (or wait for the next scheduled gravity run, default daily). Pi-hole re-fetches the URL and reconciles the gravity DB; entries are added or removed to match the updated file. No need to re-add the list or restart anything.
+- **Apex section (step 5)**: add or remove via the UI by hand. Mirror the change in the file's APEX section so the source of truth stays in the repo. The apex section being commented out means it doesn't break gravity but stays diff-able.
+- **Squid mirror**: when you add a new outbound destination, also mirror in `proxy-home/vault_domains_allow_proxy.txt` and redeploy Squid.
 
 #### Bootstrap / refinement workflow
 
