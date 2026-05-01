@@ -41,10 +41,15 @@ Homelab/
 │   │   ├── parsers/                          # custom Vaultwarden log parser
 │   │   ├── scenarios/                        # tightened bruteforce + user-enum scenarios
 │   │   └── whitelists/                       # admin-diagnostics false-positive drop
-│   ├── proxy-home/                           # targets the separate proxy-home VM
-│   │   ├── docker-compose.yml                # adguard/dnsproxy (DNS gateway, DoH upstream)
+│   ├── proxy-home/                           # targets the separate proxy-home VM (Squid HTTP/HTTPS egress only; DNS now via the LAN Pi-hole)
 │   │   ├── squid.conf
 │   │   └── vault_domains_allow_proxy.txt
+│   ├── wazuh-home/                           # Targets the wazuh-home VM (Wazuh manager), plus a localfile snippet for the LAN Pi-hole VM agent
+│   │   ├── README.md
+│   │   ├── pihole-agent.localfile.xml        # <localfile> blocks for the Pi-hole VM's wazuh-agent
+│   │   ├── manager-global.snippet.xml        # logall_json toggle for the wazuh-home <global> block
+│   │   ├── manager-decoder.xml               # custom dnsmasq decoder (Wazuh's stock ruleset has none)
+│   │   └── manager-rules.xml                 # rule 100190 (archive-only) + 100200 (Vault VM srcip alert)
 │   └── scripts/
 │       ├── root_scripts/                     # nightly orchestrator + phase scripts
 │       │   ├── lib.sh
@@ -104,10 +109,10 @@ Self-hosted password manager running on a **dedicated Debian 13 VM in Proxmox**,
   * Bans enforced **inline at BunkerWeb** (returns 403), no separate Cloudflare Worker
 * **Outbound isolation**
 
-  * Egress is default-deny on the VM and routed through a separate **`proxy-home` VM** which provides a unified outbound proxy:
+  * Egress is default-deny on the VM and routed through two upstream chokepoints:
 
-    * **Squid** for HTTP / HTTPS egress, enforced against a domain allowlist (`vault_domains_allow_proxy.txt`)
-    * **`adguard/dnsproxy`** as a DNS gateway for the VM, DoH-encrypted upstream to Cloudflare Family and fully logged
+    * **Squid** on the **`proxy-home` VM** for HTTP / HTTPS egress, enforced against a domain allowlist (`vault_domains_allow_proxy.txt`)
+    * **The homelab's LAN Pi-hole** for DNS, with DoH-encrypted upstream to Cloudflare Family and full per-query visibility via Wazuh (custom decoder + rule chain in `Vaultwarden/wazuh-home/` elevates every Vault-VM-srcip query to a level-3 alert)
 * **Backups & redundancy**
 
   * Daily encrypted backups via **[age](https://github.com/FiloSottile/age)** (pinned binaries, public-key-only on the VM) and cryptographically signed with **[minisign](https://jedisct1.github.io/minisign/)** for tamper detection

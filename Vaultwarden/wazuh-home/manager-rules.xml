@@ -1,0 +1,48 @@
+<!--
+  wazuh-home (manager): custom rules for Vault VM DNS visibility.
+
+  Append inside /var/ossec/etc/rules/local_rules.xml on the manager.
+  After editing, validate + restart:
+      sudo /var/ossec/bin/wazuh-analysisd -t
+      sudo systemctl restart wazuh-manager
+
+  Goal: surface DNS queries from the Vault VM as level-3 alerts in the
+  dashboard, while keeping the rest of the LAN's DNS noise out of
+  alerts.json. The custom decoder pihole-dnsmasq-query (see
+  manager-decoder.xml) extracts qtype/query/srcip; these rules do the
+  filtering on top.
+
+  Two-rule chain:
+    - 100190 (level 0): catch-all "any Pi-hole DNS query, decoded".
+      Archived only if logall_json is on; never alerts. All other rules
+      in this chain depend on it via if_sid so we don't have to repeat
+      <decoded_as>.
+    - 100200 (level 3): only fires when srcip is the Vault VM. This is
+      the actual visibility rule; one event per query, one alert per
+      event.
+
+  Note on <srcip>: Wazuh treats srcip as a "static field" that has its
+  own dedicated tag. Using <field name="srcip">...</field> here would
+  fail to load with "Field 'srcip' is static". Same applies to other
+  static fields (dstip, srcuser, dstuser, srcport, dstport, protocol,
+  id, url, action, status, extra_data). Use <srcip> directly.
+
+  Replace 192.168.50.3 below with the actual Vault VM IP if it's
+  different in your environment.
+-->
+<group name="dns,pihole,vaultwarden">
+
+  <!-- Base: catch every Pi-hole DNS query, archived only. -->
+  <rule id="100190" level="0">
+    <decoded_as>pihole-dnsmasq-query</decoded_as>
+    <description>Pi-hole DNS query: $(query) from $(srcip)</description>
+  </rule>
+
+  <!-- Vault VM filter: surface as level-3 alert. -->
+  <rule id="100200" level="3">
+    <if_sid>100190</if_sid>
+    <srcip>192.168.50.3</srcip>
+    <description>Vault VM DNS query: $(query)</description>
+  </rule>
+
+</group>

@@ -186,23 +186,29 @@ touch starts failing.
 
 ---
 
-## 4. Encrypted DNS from the Vaultwarden VM via the proxy VM, ✅ DONE
+## 4. Encrypted DNS from the Vaultwarden VM, ✅ DONE (architecture has since evolved)
 
-Implemented as `adguard/dnsproxy` running on the `proxy-home` VM
-(`192.168.173.9:53`), forwarding every query DoH-encrypted to Cloudflare
-Family. The Vaultwarden VM's `/etc/resolv.conf` points there with no
-plaintext fallback. Source-IP filtering is enforced by `ufw` on the host
-(dnsproxy itself has no built-in client-IP allowlist flag).
-`systemd-resolved`'s stub listener on `127.0.0.53:53` had to be disabled
-(`DNSStubListener=no`) to free port 53 for dnsproxy.
+Originally implemented as `adguard/dnsproxy` running on the `proxy-home`
+VM (`192.168.173.9:53`), forwarding every query DoH-encrypted to
+Cloudflare Family. Logs lived at `/srv/dnsproxy-logs/queries.log`,
+staged for Wazuh ingestion.
 
-The proxy-home VM is now the unified outbound trust boundary for the
-Vaultwarden VM: Squid for HTTP/HTTPS (allowlist-enforced), dnsproxy for
-DNS (DoH-encrypted, fully logged at `/srv/dnsproxy-logs/queries.log`).
-Verbose query log is staged for future Wazuh ingestion (idea #7).
+**Superseded.** The Vaultwarden VM now points its `/etc/resolv.conf` at
+the homelab's existing **LAN Pi-hole** (`192.168.173.2`). Pi-hole
+forwards upstream over DoH to Cloudflare Family via its own
+`adguard/dnsproxy` sidecar (same encryption story), and the visibility
+piece moved up the stack: Pi-hole's `pihole.log` is shipped via
+wazuh-agent, with a custom decoder + rule chain on `wazuh-home` filtering
+Vault-VM-srcip queries to a level-3 alert in the dashboard. The
+dedicated dnsproxy compose was retired (`proxy-home/docker-compose.yml`
+no longer exists); proxy-home is now Squid-only.
 
-See: `proxy-home/docker-compose.yml`,
-README §Outbound DNS gateway, dnsproxy on the same `proxy-home` VM.
+See: `wazuh-home/README.md` for the current architecture and apply
+procedure; README §Outbound DNS via the LAN Pi-hole + Wazuh visibility.
+The allowlist-anomaly follow-on (alert when a Vault VM lookup is for a
+domain not on the Squid allowlist) is part of the broader Wazuh
+rollout, see idea #7, Phase C, subsection "Allowlist-anomaly alert for
+the Vault VM".
 
 ---
 
@@ -533,43 +539,50 @@ tail-and-mail script.
 
 ### Phase B, Wazuh manager + agent deployment
 
-**Current state (already done, do not redo):** the Wazuh agent binary is
-installed on both the Vaultwarden VM and the `proxy-home` VM. The
-official Wazuh apt repo is configured on each so the agent gets pulled
-in by normal `apt upgrade` cycles (`system-update.sh` on the Vaultwarden
-VM, unattended-upgrades on `proxy-home`). `packages.wazuh.com` is
-already in `proxy-home/vault_domains_allow_proxy.txt` so the apt fetch
-goes through Squid cleanly. **Both agents are enrolled with a dedicated
-Wazuh manager VM (`wazuh-home`)** and reporting keepalives, so the
-manager has live agent inventory and "agent disconnected" built-in
-alerts work.
+**Current state:** Wazuh agents are installed on the Vaultwarden VM, the
+`proxy-home` VM, and the LAN Pi-hole VM, all enrolled with `wazuh-home`.
+The Vault VM and proxy-home agents are at stock defaults. The **LAN
+Pi-hole VM is the first agent with custom config**: it tails
+`/var/log/pihole/pihole.log` + `FTL.log`, paired with a custom decoder
++ rule chain on `wazuh-home` that elevates Vault-VM-srcip DNS queries
+to a level-3 alert. Snippets and the apply procedure live in the
+`wazuh-home/` folder of this repo. The next slice
+(integrator script that cross-checks each query against the Squid
+allowlist, only alerts on misses) is tracked as its own dedicated
+entry, idea #9; sketch also in `wazuh-home/README.md` § "Planned next step".
 
-That's it. **Beyond install + apt repo + manager enrollment, nothing
-else has been touched.** Both agents' `/var/ossec/etc/ossec.conf` files
-are at stock defaults: no `<localfile>` entries, no custom FIM paths,
-no rootkit-scan tuning, no log shipping. Manager side is also stock:
-no custom decoders, no custom rules, no alert routing. Phase B picks
-up from there, log shipping (`<localfile>` for the per-VM log lists
-below), custom decoders for the non-standard formats (dnsproxy in
-particular), and the Phase C alert rules + Discord Active Response.
+The dnsproxy-on-proxy-home + `/srv/dnsproxy-logs/queries.log`
+architecture below is **superseded**. The DNS visibility piece moved up
+to the LAN Pi-hole + Wazuh decoder/rules described above. The
+proxy-home agent has nothing application-specific to ship anymore. The
+log-shipping for the Vaultwarden VM's own logs (`vw-logs/`, `bw-logs/`,
+`/srv/logs/status/*.jsonl`) is still pending and is what's left of this
+phase. The next slice (integrator script that cross-checks each query
+against the Squid allowlist, only alerts on misses) is detailed in
+Phase C below; sketch also in `wazuh-home/README.md` § "Planned next step".
 
-**To do:**
+What's left under Phase B:
 
-- ~~Dedicated VM for the Wazuh manager.~~ ✅ Done, `wazuh-home` is up.
-- ~~Enrol both existing agents with the manager.~~ ✅ Done, both
-  agents reporting.
-- **Verify firewall posture for the manager link.** Agents talk to the
-  manager on 1514/tcp (events) and 1515/tcp (enrollment, only on first
-  registration). Confirm those flows are exempted at the firewall layer
-  for internal-VLAN traffic, they should NOT route through Squid
-  (Squid is for HTTP(S) egress, not internal-VLAN control traffic).
-- **Vaultwarden VM agent, `<localfile>` sources** (in
-  `/var/ossec/etc/ossec.conf`):
-  - `/srv/logs/status/*.jsonl` (Phase A output), Wazuh's built-in JSON
-    decoder auto-extracts fields, no custom decoder needed.
-  - `/srv/vw-logs/vaultwarden.log`, `/srv/bw-logs/access.log`,
-    `/srv/bw-logs/error.log`, `/srv/bw-logs/modsec_audit.log`, for
-    centralized retention + cross-correlation with CrowdSec decisions.
+- ~~Dedicated VM for the Wazuh manager.~~ ✅ Done.
+- ~~Enrol agents with the manager.~~ ✅ Done (Vault VM, proxy-home,
+  Pi-hole).
+- ~~First custom decoder + rule chain.~~ ✅ Done (`wazuh-home/` folder,
+  DNS visibility).
+- Vaultwarden VM agent `<localfile>` sources for `/srv/logs/status/*.jsonl`
+  (Phase A output, JSON-decoded automatically by Wazuh's built-in JSON
+  decoder), `/srv/vw-logs/vaultwarden.log`, `/srv/bw-logs/access.log`,
+  `/srv/bw-logs/error.log`, `/srv/bw-logs/modsec_audit.log`.
+- Verify firewall posture for the manager link (1514/tcp events,
+  1515/tcp enrollment) so Squid isn't in the path for internal-VLAN
+  control traffic.
+- Phase C alert rules + Discord Active Response (see below; allowlist-
+  anomaly DNS alert is the headline DNS rule).
+
+Below: the historical/aspirational dnsproxy-side wiring, kept for
+reference. Skip directly to "What's left" above for the current plan.
+
+**Historical/aspirational wiring (superseded by `wazuh-home/` folder for the DNS piece):**
+
 - **proxy-home VM agent, `<localfile>` source** for dnsproxy queries:
   ```xml
   <localfile>
@@ -607,8 +620,13 @@ particular), and the Phase C alert rules + Discord Active Response.
 **Rules (`local_rules.xml` on the manager, version-controlled in this
 repo alongside compose files, rules-as-code):**
 
+> Rule IDs in the 100190 / 100200 range are already in use by the DNS
+> visibility chain (`wazuh-home/manager-rules.xml`). The example IDs below
+> have been bumped to the 100300 range to keep namespaces clean once
+> these get implemented.
+
 ```xml
-<rule id="100200" level="12">
+<rule id="100300" level="12">
   <decoded_as>json</decoded_as>
   <field name="phase">backup</field>
   <field name="status">fail</field>
@@ -616,7 +634,7 @@ repo alongside compose files, rules-as-code):**
   <group>vaultwarden_maint</group>
 </rule>
 
-<rule id="100201" level="7">
+<rule id="100301" level="7">
   <decoded_as>json</decoded_as>
   <field name="phase">docker-update</field>
   <field name="status">fail</field>
@@ -625,7 +643,7 @@ repo alongside compose files, rules-as-code):**
 </rule>
 
 <!-- deadman-equivalent: alert if no "phase=run" event in 25h -->
-<rule id="100210" level="10" frequency="0" timeframe="90000">
+<rule id="100310" level="10" frequency="0" timeframe="90000">
   <decoded_as>json</decoded_as>
   <field name="phase">run</field>
   <description>Vaultwarden: no maintenance run completed in 25h</description>
@@ -637,14 +655,168 @@ Plus built-in rules: agent-disconnect (rule IDs in the 500 range,
 exact numbers don't matter, they're labelled by the decoder), CrowdSec
 decisions, FIM hits.
 
-**dnsproxy-driven rules** (over the `srcip` / `dstdomain` / `query_type`
-fields the Phase B decoder extracts):
+**DNS-driven rules** (over the `qtype` / `query` / `srcip` fields the
+DNS visibility decoder extracts; see `wazuh-home/manager-decoder.xml`):
 
 - High-volume queries from one client (DNS tunneling / DGA indicator).
 - Queries to known-bad domains (threat-intel-driven blocklist match).
 - NXDOMAIN-heavy patterns from one client (DGA indicator).
 - Queries to domains blocked by Cloudflare Family, those return blocked
   responses; alerting tells you which client tried to reach what.
+
+#### Allowlist-anomaly alert for the Vault VM (the headline DNS rule)
+
+Right now, every DNS query the Vault VM makes is a uniform level-3
+alert via rule 100200 (`wazuh-home/manager-rules.xml`). Full visibility, but
+no signal: nothing distinguishes a routine `acme-v02.api.letsencrypt.org`
+lookup from a malware C2 callback. Both look identical in the
+dashboard.
+
+This rule adds a second alert that fires **only when the queried domain
+is not on the Squid allowlist** (`proxy-home/vault_domains_allow_proxy.txt`).
+That allowlist is already the source of truth for what the Vault VM is
+*supposed* to talk to over HTTP/HTTPS, so any DNS lookup outside it is
+either a config drift (we forgot to add a new endpoint to Squid) or
+something genuinely worth investigating (compromised host phoning home).
+
+End state: rule 100200 keeps the full archived stream of Vault VM
+lookups for forensics; a new rule (e.g. 100220, level 7) is the actual
+"this is unusual" signal that triggers an operator response.
+
+**Why it earns its keep.** The allowlist already encodes our intent.
+The current DNS visibility piece captures behaviour. The missing step
+is a comparator that flags the gap between the two. Without it, the
+level-3 stream becomes noise we tune out; with it, every alert that
+fires is genuinely unexpected.
+
+It also catches a failure mode the Squid allowlist alone doesn't:
+DNS-only reconnaissance. An attacker probing for which internal
+services exist by resolving names without ever opening a connection
+to them produces no Squid log entry but does produce a `pihole.log`
+entry, which the comparator catches.
+
+**Mechanism: Wazuh integrator, not log polling.** Wazuh's built-in
+`wazuh-integratord` is the right shape: the manager filters by
+`<rule_id>` first, then invokes a custom script only on hits. No
+polling-archives.json hack needed. Configured in `ossec.conf`:
+
+```xml
+<integration>
+  <name>custom-vault-dns-check</name>
+  <rule_id>100200</rule_id>
+  <alert_format>json</alert_format>
+</integration>
+```
+
+Two files in `/var/ossec/integrations/` (Wazuh's convention):
+
+- `custom-vault-dns-check`: tiny shell launcher (boilerplate that
+  invokes Wazuh's bundled Python on the script).
+- `custom-vault-dns-check.py`: actual logic. Reads
+  `/etc/vault-allowlist/vault-allowlist.txt` (a copy or symlink of
+  `proxy-home/vault_domains_allow_proxy.txt`), parses it (exact FQDNs
+  + apex `.example.com` entries treated as suffix matches), checks the
+  alert's `data.query` against it. If not allowed, appends to
+  `/var/log/vault-dns-anomaly.log`.
+
+The manager's local agent tails that anomaly log; a small custom
+decoder + rule pair fires rule 100220 at level 7 per anomaly:
+
+```xml
+<!-- decoder, append in /var/ossec/etc/decoders/local_decoder.xml -->
+<decoder name="vault-dns-anomaly">
+  <prematch>vault_dns_anomaly src=</prematch>
+  <regex type="pcre2">vault_dns_anomaly src=(\S+) query=(\S+)</regex>
+  <order>srcip, query</order>
+</decoder>
+
+<!-- rule, append in /var/ossec/etc/rules/local_rules.xml -->
+<rule id="100220" level="7">
+  <decoded_as>vault-dns-anomaly</decoded_as>
+  <description>Vaultwarden VM resolved unexpected domain: $(query)</description>
+</rule>
+```
+
+Full flow:
+
+```
+Vault VM DNS query → Pi-hole → wazuh-agent → manager
+  → rule 100200 fires (level 3, archived alert)
+  → integratord matches, invokes custom-vault-dns-check.py
+       → script reads /etc/vault-allowlist/vault-allowlist.txt
+       → if NOT allowed, appends to /var/log/vault-dns-anomaly.log
+  → wazuh-agent on wazuh-home tails that log
+  → rule 100220 fires (level 7, dashboard alert)
+```
+
+Round-trip via the agent so the anomaly is a first-class Wazuh event
+(searchable, alertable, exportable), not a side-channel log file.
+
+**Allowlist sync.** The integrator script reads
+`/etc/vault-allowlist/vault-allowlist.txt` on `wazuh-home`. Two ways to
+keep it synced with the canonical
+`proxy-home/vault_domains_allow_proxy.txt` in this repo:
+
+- Manual, copy after each repo push. Fine for a homelab; the allowlist
+  changes ~monthly.
+- Automated, shallow-clone the repo on `wazuh-home` and `git pull` in
+  a weekly cron, then symlink the file. Safer; no risk of forgetting
+  to sync.
+
+Either way, no allowlist content lives in the integrator script
+itself. The script reads the file fresh on each invocation (cheap, file
+is tiny), so allowlist edits take effect on the next Vault VM query,
+no manager restart needed.
+
+**Tuning the noise floor.** A few categories of legitimate Vault VM
+lookups will fire 100220 on day one and need handling:
+
+- **Reverse DNS** (`PTR` queries to `.in-addr.arpa`). Skip in the
+  integrator (don't even check, just `sys.exit(0)` on `qtype == "PTR"`).
+- **AAAA shadows of allowed A records.** Glibc resolver issues both;
+  if the A is allowed, the AAAA for the same name is too. The matching
+  is on `query` not `qtype`, so this is naturally handled (same FQDN,
+  same allowlist hit).
+- **Local search-list expansions** (`vault.local`, `_dns.resolver.arpa`,
+  the VM's own hostname). Skip via a hardcoded local-domain prefix
+  list in the script.
+- **Glibc opportunistic lookups.** Less common but worth watching;
+  add a small bypass list for known-noisy patterns observed during
+  the first week's tuning.
+
+Cut the level-7 noise floor low enough that any 100220 alert deserves
+manual attention. If you can't, the rule's not earning its keep.
+
+**Open questions / decisions.**
+
+- **Allowlist apex semantics.** `proxy-home/vault_domains_allow_proxy.txt`
+  uses `.example.com` (leading dot) for "apex + all subdomains" entries.
+  The integrator script must mirror Squid's interpretation exactly;
+  worth an offline test pass against a sample of real Squid log entries
+  before rolling out.
+- **Rate-limiting alerts.** A flood of 100220 (e.g. an updater script
+  iterating over a stale mirror list) could spam the dashboard. Either
+  cap with `frequency`/`timeframe` on the rule, or rate-limit inside
+  the script (write to anomaly log at most once per `(srcip, query)` per
+  day).
+- **Allowlist staleness as its own alert.** If the allowlist file is
+  unreadable on `wazuh-home`, the script currently emits a
+  `vault_dns_anomaly_error` line; a dedicated rule 100221 (level 5,
+  "allowlist load failed") makes that operator-visible.
+
+**What this does NOT fix.**
+
+- Not a substitute for the Squid allowlist. Squid is the actual
+  egress gate; this is the *visibility* layer that confirms the gate
+  is doing its job.
+- Doesn't catch lookups using non-Pi-hole resolvers. If something on
+  the Vault VM resolves via `1.1.1.1` directly (e.g. hardcoded in a
+  binary), Pi-hole never sees it and this rule never fires. The
+  Vault VM's egress firewall posture (only port 53 to `192.168.173.2`
+  is allowed) is what actually prevents that.
+- Doesn't distinguish reconnaissance from C2. Both look the same at
+  the DNS layer, "domain not in our allowlist." Use it as a flag for
+  investigation, not a verdict.
 
 **Active Response → Discord** (`/var/ossec/active-response/bin/discord-notify.py`
 on the manager):
@@ -951,4 +1123,17 @@ and becomes a peer (or replacement) for the cosign-based age path.
 - **Order of operations with idea #1 (backup signing).** Upstream verify
   of `minisign` itself is a prerequisite for trusting the minisign
   binary that signs backups. Do this before relying heavily on #1.
+
+---
+
+## 9. Wazuh alert when the Vault VM resolves a domain not on the Squid allowlist, MERGED INTO #7
+
+Originally drafted as a standalone idea, but it's structurally a Wazuh
+alert rule and belongs under the broader Wazuh rollout. Full write-up
+moved to **idea #7, Phase C, subsection "Allowlist-anomaly alert for
+the Vault VM"**.
+
+This stub is kept so cross-references to "idea #9" still resolve to a
+forwarding pointer rather than a dead link. Don't expand back into a
+parallel idea, edit it in place under #7.
 

@@ -28,6 +28,11 @@ services:
       FTLCONF_webserver_port: '443s'
     volumes:
       - /home/pi/pihole/data/etc-pihole:/etc/pihole
+      # Expose Pi-hole's query + FTL logs on the host so the Wazuh agent
+      # (running outside the container) can tail them. pihole.log is the
+      # dnsmasq query log used by the dnsmasq decoder; FTL.log is the
+      # FTL daemon's own log (errors, gravity reloads, etc).
+      - /var/log/pihole:/var/log/pihole
     cap_add:
       - SYS_TIME
       - CHOWN
