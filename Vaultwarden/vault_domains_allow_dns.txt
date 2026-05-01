@@ -67,16 +67,10 @@ bugs.debian.org
 acme-v02.api.letsencrypt.org
 acme-staging-v02.api.letsencrypt.org
 
-# === Cloudflare / Cloudflared Tunnel (R2 storage is in apex section) ===
+# === Cloudflare / Cloudflared Tunnel (argotunnel.com + R2 are in apex section) ===
 cloudflare.com
 www.cloudflare.com
 api.cloudflare.com
-argotunnel.com
-update.argotunnel.com
-protocol-v2.argotunnel.com
-region1.v2.argotunnel.com
-region2.v2.argotunnel.com
-cfd-features.argotunnel.com
 
 # === Docker / Podman / Containers ===
 auth.docker.io
@@ -132,9 +126,12 @@ test.example.com
 #
 #   (^|\.)debian\.pool\.ntp\.org$        # Debian NTP pool (0./1./2./3.)
 #   (^|\.)lencr\.org$                    # Let's Encrypt OCSP + issuer chain (r10/r11/e5/e6/x1/x2)
+#   (^|\.)argotunnel\.com$               # Cloudflared tunnel (region1./region2./protocol-v2./update./cfd-features./_v2-origintunneld._tcp/...)
 #   (^|\.)r2\.cloudflarestorage\.com$    # Cloudflare R2 bucket-prefix subdomains
 #   (^|\.)bunkerity\.com$                # BunkerWeb assets / blacklist feeds (apex + subs)
 #   (^|\.)bunkerweb\.io$                 # BunkerWeb update + telemetry (apex + subs)
 #   (^|\.)db-ip\.com$                    # DB-IP MMDB (apex + download.)
+#   (^|\.)dnsbl\.dronebl\.org$           # BunkerWeb DNSBL plugin (DroneBL); reversed-IP becomes a subdomain
+#   (^|\.)bl\.blocklist\.de$             # BunkerWeb DNSBL plugin (blocklist.de); reversed-IP becomes a subdomain
 #   (^|\.)crowdsec\.net$                 # CrowdSec hub + console + community blocklist
 #   (^|\.)cloudfront\.net$               # AWS CloudFront-hosted content (random subdomains)
