@@ -687,9 +687,14 @@ boolean to each event.
 **Superseded by a simpler architectural choice:** Pi-hole's allowlist
 scoped to the `vaultwarden-vm` group. The Vault VM is configured with
 strict default-deny at the DNS layer:
-- An "Add allowlist" URL pointing at `vault_domains_allow_dns.txt`
-  (Vaultwarden root). Gravity-format / ABP syntax mirroring the Squid
-  allowlist (bare host for exact match, `||apex^` for apex+subdomains).
+- "Add allowlist" URL pointing at `vault_domains_allow_dns.txt`
+  (Vaultwarden root) handles the bulk: bare-domain exact-match entries,
+  re-fetched on each gravity update.
+- A handful (~8) of apex+subdomain matches added by hand as Allow
+  Regex via Domain Management. Apex matches can't go via the URL
+  because Pi-hole 6's allowlist URL parser rejects ABP syntax
+  (`||apex^`), so the file's APEX section lists the regex strings as
+  source of truth, but the deployed copy lives in Pi-hole's UI.
 - One `.*` Deny Regex scoped to the same group, added manually under
   Domain Management.
 
@@ -726,9 +731,13 @@ Currently two manually-synced files in this repo encode the same
 intent in different formats:
 - `proxy-home/vault_domains_allow_proxy.txt`: Squid `dstdomain` syntax
   (one host per line; leading dot = apex + subdomains)
-- `vault_domains_allow_dns.txt` (Vaultwarden root): Pi-hole gravity /
-  ABP syntax (bare host for exact match, `||apex^` for apex + all
-  subdomains). Consumed by Pi-hole via the "Add allowlist" URL feature.
+- `vault_domains_allow_dns.txt` (Vaultwarden root): two-section file.
+  Bulk section: bare-domain exact-match entries, consumed by Pi-hole's
+  "Add allowlist" URL feature. Apex section: `(^|\.)apex\.example$`
+  regex strings (commented out so gravity skips them) listing the
+  apex+subdomain entries that have to be added manually as Allow Regex
+  in Pi-hole's Domain Management UI. Apex can't go via the URL because
+  Pi-hole 6's allowlist URL parser rejects ABP syntax.
 
 Both are appended to / edited by hand. Drift is the obvious failure
 mode: add a destination to one file, forget the other, and either
@@ -758,8 +767,14 @@ github.com                  # Pinned binary downloads
 Generator emits:
 - Squid file: copy lines 1:1 (Squid uses the exact same syntax for
   dstdomain).
-- Pi-hole file: translate each line to gravity/ABP syntax
-  (`exact` -> `exact`, `.apex` -> `||apex^`).
+- Pi-hole file: bulk section gets bare-domain entries (Squid's
+  `exact.host` -> `exact.host`); apex entries get expanded into the
+  APEX section as PCRE2 regex (Squid's `.apex.example` ->
+  `(^|\.)apex\.example$`).
+- Optional bonus: --apply mode that pushes apex entries directly to
+  Pi-hole's gravity / domainlist DB via SQLite or REST API, removing
+  the manual UI step entirely. That's the "real" automation; the
+  generator alone just keeps the two files in sync.
 
 Both outputs preserve comments and section headers so the generated
 files stay readable. Run on each repo edit (manual or pre-commit),
