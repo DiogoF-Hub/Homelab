@@ -8,6 +8,11 @@ security.debian.org
 metadata.ftp-master.debian.org
 debian.map.fastlydns.net
 .debian.pool.ntp.org
+# bugs.debian.org is queried by apt-listbugs (installed during the Lynis
+# hardening pass) before each apt install/upgrade. Without this, the BTS
+# lookup is denied and apt-listbugs silently skips, so any critical/grave
+# bug warnings never surface. Squid logs it as TCP_DENIED 403 to /var/log/squid/access.log.
+bugs.debian.org
 
 # ================================
 # Let's Encrypt (ACME + OCSP + issuer certs)
