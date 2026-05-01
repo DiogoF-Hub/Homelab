@@ -44,12 +44,15 @@ Homelab/
 │   ├── proxy-home/                           # targets the separate proxy-home VM (Squid HTTP/HTTPS egress only; DNS now via the LAN Pi-hole)
 │   │   ├── squid.conf
 │   │   └── vault_domains_allow_proxy.txt
-│   ├── wazuh-home/                           # Targets the wazuh-home VM (Wazuh manager), plus a localfile snippet for the LAN Pi-hole VM agent
+│   ├── vault_domains_allow_dns.txt           # Pi-hole allowlist for the vaultwarden-vm group (gravity/ABP-syntax mirror of the Squid allowlist; consumed via Pi-hole's "Add allowlist" URL feature)
+│   ├── wazuh-home/                           # Targets the wazuh-home VM (Wazuh manager) + sidecar daemon for the LAN Pi-hole VM
 │   │   ├── README.md
 │   │   ├── pihole-agent.localfile.xml        # <localfile> blocks for the Pi-hole VM's wazuh-agent
 │   │   ├── manager-global.snippet.xml        # logall_json toggle for the wazuh-home <global> block
-│   │   ├── manager-decoder.xml               # custom dnsmasq decoder (Wazuh's stock ruleset has none)
-│   │   └── manager-rules.xml                 # rule 100190 (archive-only) + 100200 (Vault VM srcip alert)
+│   │   ├── manager-rules.xml                 # rules 100250 / 100251 / 100252 (archive base + resolved + blocked)
+│   │   └── sidecar/
+│   │       ├── pihole-ftl-tail.py            # Daemon: polls Pi-hole's FTL SQLite DB, emits one JSON event per Vault VM query
+│   │       └── pihole-ftl-tail.service       # systemd unit (root, hardened, 10s polling tick)
 │   └── scripts/
 │       ├── root_scripts/                     # nightly orchestrator + phase scripts
 │       │   ├── lib.sh

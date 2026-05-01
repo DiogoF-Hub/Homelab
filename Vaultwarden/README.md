@@ -71,12 +71,16 @@ vaultwarden/
 │   ├── squid.conf                             # Squid proxy configuration for domain allowlisting
 │   └── vault_domains_allow_proxy.txt          # List of domains allowed for the Squid proxy
 │
-├── wazuh-home/                                # Targets the wazuh-home VM (Wazuh manager) + a localfile snippet for the LAN Pi-hole VM's agent
-│   ├── README.md                              # Architecture, apply order, verification steps
-│   ├── pihole-agent.localfile.xml             # <localfile> blocks for the Pi-hole VM's wazuh-agent
+├── wazuh-home/                                # Targets the wazuh-home VM (Wazuh manager) + sidecar daemon for the LAN Pi-hole VM
+│   ├── README.md                              # Architecture, apply order, verification, migration notes
+│   ├── pihole-agent.localfile.xml             # <localfile> block for the Pi-hole VM's wazuh-agent (tails the sidecar's vault-dns/events.log)
 │   ├── manager-global.snippet.xml             # logall_json toggle for the wazuh-home <global> block
-│   ├── manager-decoder.xml                    # Custom dnsmasq query-line decoder (Wazuh stock has none)
-│   └── manager-rules.xml                      # Rule 100190 (archive-only) + 100200 (Vault VM srcip alert)
+│   ├── manager-rules.xml                      # Rules 100250 (base) + 100251 (resolved, level 3) + 100252 (blocked, level 6)
+│   └── sidecar/
+│       ├── pihole-ftl-tail.py                 # Daemon: polls Pi-hole's FTL SQLite DB, emits one structured JSON event per query
+│       └── pihole-ftl-tail.service            # systemd unit (root, hardened, 10s polling tick)
+│
+├── vault_domains_allow_dns.txt                # Pi-hole allowlist for the vaultwarden-vm group (mirror of proxy-home/vault_domains_allow_proxy.txt in gravity/ABP syntax)
 │
 ├── scripts/                                   # Repo-side split by lifecycle / target user; all root_scripts/ + setups_scripts/ deploy to /root/vault/ on the VM
     ├── root_scripts/                          # Recurring scripts run by root nightly via cron
@@ -576,15 +580,21 @@ Without these entries, container startup would fail with cryptic Squid `407` / `
 
 ## 🌐 Outbound DNS via the LAN Pi-hole + Wazuh visibility
 
-> Second outbound chokepoint. Different VM than Squid: the Vault VM's `/etc/resolv.conf` points at the homelab's existing **LAN Pi-hole** (`192.168.173.2`) instead of running a dedicated DoH gateway purely for the Vault VM. The DoH-encrypted upstream is inherited from Pi-hole's existing `adguard/dnsproxy` sidecar (Cloudflare Family), and full visibility comes from shipping Pi-hole's `pihole.log` into Wazuh through a custom decoder + rule chain.
+> Second outbound chokepoint. Different VM than Squid: the Vault VM's `/etc/resolv.conf` points at the homelab's existing **LAN Pi-hole** (`192.168.173.2`) instead of running a dedicated DoH gateway purely for the Vault VM. The DoH-encrypted upstream is inherited from Pi-hole's existing `adguard/dnsproxy` sidecar (Cloudflare Family), and full visibility comes from a small sidecar daemon on the Pi-hole VM that tails Pi-hole's FTL SQLite database and ships one structured event per Vault-VM DNS query into Wazuh.
 
 ### Why Pi-hole instead of a dedicated dnsproxy
 
 The earlier iteration ran `adguard/dnsproxy` directly on the `proxy-home` VM, with the Vault VM's `/etc/resolv.conf` pointing there. That worked, but had two costs: a second DoH stack to maintain just for one client, and DNS visibility limited to a `tail -f /srv/dnsproxy-logs/queries.log` on the proxy-home host (no SIEM integration at the time).
 
-Reusing the existing LAN Pi-hole drops the duplicate stack and bolts the visibility piece directly onto Wazuh: every Vault VM query becomes a level-3 alert in the dashboard, scoped to the Vault VM's source IP, with full per-query metadata (qtype, query, srcip).
+Reusing the existing LAN Pi-hole drops the duplicate stack and bolts the visibility piece directly onto Wazuh: every Vault VM query becomes an alert in the dashboard, scoped to the Vault VM's source IP, with full per-query metadata (qtype, query, status, blocked-or-not, upstream).
 
 The same encrypted-upstream story is preserved: Pi-hole forwards to Cloudflare Family DoH via its own dnsproxy sidecar, so plaintext UDP never leaves the LAN.
+
+### Why the FTL SQLite DB instead of Pi-hole's text log
+
+Pi-hole's dnsmasq text log (`/var/log/pihole/pihole.log`) emits four-plus different syntactic patterns for "this query was blocked" depending on the source: `gravity blocked` (adlist), `exactly denied` (manual), `regex denied`, `blocked upstream with NULL address`, `reply X is blocked due to upstream response (answer)` followed by `<not set> X is 0.0.0.0`. Pi-hole versions reword these and add new flavors over time. Building a Wazuh decoder regex that catches every variant and stays correct across upgrades was whack-a-mole.
+
+The FTL SQLite DB at `/etc/pihole/pihole-FTL.db` (host bind mount: `/home/pi/pihole/data/etc-pihole/pihole-FTL.db`) has a normalized **status** integer column that knows authoritatively what happened, regardless of how the dnsmasq text log phrased it. The sidecar reads it directly and emits one merged JSON event per query, with the block source as a stable enum (`blocked-gravity`, `blocked-deny-exact`, `blocked-upstream-null`, `blocked-external-null-reply`, ...) plus a single boolean `blocked` field for dashboard filtering.
 
 ### Architecture
 
@@ -596,75 +606,102 @@ The same encrypted-upstream story is preserved: Pi-hole forwards to Cloudflare F
             ▼
 [ LAN Pi-hole VM, 192.168.173.2 ]
    ├─ pihole-FTL (dnsmasq)
-   │     └─ writes /var/log/pihole/pihole.log (host bind mount)
+   │     └─ writes /etc/pihole/pihole-FTL.db (SQLite; bind-mounted on the host as /home/pi/pihole/data/etc-pihole/pihole-FTL.db)
    ├─ adguard/dnsproxy (sidecar, DoH upstream to Cloudflare Family)
+   ├─ pihole-ftl-tail.py (sidecar daemon, systemd-managed, polls FTL DB every 10s)
+   │     filters to Vault VM client, emits JSON events
+   │     -> /var/log/vault-dns/events.log
    └─ wazuh-agent
-         │  tails /var/log/pihole/pihole.log
+         │  tails /var/log/vault-dns/events.log (JSON)
          ▼
 [ wazuh-home (Wazuh manager) ]
-   ├─ custom decoder pihole-dnsmasq-query
-   ├─ rule 100190 (level 0): every Pi-hole DNS query, archived
-   └─ rule 100200 (level 3): only Vault VM srcip, alerts in dashboard
+   ├─ built-in JSON decoder auto-extracts data.* fields
+   ├─ rule 100250 (level 0): every Vault DNS event, archived
+   ├─ rule 100251 (level 3): resolved query (forwarded / cached / etc)
+   └─ rule 100252 (level 6): blocked query (any flavor)
 ```
 
 ### What's where in this repo
 
-The Pi-hole stack itself lives in [`PiHole/`](../PiHole/) at the root of this repo. The Wazuh-side configuration that gives Vault-VM-specific visibility lives in [`wazuh-home/`](./wazuh-home/), see its README for the architecture diagram, file mapping (which snippet goes on which VM), apply order, and verification steps.
+The Pi-hole stack itself lives in [`PiHole/`](../PiHole/) at the root of this repo. Everything Wazuh-related (the sidecar daemon + manager-side rules + agent localfile snippet) lives in [`wazuh-home/`](./wazuh-home/), see its README for the architecture diagram, file mapping (which snippet goes on which VM), apply order, verification steps, and migration notes if you're upgrading from the previous text-log pipeline.
 
 Quick summary of what's in `wazuh-home/`:
 
 | File | Where it goes | What it does |
 |------|---------------|--------------|
-| `wazuh-home/pihole-agent.localfile.xml` | Append to `<ossec_config>` in **Pi-hole VM** `/var/ossec/etc/ossec.conf` | Tells the agent to tail `pihole.log` and `FTL.log` |
+| `wazuh-home/sidecar/pihole-ftl-tail.py` | Install at **Pi-hole VM** `/usr/local/sbin/pihole-ftl-tail.py` | Daemon: polls Pi-hole's FTL SQLite DB, emits one JSON event per Vault VM query |
+| `wazuh-home/sidecar/pihole-ftl-tail.service` | Install at **Pi-hole VM** `/etc/systemd/system/` | systemd unit (root, hardened, 10s polling tick) |
+| `wazuh-home/pihole-agent.localfile.xml` | Append to `<ossec_config>` in **Pi-hole VM** `/var/ossec/etc/ossec.conf` | Tells the agent to tail the sidecar's `/var/log/vault-dns/events.log` (JSON format) |
 | `wazuh-home/manager-global.snippet.xml` | One line inside `<global>` in **wazuh-home** `/var/ossec/etc/ossec.conf` | Enables `logall_json` so level-0 events land in `archives.json` |
-| `wazuh-home/manager-decoder.xml` | Append inside **wazuh-home** `/var/ossec/etc/decoders/local_decoder.xml` | Custom dnsmasq query-line decoder (Wazuh's stock ruleset has none) |
-| `wazuh-home/manager-rules.xml` | Append inside **wazuh-home** `/var/ossec/etc/rules/local_rules.xml` | Rule 100190 (catch-all archive) + 100200 (Vault VM srcip, level 3) |
+| `wazuh-home/manager-rules.xml` | Append inside **wazuh-home** `/var/ossec/etc/rules/local_rules.xml` | Three-rule chain (100250 archive base + 100251 resolved + 100252 blocked) |
 
-### Pi-hole groups, no DNS-layer blocking for the Vault VM
+### Pi-hole groups + DNS-layer allowlist for the Vault VM
 
-**Pi-hole is positioned here as a passive observer, not a filter.** Every query the Vault VM makes is forwarded straight upstream (DoH to Cloudflare Family) and the answer comes back unchanged; Pi-hole sits in the middle purely so the query lands in `pihole.log`, where the Wazuh agent can pick it up. None of Pi-hole's adlists or blocklists apply to the Vault VM.
+**Pi-hole acts as a strict allowlist enforcer for the Vault VM**, on top of also being the visibility layer. The Vault VM can resolve only domains explicitly allowlisted; every other lookup is denied at the DNS layer (returns `0.0.0.0`) and surfaces as a Wazuh alert. Other LAN clients are unaffected, this configuration carves out an isolated zone for the Vault VM only.
 
-That choice is intentional. Squid (`proxy-home/squid.conf` + `vault_domains_allow_proxy.txt`) is the actual content gate for the Vault VM's HTTP/HTTPS egress. Layering DNS-layer blocking on top of that would just add a second, less observable failure mode: the day an apt mirror or container registry shows up on a community blocklist, the Vault VM's nightly maintenance silently breaks with no Squid log to point at. Keeping Pi-hole in pure-logging mode for this client means there's exactly one outbound chokepoint making policy decisions (Squid), and one separate layer providing visibility (Pi-hole + Wazuh).
+This is **defense-in-depth on top of Squid**. Squid (`proxy-home/squid.conf` + `vault_domains_allow_proxy.txt`) is the actual content gate for HTTP/HTTPS egress. The Pi-hole DNS allowlist gives a second enforcement layer, plus catches DNS-only reconnaissance (a compromised host resolving names to enumerate services without ever opening a connection). Both lists must stay in sync; see [`vault_domains_allow_dns.txt`](./vault_domains_allow_dns.txt) for the Pi-hole-format mirror of the Squid allowlist, and `ideas.md` for the planned single-source-of-truth automation.
+
+`vault_domains_allow_dns.txt` is in **gravity / ABP syntax** (one domain per line, with `||apex^` for apex-plus-subdomains entries) so Pi-hole can ingest it directly via the "Add allowlist" URL feature. No regex bulk-paste needed.
 
 How to wire it in Pi-hole's web UI:
 
 1. **Group Management → Groups**: create a `vaultwarden-vm` group.
-2. **Group Management → Clients**: add the Vault VM's IP and assign it to that group.
-3. **Group Management → Adlists**: untick every adlist for the `vaultwarden-vm` group.
+2. **Group Management → Clients**: add the Vault VM's IP and assign it to that group, with **only** that group ticked (untick `Default`). Otherwise the Default group's adlists also apply and you'll see surprise blocks.
+3. **Group Management → Adlists**: leave the `vaultwarden-vm` group with **no adlists ticked**. The Squid allowlist + Pi-hole's allowlist URL replace adlist filtering for this client.
+4. **Lists → Add allowlist** (green button): paste the **raw GitHub URL** of the file as the address, scope to `vaultwarden-vm` group only:
+   ```
+   https://raw.githubusercontent.com/DiogoF-Hub/Homelab/main/Vaultwarden/vault_domains_allow_dns.txt
+   ```
+   Then **Tools → Update Gravity** to fetch and apply. The list's entry count should match the non-comment lines in the file.
+5. **Domain Management → Domains**: add **one** Deny Regex entry, value `.*`, scoped to `vaultwarden-vm` group only. This is the default-deny that catches everything not allowed by step 4. Pi-hole evaluates Allow before Deny, so the `.*` only applies to lookups that didn't match the allowlist.
 
-Net effect: full resolution, DoH upstream, every query logged in `pihole.log`, zero domains blocked at the DNS layer for this client. Other LAN clients keep using Pi-hole's normal filtered behaviour through the default group, this configuration only carves out an exception for the Vault VM.
+Net effect: full resolution for allowlisted domains via Pi-hole's DoH upstream; every other domain returns `0.0.0.0` at DNS time. Each blocked attempt becomes a level-6 Wazuh alert (rule 100252, `status=blocked-regex`) so misconfigurations and unknown unknowns are immediately visible.
+
+#### Updating the allowlist later
+
+Edit `vault_domains_allow_dns.txt` in the repo, push, then **Tools → Update Gravity** in Pi-hole (or wait for the next scheduled gravity run, default daily). Pi-hole re-fetches the URL and reconciles. No need to re-add the list or restart anything; entries in the gravity DB are added/removed to match the updated file.
+
+#### Bootstrap / refinement workflow
+
+After deploying the allowlist + deny, expect a flurry of `100252` alerts during the first few days as edge cases (rDNS / `*.in-addr.arpa`, search-list expansions, glibc opportunistic lookups, missed apex domains) hit the deny. Each one is either:
+
+- **Legit Vault VM activity that's missing from the allowlist**: add the domain to both `proxy-home/vault_domains_allow_proxy.txt` and `vault_domains_allow_dns.txt`, push, redeploy Squid, run Update Gravity in Pi-hole.
+- **DNS noise** (rDNS, search-list, etc.): for PTR queries on `*.in-addr.arpa` you'd need a wildcard match Pi-hole's gravity-format can't quite express, so add it as a manual Allow Regex like `(^|\.)in-addr\.arpa$` scoped to the `vaultwarden-vm` group, OR accept the failure (most apps degrade gracefully when rDNS fails).
+- **Genuinely unexpected**: that's the alert earning its keep.
+
+The noise floor settles to "real signal only" within a week or two.
 
 ### Operations cheat sheet
 
 ```bash
-# Confirm the Pi-hole compose has the host bind mount for the log dir
-grep -A1 'volumes:' ~/pihole/docker-compose.yml | grep '/var/log/pihole'
+# === On the Pi-hole VM ===
 
-# Live-tail the dnsmasq query log on the Pi-hole VM
-sudo tail -f /var/log/pihole/pihole.log
+# Confirm the FTL DB is reachable on the host
+sudo sqlite3 -readonly /home/pi/pihole/data/etc-pihole/pihole-FTL.db \
+  "SELECT count(*) FROM queries WHERE timestamp > strftime('%s','now','-1 hour')"
 
-# Confirm the wazuh-agent on the Pi-hole VM is tailing the right file
-sudo grep "pihole.log" /var/ossec/logs/ossec.log | tail
-# expect: Analyzing file: '/var/log/pihole/pihole.log'
+# Sidecar status + recent events
+sudo systemctl status pihole-ftl-tail
+sudo journalctl -u pihole-ftl-tail -n 20
+sudo tail -f /var/log/vault-dns/events.log
 
-# On wazuh-home, watch Vault-VM alerts arrive in real time
+# Confirm the wazuh-agent is tailing the merged log
+sudo grep "vault-dns-events" /var/ossec/logs/ossec.log | tail
+# expect: Analyzing file: '/var/log/vault-dns/events.log'
+
+# === On wazuh-home ===
+
+# Watch Vault-VM alerts arrive in real time
 sudo tail -f /var/ossec/logs/alerts/alerts.json \
-  | jq -r 'select(.rule.id=="100200") | "\(.timestamp) \(.data.qtype) \(.data.query) from \(.data.srcip)"'
+  | jq -r 'select(.rule.id=="100251" or .rule.id=="100252") | "\(.timestamp) [\(.rule.id)] \(.data.qtype) \(.data.query) \(.data.status)"'
 
-# Offline-test a sample log line through the decoder + rule chain
-# (no agent / Pi-hole / live traffic needed)
-sudo /var/ossec/bin/wazuh-logtest
-# then paste:
-#   May  1 15:00:32 dnsmasq[52]: query[A] github.com from 192.168.50.3
-# expect: decoder pihole-dnsmasq-query, rule 100200 fires
-
-# Validate manager config after editing local_decoder.xml or local_rules.xml
+# Validate manager config after editing local_rules.xml
 sudo /var/ossec/bin/wazuh-analysisd -t
 ```
 
 ### Planned next step (not yet implemented)
 
-Right now every Vault VM DNS query is a level-3 alert: full visibility, but uniform noise. The next iteration runs a Wazuh integrator that cross-checks each query against the Squid allowlist (`proxy-home/vault_domains_allow_proxy.txt`, mirrored onto wazuh-home) and emits a higher-level alert only for misses. Sketch in [`wazuh-home/README.md`](./wazuh-home/README.md) under "Planned next step"; full design tracked in [ideas.md](ideas.md) #7.
+Right now every Vault VM DNS query alerts at level 3 (resolved) or level 6 (blocked). The next iteration adds **allowlist-anomaly detection**: extend the sidecar to read the Squid allowlist (`proxy-home/vault_domains_allow_proxy.txt`) and tag each event with an `allowed` boolean, then add a higher-level rule that fires only when a resolved query's domain is NOT on the allowlist. Sketch in [`wazuh-home/README.md`](./wazuh-home/README.md) under "Planned next step"; full design tracked in [ideas.md](ideas.md) #7 Phase C subsection "Allowlist-anomaly alert for the Vault VM".
 
 ---
 
@@ -688,8 +725,8 @@ A map of every log this stack writes, what each one captures, and what consumes 
 
 | Log file | What it captures | Currently consumed by | Future consumers |
 |----------|------------------|------------------------|------------------|
-| `/var/log/pihole/pihole.log` | dnsmasq query log: `query[A/AAAA/HTTPS/PTR] <domain> from <client-ip>`, plus matching `forwarded` / `reply` / `cached` / `gravity blocked` lines. Bind-mounted from inside the Pi-hole container, see [`PiHole/docker-compose.yml`](../PiHole/docker-compose.yml). | Wazuh agent (tails the file; custom decoder + rules in [`wazuh-home/`](./wazuh-home/) elevate Vault-VM-srcip queries to level-3 alerts) | Wazuh integrator script for allowlist-anomaly detection (planned, see [ideas.md](ideas.md) #7) |
-| `/var/log/pihole/FTL.log` | Pi-hole FTL daemon log: gravity reloads, blocklist updates, errors. | Wazuh agent (tails the file, base ruleset only) | n/a |
+| `/etc/pihole/pihole-FTL.db` (host bind: `/home/pi/pihole/data/etc-pihole/pihole-FTL.db`) | Pi-hole FTL's SQLite database: one row per resolved query in the `queries` view, with normalized columns for timestamp / qtype / status / domain / client / forward. Authoritative source of "what happened to this query." | Sidecar daemon `pihole-ftl-tail.py` (polls every 10s, filters to Vault VM, emits one JSON line per query to `/var/log/vault-dns/events.log`). See [`wazuh-home/`](./wazuh-home/) | Allowlist-anomaly extension to the sidecar (planned, see [ideas.md](ideas.md) #7) |
+| `/var/log/vault-dns/events.log` | Sidecar output: one JSON line per Vault VM DNS query with `srcip / qtype / query / status / status_code / blocked / forward`. | Wazuh agent (tails the file as `log_format=json`; manager auto-decodes with built-in JSON decoder; rules 100250 / 100251 / 100252 in [`wazuh-home/manager-rules.xml`](./wazuh-home/manager-rules.xml) fire per event) | n/a |
 
 ### Wazuh agent (current state)
 
@@ -699,7 +736,7 @@ Wazuh agents are installed and enrolled across three VMs in the homelab, with ve
 |----|-------------|--------------------------|
 | Vaultwarden VM | Installed, enrolled, **stock defaults** | Nothing app-specific. No `<localfile>` entries for `vw-logs/` / `bw-logs/` / `main.sh` status; no custom FIM beyond defaults; no custom decoders or rules on the manager side scoped to this VM. Stock keepalives + base syscheck/inventory only. |
 | `proxy-home` VM | Installed, enrolled, **stock defaults** | Stock keepalives + base syscheck/inventory only. With dnsproxy gone, the proxy-home VM has nothing application-specific to ship. |
-| LAN Pi-hole VM | Installed, enrolled, **with custom localfile + manager-side decoder/rules** | `pihole.log` + `FTL.log` shipped; custom decoder `pihole-dnsmasq-query` + rules 100190/100200 on `wazuh-home` produce a level-3 alert per Vault-VM DNS query. Configuration snippets in [`wazuh-home/`](./wazuh-home/). |
+| LAN Pi-hole VM | Installed, enrolled, **with custom localfile + sidecar daemon + manager-side rules** | `pihole-ftl-tail.py` daemon polls Pi-hole's FTL SQLite DB and emits structured JSON events to `/var/log/vault-dns/events.log`; agent ships those; manager rules 100250 / 100251 / 100252 produce per-query alerts (resolved at level 3, blocked at level 6) using Wazuh's built-in JSON decoder. Configuration in [`wazuh-home/`](./wazuh-home/). |
 
 The Wazuh apt repo (`packages.wazuh.com`) is configured on each VM so the agent gets pulled in by normal `apt upgrade` cycles, the nightly `system-update.sh` phase on the Vaultwarden VM, and standard unattended-upgrades elsewhere. `packages.wazuh.com` is on the Vaultwarden VM's Squid allowlist (`proxy-home/vault_domains_allow_proxy.txt`) for that reason. Upgrade procedure documented upstream: [Wazuh agent, Linux upgrade guide](https://documentation.wazuh.com/current/upgrade-guide/wazuh-agent/linux.html).
 
@@ -714,14 +751,14 @@ The full Wazuh build-out for Vault-VM-internal logs (log shipping for `bw-logs/`
 
 - **CrowdSec**, tails `vaultwarden.log` + `access.log` + `error.log` + `modsec_audit.log` in real time, parses them, applies bouncer decisions back at BunkerWeb. The parser/scenario/whitelist files in `crowdsec/` are the contract between log format and detection rules.
 - **TrueNAS**, pulls the encrypted backup bundle + the four `/srv/logs/{main,backup,docker,system}/` phase logs via scp using the `fetcher` user (see [Off-site replication](#off-site-replication-truenas-via-cron)).
-- **Wazuh**, agent on the LAN Pi-hole VM ships `pihole.log` + `FTL.log` live; manager-side custom decoder + rules in [`wazuh-home/`](./wazuh-home/) elevate every Vault-VM-srcip DNS query to a level-3 alert in the dashboard. Agents on the Vaultwarden VM and `proxy-home` VM are enrolled but otherwise at stock defaults (no `vw-logs/` / `bw-logs/` shipping yet, see [ideas.md](ideas.md) #7).
+- **Wazuh**, agent on the LAN Pi-hole VM ships the FTL-DB-sidecar's `/var/log/vault-dns/events.log` (structured JSON) live; manager rules 100251 / 100252 in [`wazuh-home/`](./wazuh-home/) produce per-query alerts (resolved at level 3, blocked at level 6) for the Vault VM. Agents on the Vaultwarden VM and `proxy-home` VM are enrolled but otherwise at stock defaults (no `vw-logs/` / `bw-logs/` shipping yet, see [ideas.md](ideas.md) #7).
 - **Operator**, `tail -f` for live debugging; log files are the source of truth for everything except the BW internal scheduler/UI/Redis logs (those are debug-only).
 
 ---
 
 ## 🔁 Log Rotation
 
-Vaultwarden and BunkerWeb's nginx workers append to their log files indefinitely, none rotate themselves. Two host-side configs cover this on the Vaultwarden VM. They live in `/etc/logrotate.d/<name>` and are NOT checked into this repo. The LAN Pi-hole VM handles its own `pihole.log` rotation via Pi-hole's bundled logrotate setup, no extra config needed there.
+Vaultwarden, BunkerWeb's nginx workers, and the FTL-DB sidecar's output log all append indefinitely; none rotate themselves. Three host-side configs cover this across two VMs. They live in `/etc/logrotate.d/<name>` and are NOT checked into this repo (created by hand from the snippets below). Pi-hole's own `pihole.log` is rotated by Pi-hole's bundled logrotate setup, no extra config needed for that.
 
 `copytruncate` is **load-bearing** in every config below: the standard logrotate mode (rename + create new file) changes the file's inode, and CrowdSec tails by file descriptor, it would keep reading the renamed (eventually compressed-and-deleted) file forever and miss new entries. `copytruncate` keeps the same inode and truncates in place, so its open fd keeps seeing fresh writes uninterrupted.
 
@@ -754,6 +791,28 @@ Vaultwarden and BunkerWeb's nginx workers append to their log files indefinitely
 ```
 
 The `letsencrypt/` subdir under `/srv/bw-logs/` is rotated internally by BunkerWeb's bundled certbot, the glob above won't recurse into it, which is intentional. Leave it alone.
+
+### LAN Pi-hole VM
+
+#### `/etc/logrotate.d/vault-dns`
+
+Bounds the FTL-DB sidecar's output log. Install logrotate first if it isn't there (`sudo apt install logrotate`), then `sudo nano /etc/logrotate.d/vault-dns` and paste:
+
+```
+/var/log/vault-dns/events.log {
+    daily
+    rotate 14
+    compress
+    delaycompress
+    missingok
+    notifempty
+    copytruncate
+    create 0640 root root
+}
+```
+
+`delaycompress` keeps yesterday's rotated file uncompressed so a quick `grep` works without `zgrep`. `notifempty` skips rotation when the sidecar hasn't emitted anything (e.g. Vault VM idle for a day). `create 0640 root root` is mostly redundant with `copytruncate` but pins the perms explicitly. Verify with `sudo logrotate -d /etc/logrotate.d/vault-dns` (dry-run); the daily run is invoked automatically by Debian's `/etc/cron.daily/logrotate` or systemd's `logrotate.timer`.
+
 
 ### Maintenance script logs (Vaultwarden VM)
 

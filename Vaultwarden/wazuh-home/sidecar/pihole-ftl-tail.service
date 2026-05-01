@@ -1,0 +1,76 @@
+# systemd service unit for the Pi-hole FTL DB tail sidecar.
+#
+# Install on the Pi-hole VM (host, not inside the container):
+#     sudo install -m 0755 pihole-ftl-tail.py /usr/local/sbin/pihole-ftl-tail.py
+#     sudo install -m 0644 pihole-ftl-tail.service /etc/systemd/system/
+#     sudo systemctl daemon-reload
+#     sudo systemctl enable --now pihole-ftl-tail
+#
+# Verify:
+#     sudo systemctl status pihole-ftl-tail
+#     sudo journalctl -u pihole-ftl-tail -f
+#     sudo tail -f /var/log/vault-dns/events.log
+#
+# Runs as root because:
+#   - reads /home/pi/pihole/data/etc-pihole/pihole-FTL.db (owned by the
+#     Pi-hole container's pihole user, UID 1000 on the host but with
+#     restrictive perms when other users on the host don't share the
+#     UID); root is the simplest "definitely can read it" choice
+#   - writes /var/log/vault-dns/ and /var/lib/pihole-ftl-tail/
+#
+# The hardening below limits blast radius:
+#   - PrivateTmp + ProtectSystem=strict + ProtectHome=read-only +
+#     ReadWritePaths whitelist confine writes to the two known dirs
+#   - NoNewPrivileges blocks setuid escalation
+#   - RestrictAddressFamilies=AF_UNIX kills network access (sqlite3 is
+#     local-only, doesn't need anything else)
+#
+# If you'd rather run as a dedicated non-root user, create one and
+# give it group access to FTL_DB; permissions on /var/log/vault-dns/
+# and /var/lib/pihole-ftl-tail/ then need to match. Root is fine for
+# the homelab.
+
+[Unit]
+Description=Pi-hole FTL DB tail to Wazuh log (Vaultwarden DNS visibility)
+Documentation=https://github.com/DiogoF-Hub/Homelab/blob/main/Vaultwarden/wazuh-home/README.md
+After=network-online.target docker.service
+Wants=network-online.target
+# Soft dependency on Pi-hole's container being up. If docker isn't
+# present (e.g. podman replaces it later), the soft dep is harmless.
+PartOf=docker.service
+
+[Service]
+Type=simple
+ExecStart=/usr/local/sbin/pihole-ftl-tail.py
+
+# Auto-restart on crash; back off so a tight crash loop doesn't peg
+# the CPU.
+Restart=on-failure
+RestartSec=15s
+
+# Log to journald only (no extra stdout/stderr file). Inspect with:
+#   sudo journalctl -u pihole-ftl-tail -f
+StandardOutput=journal
+StandardError=journal
+
+# --- hardening ---
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ProtectKernelTunables=true
+ProtectKernelLogs=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictNamespaces=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+SystemCallArchitectures=native
+RestrictAddressFamilies=AF_UNIX
+# Whitelist the only paths the script needs to write to.
+ReadWritePaths=/var/log/vault-dns /var/lib/pihole-ftl-tail
+
+[Install]
+WantedBy=multi-user.target

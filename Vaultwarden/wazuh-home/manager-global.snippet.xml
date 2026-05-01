@@ -14,13 +14,14 @@
 
   Why: Wazuh's default behaviour writes only ALERTS (level >=3) to
   alerts.json. Everything decoded at level 0 (e.g. the catch-all DNS
-  query rule 100190 below) is silently dropped after decoding.
+  rule 100250 in manager-rules.xml) is silently dropped after decoding.
 
   logall_json:yes makes the manager additionally write every decoded
   event to /var/ossec/logs/archives/archives.json regardless of level.
-  That's how the pi-hole DNS query stream becomes searchable:
-    - rule 100190 (level 0): visible in archives.json, not alerts.json
-    - rule 100200 (level 3): visible in both
+  That's how the Vault VM DNS event stream becomes searchable:
+    - rule 100250 (level 0): visible in archives.json, not alerts.json
+    - rule 100251 (level 3, resolved): visible in both
+    - rule 100252 (level 6, blocked):  visible in both
 
   Trade-off: archives.json grows fast (one line per decoded event).
   Wazuh's default logrotate config under /etc/logrotate.d/wazuh
