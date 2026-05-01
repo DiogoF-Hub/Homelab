@@ -1,39 +1,46 @@
 <!--
   Pi-hole VM: Wazuh agent <localfile> blocks.
 
-  Append these inside any <ossec_config> block in the Pi-hole VM's
+  Append this inside any <ossec_config> block in the Pi-hole VM's
   /var/ossec/etc/ossec.conf, then restart the agent:
       sudo systemctl restart wazuh-agent
 
-  Multiple <ossec_config> blocks at the top level are valid Wazuh syntax;
-  the agent merges them at load time. Easiest pattern is to drop a new
-  <ossec_config> below the stock ones rather than splice into existing
-  blocks.
+  Multiple <ossec_config> blocks at the top level are valid Wazuh
+  syntax; the agent merges them at load time. Easiest pattern is to
+  drop a new <ossec_config> below the stock ones rather than splice
+  into existing blocks.
 
-  Prerequisite on the host: the Pi-hole compose file must bind-mount
-  /var/log/pihole on the host so this path is reachable from outside the
-  container. See PiHole/docker-compose.yml in this repo (the volume entry
-  was added specifically for this).
+  Single source: /var/log/vault-dns/events.log
 
-  pihole.log: dnsmasq query log (the actual signal). One line per DNS
-  query and reply; the manager-side custom decoder
-  (manager-decoder.xml) parses query[*] lines into qtype/query/srcip.
+  Structured JSON log emitted by the FTL-DB sidecar at
+  sidecar/pihole-ftl-tail.py. One line per Vault VM DNS query, with
+  fields qtype / query / status / status_code / blocked / forward.
 
-  FTL.log: Pi-hole's own daemon log (gravity reloads, blocklist updates,
-  errors). Optional but cheap to ship; useful if Pi-hole misbehaves
-  unrelated to DNS resolution.
+  Lives in its own subdirectory so logrotate can target the dir
+  cleanly. Rotation handled by /etc/logrotate.d/vault-dns (host-side
+  config; canonical text in Vaultwarden/README.md § Log Rotation →
+  LAN Pi-hole VM): daily, keep 14 compressed.
+
+  log_format=json tells the agent to ship raw JSON lines; Wazuh's
+  built-in JSON decoder on the manager auto-extracts every key into
+  data.* fields, so manager-rules.xml just filters by field=value
+  without needing a custom decoder.
+
+  Earlier iterations also tailed /var/log/pihole/pihole.log (text-log
+  approach, retired) and /var/log/pihole/FTL.log (daemon health,
+  optional). Both are gone now: the sidecar reads the FTL SQLite
+  database directly, so the host bind mount of /var/log/pihole has
+  been removed from PiHole/docker-compose.yml and those host paths no
+  longer exist. If you're upgrading from either earlier state, REMOVE
+  any leftover <localfile> for /var/log/pihole/* from your deployed
+  ossec.conf when you add the entry below.
 -->
 
 <ossec_config>
 
   <localfile>
-    <log_format>syslog</log_format>
-    <location>/var/log/pihole/pihole.log</location>
-  </localfile>
-
-  <localfile>
-    <log_format>syslog</log_format>
-    <location>/var/log/pihole/FTL.log</location>
+    <log_format>json</log_format>
+    <location>/var/log/vault-dns/events.log</location>
   </localfile>
 
 </ossec_config>

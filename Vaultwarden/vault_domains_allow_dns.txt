@@ -1,0 +1,128 @@
+# Pi-hole allowlist for the Vaultwarden VM
+#
+# This file is the source of truth for what domains the Vault VM is
+# allowed to resolve. It mirrors proxy-home/vault_domains_allow_proxy.txt
+# (the Squid HTTP/HTTPS allowlist) in a Pi-hole-compatible format
+# (gravity / ABP syntax) so it can be consumed directly via Pi-hole's
+# "Add allowlist" URL feature.
+#
+# DEPLOY (one-time):
+#   1. Push this repo so the file is reachable at:
+#        https://raw.githubusercontent.com/DiogoF-Hub/Homelab/main/Vaultwarden/vault_domains_allow_dns.txt
+#   2. Pi-hole web UI -> Lists -> click "Add allowlist" (green button).
+#        - Address: paste the raw.githubusercontent.com URL above
+#        - Group assignment: ONLY vaultwarden-vm (untick Default)
+#        - Comment: "vault VM allowlist (mirror of Squid)"
+#   3. Tools -> Update Gravity (or wait for the next scheduled run).
+#      Confirm the new entries land in the gravity DB by clicking the
+#      list; the entry count should match the non-comment lines below.
+#   4. Add ONE Deny Regex manually so anything NOT in the allowlist gets
+#      blocked at DNS time:
+#        Domain Management -> Domains -> Add a new domain
+#        - Type:    Deny Regex
+#        - Domain:  .*
+#        - Group:   ONLY vaultwarden-vm (untick Default)
+#        - Comment: "vault-deny-all: catches everything not allowlisted"
+#
+# Pi-hole evaluation order: Allow > Deny. So the Vault VM resolves only
+# domains matched by an entry below; everything else hits the .* deny
+# and returns 0.0.0.0.
+#
+# UPDATING (after the initial deploy):
+#   Edit this file in the repo, push, then in Pi-hole UI run "Update
+#   Gravity" (or wait for the next scheduled gravity run, default daily).
+#   Pi-hole re-fetches the URL and reconciles the allow entries against
+#   it. No need to re-add the list or restart anything.
+#
+# SYNTAX (Pi-hole / gravity):
+#   exact.host.example     - exact-match allow (no subdomains)
+#   ||apex.example^        - ABP-style; allow apex + ALL subdomains
+#
+# Comments via `#` are stripped by gravity. Inline `# blah` after an
+# entry is fine; gravity just keeps the domain/ABP token.
+#
+# SYNC NOTE: paired by hand with proxy-home/vault_domains_allow_proxy.txt
+# (Squid HTTP/HTTPS gate). Drift between the two files breaks resolution
+# silently in one direction or the other (Squid lets HTTP through but
+# DNS fails, or vice versa). The future single-source-of-truth
+# automation that would emit both formats from one input is tracked in
+# ideas.md.
+
+# === Debian system updates ===
+deb.debian.org
+security.debian.org
+metadata.ftp-master.debian.org
+debian.map.fastlydns.net
+||debian.pool.ntp.org^
+bugs.debian.org
+
+# === Let's Encrypt (ACME + OCSP + issuer certs) ===
+acme-v02.api.letsencrypt.org
+acme-staging-v02.api.letsencrypt.org
+||lencr.org^
+
+# === Cloudflare / Cloudflared Tunnel ===
+cloudflare.com
+www.cloudflare.com
+api.cloudflare.com
+argotunnel.com
+update.argotunnel.com
+protocol-v2.argotunnel.com
+region1.v2.argotunnel.com
+region2.v2.argotunnel.com
+cfd-features.argotunnel.com
+||r2.cloudflarestorage.com^
+
+# === Docker / Podman / Containers ===
+auth.docker.io
+registry-1.docker.io
+download.docker.com
+production.cloudflare.docker.com
+dl-cdn.alpinelinux.org
+
+# === GitHub / Dev tools ===
+github.com
+api.github.com
+raw.githubusercontent.com
+release-assets.githubusercontent.com
+objects.githubusercontent.com
+codeload.github.com
+avatars.githubusercontent.com
+ghcr.io
+
+# === Go ecosystem ===
+proxy.golang.org
+sum.golang.org
+golang.org
+go.googlesource.com
+pkg.go.dev
+
+# === BunkerWeb: project infrastructure ===
+||bunkerity.com^
+||bunkerweb.io^
+
+# === BunkerWeb: GeoIP database ===
+||db-ip.com^
+
+# === BunkerWeb: Tor exit node list ===
+www.dan.me.uk
+
+# === CrowdSec hub + console ===
+||crowdsec.net^
+
+# === Vaultwarden: Bitwarden icon service ===
+icons.bitwarden.net
+
+# === Other packages / repos ===
+packagecloud.io
+||cloudfront.net^
+dl.google.com
+
+# === Wazuh agent: apt repo for install + updates ===
+packages.wazuh.com
+
+# === Healthchecks.io: backup deadman's switch ===
+hc-ping.com
+
+# === Your services ===
+test.example.com

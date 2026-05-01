@@ -542,14 +542,24 @@ tail-and-mail script.
 **Current state:** Wazuh agents are installed on the Vaultwarden VM, the
 `proxy-home` VM, and the LAN Pi-hole VM, all enrolled with `wazuh-home`.
 The Vault VM and proxy-home agents are at stock defaults. The **LAN
-Pi-hole VM is the first agent with custom config**: it tails
-`/var/log/pihole/pihole.log` + `FTL.log`, paired with a custom decoder
-+ rule chain on `wazuh-home` that elevates Vault-VM-srcip DNS queries
-to a level-3 alert. Snippets and the apply procedure live in the
-`wazuh-home/` folder of this repo. The next slice
-(integrator script that cross-checks each query against the Squid
-allowlist, only alerts on misses) is tracked as its own dedicated
-entry, idea #9; sketch also in `wazuh-home/README.md` § "Planned next step".
+Pi-hole VM is the first agent with custom config**: a sidecar daemon
+(`wazuh-home/sidecar/pihole-ftl-tail.py`) polls Pi-hole's FTL SQLite DB
+and emits one structured JSON event per Vault VM DNS query to
+`/var/log/vault-dns/events.log`; the agent tails that log; manager rules
+100250 / 100251 / 100252 fire (archive base, resolved at level 3, blocked
+at level 6). Snippets and the apply procedure live in the `wazuh-home/`
+folder of this repo. The next slice (extending the sidecar to cross-check
+each query against the Squid allowlist and emit a higher-level alert on
+misses) is detailed in Phase C below.
+
+Earlier intermediate state retired in favor of this: a text-log-decoder
+approach with custom `pihole-dnsmasq-query` + `pihole-dnsmasq-blocked`
+decoders and a four-rule chain (100190 / 100195 / 100200 / 100210). It
+worked for Pi-hole's `gravity blocked` / `exactly denied` / `regex denied`
+flavors but kept missing variants like `blocked upstream with NULL
+address` and `<not set> X is 0.0.0.0`. The FTL DB has a normalized
+`status` integer column that handles every block flavor uniformly, so
+the text-log decoders + correlation rule were dropped.
 
 The dnsproxy-on-proxy-home + `/srv/dnsproxy-logs/queries.log`
 architecture below is **superseded**. The DNS visibility piece moved up
@@ -655,8 +665,9 @@ Plus built-in rules: agent-disconnect (rule IDs in the 500 range,
 exact numbers don't matter, they're labelled by the decoder), CrowdSec
 decisions, FIM hits.
 
-**DNS-driven rules** (over the `qtype` / `query` / `srcip` fields the
-DNS visibility decoder extracts; see `wazuh-home/manager-decoder.xml`):
+**DNS-driven rules** (over the `qtype` / `query` / `srcip` / `status` /
+`blocked` fields the FTL-DB sidecar emits; see
+`wazuh-home/sidecar/pihole-ftl-tail.py` for the field schema):
 
 - High-volume queries from one client (DNS tunneling / DGA indicator).
 - Queries to known-bad domains (threat-intel-driven blocklist match).
@@ -664,159 +675,107 @@ DNS visibility decoder extracts; see `wazuh-home/manager-decoder.xml`):
 - Queries to domains blocked by Cloudflare Family, those return blocked
   responses; alerting tells you which client tried to reach what.
 
-#### Allowlist-anomaly alert for the Vault VM (the headline DNS rule)
+#### Allowlist-anomaly alert for the Vault VM, ✅ DONE (handled by Pi-hole regex enforcement, not Wazuh)
 
-Right now, every DNS query the Vault VM makes is a uniform level-3
-alert via rule 100200 (`wazuh-home/manager-rules.xml`). Full visibility, but
-no signal: nothing distinguishes a routine `acme-v02.api.letsencrypt.org`
-lookup from a malware C2 callback. Both look identical in the
-dashboard.
+Originally drafted as a Wazuh-side feature: a dedicated rule (e.g.
+100253, level 7) that fires only when a Vault VM lookup is for a
+domain not on the Squid allowlist. The proposed mechanism evolved
+across this idea: first a Wazuh integrator script invoked per
+100200 alert, later a sidecar extension that adds an `allowed`
+boolean to each event.
 
-This rule adds a second alert that fires **only when the queried domain
-is not on the Squid allowlist** (`proxy-home/vault_domains_allow_proxy.txt`).
-That allowlist is already the source of truth for what the Vault VM is
-*supposed* to talk to over HTTP/HTTPS, so any DNS lookup outside it is
-either a config drift (we forgot to add a new endpoint to Squid) or
-something genuinely worth investigating (compromised host phoning home).
+**Superseded by a simpler architectural choice:** Pi-hole's allowlist
+scoped to the `vaultwarden-vm` group. The Vault VM is configured with
+strict default-deny at the DNS layer:
+- An "Add allowlist" URL pointing at `vault_domains_allow_dns.txt`
+  (Vaultwarden root). Gravity-format / ABP syntax mirroring the Squid
+  allowlist (bare host for exact match, `||apex^` for apex+subdomains).
+- One `.*` Deny Regex scoped to the same group, added manually under
+  Domain Management.
 
-End state: rule 100200 keeps the full archived stream of Vault VM
-lookups for forensics; a new rule (e.g. 100220, level 7) is the actual
-"this is unusual" signal that triggers an operator response.
+Effect: the Vault VM can only resolve domains in the allowlist; any
+other lookup gets blocked at DNS time and FTL records it as
+`status=blocked-regex` (status_code 4), which the FTL-DB sidecar
+emits as a JSON event, which fires the existing rule 100252 at
+level 6. So the "alert when the Vault VM tried to resolve something
+unexpected" signal is now produced by Pi-hole + the existing rule
+chain, with no extra Wazuh logic and no allowlist-comparison code in
+the sidecar.
 
-**Why it earns its keep.** The allowlist already encodes our intent.
-The current DNS visibility piece captures behaviour. The missing step
-is a comparator that flags the gap between the two. Without it, the
-level-3 stream becomes noise we tune out; with it, every alert that
-fires is genuinely unexpected.
+What's lost vs the originally-planned Wazuh-side comparator:
+nothing operationally; what's gained: defense-in-depth (the Vault VM
+is also blocked at DNS, not just alerted, even if Squid is misconfigured
+or bypassed somehow).
 
-It also catches a failure mode the Squid allowlist alone doesn't:
-DNS-only reconnaissance. An attacker probing for which internal
-services exist by resolving names without ever opening a connection
-to them produces no Squid log entry but does produce a `pihole.log`
-entry, which the comparator catches.
-
-**Mechanism: Wazuh integrator, not log polling.** Wazuh's built-in
-`wazuh-integratord` is the right shape: the manager filters by
-`<rule_id>` first, then invokes a custom script only on hits. No
-polling-archives.json hack needed. Configured in `ossec.conf`:
-
-```xml
-<integration>
-  <name>custom-vault-dns-check</name>
-  <rule_id>100200</rule_id>
-  <alert_format>json</alert_format>
-</integration>
-```
-
-Two files in `/var/ossec/integrations/` (Wazuh's convention):
-
-- `custom-vault-dns-check`: tiny shell launcher (boilerplate that
-  invokes Wazuh's bundled Python on the script).
-- `custom-vault-dns-check.py`: actual logic. Reads
-  `/etc/vault-allowlist/vault-allowlist.txt` (a copy or symlink of
-  `proxy-home/vault_domains_allow_proxy.txt`), parses it (exact FQDNs
-  + apex `.example.com` entries treated as suffix matches), checks the
-  alert's `data.query` against it. If not allowed, appends to
-  `/var/log/vault-dns-anomaly.log`.
-
-The manager's local agent tails that anomaly log; a small custom
-decoder + rule pair fires rule 100220 at level 7 per anomaly:
-
-```xml
-<!-- decoder, append in /var/ossec/etc/decoders/local_decoder.xml -->
-<decoder name="vault-dns-anomaly">
-  <prematch>vault_dns_anomaly src=</prematch>
-  <regex type="pcre2">vault_dns_anomaly src=(\S+) query=(\S+)</regex>
-  <order>srcip, query</order>
-</decoder>
-
-<!-- rule, append in /var/ossec/etc/rules/local_rules.xml -->
-<rule id="100220" level="7">
-  <decoded_as>vault-dns-anomaly</decoded_as>
-  <description>Vaultwarden VM resolved unexpected domain: $(query)</description>
-</rule>
-```
-
-Full flow:
-
-```
-Vault VM DNS query → Pi-hole → wazuh-agent → manager
-  → rule 100200 fires (level 3, archived alert)
-  → integratord matches, invokes custom-vault-dns-check.py
-       → script reads /etc/vault-allowlist/vault-allowlist.txt
-       → if NOT allowed, appends to /var/log/vault-dns-anomaly.log
-  → wazuh-agent on wazuh-home tails that log
-  → rule 100220 fires (level 7, dashboard alert)
-```
-
-Round-trip via the agent so the anomaly is a first-class Wazuh event
-(searchable, alertable, exportable), not a side-channel log file.
-
-**Allowlist sync.** The integrator script reads
-`/etc/vault-allowlist/vault-allowlist.txt` on `wazuh-home`. Two ways to
-keep it synced with the canonical
-`proxy-home/vault_domains_allow_proxy.txt` in this repo:
-
-- Manual, copy after each repo push. Fine for a homelab; the allowlist
-  changes ~monthly.
-- Automated, shallow-clone the repo on `wazuh-home` and `git pull` in
-  a weekly cron, then symlink the file. Safer; no risk of forgetting
-  to sync.
-
-Either way, no allowlist content lives in the integrator script
-itself. The script reads the file fresh on each invocation (cheap, file
-is tiny), so allowlist edits take effect on the next Vault VM query,
-no manager restart needed.
-
-**Tuning the noise floor.** A few categories of legitimate Vault VM
-lookups will fire 100220 on day one and need handling:
-
-- **Reverse DNS** (`PTR` queries to `.in-addr.arpa`). Skip in the
-  integrator (don't even check, just `sys.exit(0)` on `qtype == "PTR"`).
-- **AAAA shadows of allowed A records.** Glibc resolver issues both;
-  if the A is allowed, the AAAA for the same name is too. The matching
-  is on `query` not `qtype`, so this is naturally handled (same FQDN,
-  same allowlist hit).
-- **Local search-list expansions** (`vault.local`, `_dns.resolver.arpa`,
-  the VM's own hostname). Skip via a hardcoded local-domain prefix
-  list in the script.
-- **Glibc opportunistic lookups.** Less common but worth watching;
-  add a small bypass list for known-noisy patterns observed during
-  the first week's tuning.
-
-Cut the level-7 noise floor low enough that any 100220 alert deserves
-manual attention. If you can't, the rule's not earning its keep.
-
-**Open questions / decisions.**
-
-- **Allowlist apex semantics.** `proxy-home/vault_domains_allow_proxy.txt`
-  uses `.example.com` (leading dot) for "apex + all subdomains" entries.
-  The integrator script must mirror Squid's interpretation exactly;
-  worth an offline test pass against a sample of real Squid log entries
-  before rolling out.
-- **Rate-limiting alerts.** A flood of 100220 (e.g. an updater script
-  iterating over a stale mirror list) could spam the dashboard. Either
-  cap with `frequency`/`timeframe` on the rule, or rate-limit inside
-  the script (write to anomaly log at most once per `(srcip, query)` per
-  day).
-- **Allowlist staleness as its own alert.** If the allowlist file is
-  unreadable on `wazuh-home`, the script currently emits a
-  `vault_dns_anomaly_error` line; a dedicated rule 100221 (level 5,
-  "allowlist load failed") makes that operator-visible.
-
-**What this does NOT fix.**
-
-- Not a substitute for the Squid allowlist. Squid is the actual
-  egress gate; this is the *visibility* layer that confirms the gate
-  is doing its job.
+What's NOT fixed by either approach:
 - Doesn't catch lookups using non-Pi-hole resolvers. If something on
-  the Vault VM resolves via `1.1.1.1` directly (e.g. hardcoded in a
-  binary), Pi-hole never sees it and this rule never fires. The
-  Vault VM's egress firewall posture (only port 53 to `192.168.173.2`
-  is allowed) is what actually prevents that.
+  the Vault VM resolves via `1.1.1.1` directly (hardcoded in a
+  binary), Pi-hole never sees it. The Vault VM's egress firewall
+  posture (only port 53 to `192.168.173.2` is allowed) is what
+  actually prevents that.
 - Doesn't distinguish reconnaissance from C2. Both look the same at
-  the DNS layer, "domain not in our allowlist." Use it as a flag for
+  the DNS layer: "domain not in our allowlist." Use it as a flag for
   investigation, not a verdict.
+
+The remaining open work in this area is dual-allowlist sync, see the
+follow-on subsection below.
+
+#### Single source of truth for the Vault VM allowlist (cross-format generation)
+
+Currently two manually-synced files in this repo encode the same
+intent in different formats:
+- `proxy-home/vault_domains_allow_proxy.txt`: Squid `dstdomain` syntax
+  (one host per line; leading dot = apex + subdomains)
+- `vault_domains_allow_dns.txt` (Vaultwarden root): Pi-hole gravity /
+  ABP syntax (bare host for exact match, `||apex^` for apex + all
+  subdomains). Consumed by Pi-hole via the "Add allowlist" URL feature.
+
+Both are appended to / edited by hand. Drift is the obvious failure
+mode: add a destination to one file, forget the other, and either
+HTTP egress (Squid) or DNS resolution (Pi-hole) silently fails for a
+new endpoint.
+
+End state: collapse to a **single** source of truth in the repo (a
+yaml or txt with one entry per logical destination, plus optional
+metadata like which subsystems each entry is needed by), with a
+generator script that emits both `vault_domains_allow_proxy.txt` and
+`vault_domains_allow_dns.txt` deterministically. Probably a small
+Python script, ~50 lines, runnable by a CI job or pre-commit hook.
+
+Sketch of the source-of-truth schema (yaml or txt, doesn't matter):
+
+```
+# one entry per line. exact host or `.apex.example` for apex+subs.
+# free-form comment after `#` allowed; group lines by section header.
+# the generator preserves comments and section headers in BOTH outputs.
+
+deb.debian.org              # Debian package mirror
+.lencr.org                  # Let's Encrypt OCSP / issuer chain
+github.com                  # Pinned binary downloads
+.bunkerity.com              # BunkerWeb assets + telemetry apex
+```
+
+Generator emits:
+- Squid file: copy lines 1:1 (Squid uses the exact same syntax for
+  dstdomain).
+- Pi-hole file: translate each line to gravity/ABP syntax
+  (`exact` -> `exact`, `.apex` -> `||apex^`).
+
+Both outputs preserve comments and section headers so the generated
+files stay readable. Run on each repo edit (manual or pre-commit),
+or once-a-day cron on `wazuh-home` to regenerate from a freshly
+pulled repo and apply via Pi-hole's API.
+
+Going further: the same generator could also push the Pi-hole regex
+entries directly into the FTL gravity DB (atomic SQLite writes,
+scoped to the `vaultwarden-vm` group), removing the manual
+copy-paste step in Pi-hole's UI. Same script, extra `--apply` flag.
+
+Why not yet: the manual two-file workflow is simple, the allowlist
+changes maybe once a month, and getting the generator + apply path
+right is more engineering than the current pain justifies. Revisit
+when the file edit cadence picks up or when the next person editing
+the repo gets bitten by drift.
 
 **Active Response → Discord** (`/var/ossec/active-response/bin/discord-notify.py`
 on the manager):

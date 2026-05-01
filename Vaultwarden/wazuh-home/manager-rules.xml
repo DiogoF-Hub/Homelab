@@ -1,48 +1,85 @@
 <!--
-  wazuh-home (manager): custom rules for Vault VM DNS visibility.
+  wazuh-home (manager): rules for Vault VM DNS visibility, FTL-DB pipeline.
 
   Append inside /var/ossec/etc/rules/local_rules.xml on the manager.
   After editing, validate + restart:
       sudo /var/ossec/bin/wazuh-analysisd -t
       sudo systemctl restart wazuh-manager
 
-  Goal: surface DNS queries from the Vault VM as level-3 alerts in the
-  dashboard, while keeping the rest of the LAN's DNS noise out of
-  alerts.json. The custom decoder pihole-dnsmasq-query (see
-  manager-decoder.xml) extracts qtype/query/srcip; these rules do the
-  filtering on top.
+  Goal: surface every Vault VM DNS query as a Wazuh alert with full
+  metadata (qtype, query, status label, blocked-or-not boolean) in a
+  single event. The data source is the structured JSON log emitted by
+  the sidecar at sidecar/pihole-ftl-tail.py, tailed by the Wazuh agent
+  on the Pi-hole VM via pihole-agent.localfile.xml.
 
-  Two-rule chain:
-    - 100190 (level 0): catch-all "any Pi-hole DNS query, decoded".
-      Archived only if logall_json is on; never alerts. All other rules
-      in this chain depend on it via if_sid so we don't have to repeat
-      <decoded_as>.
-    - 100200 (level 3): only fires when srcip is the Vault VM. This is
-      the actual visibility rule; one event per query, one alert per
-      event.
+  Three-rule chain:
+    - 100250 (level 0): catch-all "any vault_dns event from the
+      sidecar". Archived only if logall_json is on; never alerts.
+      All other rules in this chain depend on it via if_sid so we
+      don't have to repeat the discriminator field check.
+    - 100251 (level 3): the query was actually resolved (forwarded
+      / cached / etc, blocked=false). Visible in alerts.json + the
+      dashboard, but lower-priority than blocked queries.
+    - 100252 (level 6): the query was blocked (blocked=true), by
+      ANY mechanism (gravity adlist, manual exact-deny, regex,
+      upstream-NULL, externally-blocked NXDOMAIN, etc). The
+      sidecar normalizes all block flavors into the boolean.
 
-  Note on <srcip>: Wazuh treats srcip as a "static field" that has its
-  own dedicated tag. Using <field name="srcip">...</field> here would
-  fail to load with "Field 'srcip' is static". Same applies to other
-  static fields (dstip, srcuser, dstuser, srcport, dstport, protocol,
-  id, url, action, status, extra_data). Use <srcip> directly.
+  Why this replaces the old chain (100190 / 100195 / 100200 / 100210):
+
+  The previous approach decoded Pi-hole's dnsmasq text log in two
+  separate decoders, fired four rules, and used a Wazuh correlation
+  rule to tie a "blocked" event back to a Vault VM "query" event by
+  same_field=query within a timeframe. That worked for some block
+  flavors but missed others (Pi-hole emits four-plus different
+  syntactic patterns for different block sources, and we kept finding
+  new ones). The FTL-DB sidecar reads Pi-hole's normalized status
+  column and emits one merged event per query, so the manager-side
+  chain collapses to a single decoder (Wazuh's built-in JSON one) plus
+  these three rules. No correlation needed; the sidecar already merged
+  the data before Wazuh saw it.
+
+  Why no <decoded_as>json</decoded_as> bind in 100250's parents:
+  Wazuh's built-in JSON decoder fires on any line that parses as JSON
+  on a localfile with log_format=json. We don't add a custom decoder
+  here. The discriminator that scopes alerts to "events from the
+  sidecar specifically" is the event_type field embedded in every JSON
+  line by the sidecar.
 
   Replace 192.168.50.3 below with the actual Vault VM IP if it's
-  different in your environment.
+  different in your environment. (The sidecar already filters at SQL
+  level to that IP before emitting events, so this rule's <srcip>
+  check is belt-and-braces; it ALSO catches misconfiguration where
+  the sidecar's CLIENT_FILTER got changed but the rule wasn't.)
 -->
 <group name="dns,pihole,vaultwarden">
 
-  <!-- Base: catch every Pi-hole DNS query, archived only. -->
-  <rule id="100190" level="0">
-    <decoded_as>pihole-dnsmasq-query</decoded_as>
-    <description>Pi-hole DNS query: $(query) from $(srcip)</description>
+  <!-- Base: every event the sidecar emits, scoped via event_type.
+       Level 0 = archived (with logall_json) but no alert. -->
+  <rule id="100250" level="0">
+    <decoded_as>json</decoded_as>
+    <field name="event_type">vault_dns</field>
+    <description>Vault VM DNS event: $(query) [$(status)]</description>
   </rule>
 
-  <!-- Vault VM filter: surface as level-3 alert. -->
-  <rule id="100200" level="3">
-    <if_sid>100190</if_sid>
+  <!-- Resolved query: the Vault VM got a real DNS answer.
+       blocked=false in the JSON. Level 3 alert in dashboard. -->
+  <rule id="100251" level="3">
+    <if_sid>100250</if_sid>
     <srcip>192.168.50.3</srcip>
-    <description>Vault VM DNS query: $(query)</description>
+    <field name="blocked">false</field>
+    <description>Vault VM DNS resolved: $(query) [$(status)]</description>
+  </rule>
+
+  <!-- Blocked query: the Vault VM's query did NOT resolve to a real
+       answer, regardless of which Pi-hole mechanism blocked it.
+       blocked=true in the JSON. Level 6 alert: higher priority than
+       resolutions but not active-response territory. -->
+  <rule id="100252" level="6">
+    <if_sid>100250</if_sid>
+    <srcip>192.168.50.3</srcip>
+    <field name="blocked">true</field>
+    <description>Vault VM DNS BLOCKED: $(query) [$(status)]</description>
   </rule>
 
 </group>

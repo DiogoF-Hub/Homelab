@@ -413,9 +413,10 @@ The reference setup runs the Wazuh agent on every VM (Vaultwarden VM +
 `wazuh-home` manager. On the Vaultwarden VM and `proxy-home` VM the
 agent runs with stock defaults, binary present, kept patched via apt,
 talking to the manager. The LAN Pi-hole VM is the one with custom
-config: it tails `/var/log/pihole/pihole.log` and `FTL.log`, paired with
-a custom decoder + rule chain on the manager so every Vault-VM-srcip
-DNS query becomes a level-3 alert in the dashboard. See
+config: a sidecar daemon (`pihole-ftl-tail.py`) polls Pi-hole's FTL
+SQLite DB and emits structured JSON events to
+`/var/log/vault-dns/events.log`; the agent tails that log; manager
+rules 100250 / 100251 / 100252 produce per-query alerts. See
 [`wazuh-home/README.md`](./wazuh-home/README.md) for the full apply
 procedure; idea #7 in `ideas.md` covers the wider SIEM rollout for
 `vw-logs/` / `bw-logs/`.
@@ -479,21 +480,29 @@ Things to verify on the LAN Pi-hole VM before continuing:
 
 - Pi-hole running, dnsproxy sidecar (or your equivalent) doing the DoH
   upstream resolution, port 53 reachable from VLAN-DMZ.
-- `pihole.log` is being written to the host (Pi-hole compose has
-  `/var/log/pihole:/var/log/pihole` bind mount, see
-  `PiHole/docker-compose.yml`). Confirm with
-  `sudo tail -f /var/log/pihole/pihole.log`.
+- FTL SQLite DB reachable on the host: Pi-hole compose has
+  `/var/log/pihole:/var/log/pihole` AND the `/etc/pihole` bind mount in
+  place (the latter is where `pihole-FTL.db` lives, default path
+  `/home/pi/pihole/data/etc-pihole/pihole-FTL.db` for the reference
+  setup). Confirm with `sudo sqlite3 -readonly <path> "SELECT count(*) FROM queries"`.
 - Pi-hole group `vaultwarden-vm` exists with the Vault VM as client and
   **no adlists ticked** for that group (Squid is the actual content
   gate; DNS-layer blocking would just add a hard-to-diagnose failure
   mode).
-- Wazuh agent installed on the Pi-hole VM with the localfile blocks
-  from `wazuh-home/pihole-agent.localfile.xml` applied; manager-side
-  decoder + rules from `wazuh-home/manager-decoder.xml` +
+- Sidecar daemon installed on the Pi-hole VM:
+  `wazuh-home/sidecar/pihole-ftl-tail.py` at `/usr/local/sbin/`,
+  `wazuh-home/sidecar/pihole-ftl-tail.service` at `/etc/systemd/system/`,
+  enabled and running (`sudo systemctl status pihole-ftl-tail`).
+  The daemon writes structured JSON events to
+  `/var/log/vault-dns/events.log`.
+- Wazuh agent on the Pi-hole VM with the localfile blocks from
+  `wazuh-home/pihole-agent.localfile.xml` applied (tails the sidecar's
+  output log); manager-side rules from
   `wazuh-home/manager-rules.xml` applied to wazuh-home; `logall_json`
-  from `wazuh-home/manager-global.snippet.xml` flipped on. Smoke test
-  with `sudo /var/ossec/bin/wazuh-logtest` and a sample query line.
-  Full apply procedure in [`wazuh-home/README.md`](./wazuh-home/README.md).
+  from `wazuh-home/manager-global.snippet.xml` flipped on. Smoke test:
+  trigger an `nslookup` from the Vault VM and watch alerts.json for
+  rule 100251 (resolved) or 100252 (blocked). Full apply procedure in
+  [`wazuh-home/README.md`](./wazuh-home/README.md).
 
 ### Firewall (DMZ → both chokepoints)
 
@@ -642,10 +651,13 @@ chain end-to-end. On wazuh-home:
 
 ```bash
 sudo tail -f /var/ossec/logs/alerts/alerts.json \
-  | jq -r 'select(.rule.id=="100200") | "\(.timestamp) \(.data.qtype) \(.data.query) from \(.data.srcip)"'
+  | jq -r 'select(.rule.id=="100251" or .rule.id=="100252") | "\(.timestamp) [\(.rule.id)] \(.data.qtype) \(.data.query) \(.data.status)"'
 ```
 
-The `nslookup` above should produce a level-3 alert within seconds.
+The `nslookup` above should produce a rule-100251 (resolved) alert
+within ~10 seconds (the sidecar's polling interval). Try also
+`nslookup ads.google.com 192.168.173.2` to confirm rule 100252
+(blocked) fires for an exact-deny test domain in Pi-hole.
 
 If `apt update` 403s, the Squid allowlist is missing a Debian mirror,
 cross-check `proxy-home/vault_domains_allow_proxy.txt` against the
@@ -1217,9 +1229,10 @@ Tick all of these before declaring the rebuild done:
       multi-week-long phase, not a one-shot).
 - [ ] Wazuh agent (if matching the reference setup) is reporting to
       your `wazuh-home` manager and visible in the manager's agent
-      inventory. If the LAN Pi-hole agent + manager-side `wazuh-home/`
-      config are in place, an `nslookup` from the Vault VM produces a
-      level-3 alert on rule 100200 within seconds.
+      inventory. If the LAN Pi-hole sidecar daemon + manager-side
+      `wazuh-home/` config are in place, an `nslookup` from the Vault
+      VM produces a rule-100251 (resolved) or rule-100252 (blocked)
+      alert within ~10 seconds (the sidecar's poll interval).
 - [ ] Deadman's switch (if configured, `ideas.md` #2) is pinging on
       schedule.
 
