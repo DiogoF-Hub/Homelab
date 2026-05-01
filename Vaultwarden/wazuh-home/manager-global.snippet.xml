@@ -1,0 +1,35 @@
+<!--
+  wazuh-home (manager): logall_json setting.
+
+  Add this single line inside the existing <global> block in
+  /var/ossec/etc/ossec.conf on the manager VM. Example resulting block:
+
+      <global>
+        <jsonout_output>yes</jsonout_output>
+        <alerts_log>yes</alerts_log>
+        <logall_json>yes</logall_json>     <-- this is the addition
+        <email_notification>no</email_notification>
+        ...
+      </global>
+
+  Why: Wazuh's default behaviour writes only ALERTS (level >=3) to
+  alerts.json. Everything decoded at level 0 (e.g. the catch-all DNS
+  query rule 100190 below) is silently dropped after decoding.
+
+  logall_json:yes makes the manager additionally write every decoded
+  event to /var/ossec/logs/archives/archives.json regardless of level.
+  That's how the pi-hole DNS query stream becomes searchable:
+    - rule 100190 (level 0): visible in archives.json, not alerts.json
+    - rule 100200 (level 3): visible in both
+
+  Trade-off: archives.json grows fast (one line per decoded event).
+  Wazuh's default logrotate config under /etc/logrotate.d/wazuh
+  handles this, but worth checking disk usage with
+      du -sh /var/ossec/logs/archives/
+  after a few days.
+
+  After editing, restart the manager:
+      sudo systemctl restart wazuh-manager
+-->
+
+<logall_json>yes</logall_json>

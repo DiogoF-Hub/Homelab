@@ -13,7 +13,7 @@ The setup is designed for **secure self-hosted password management**, with:
 * **[Cloudflare Tunnel (`cloudflared`)](#-cloudflare-tunnel)** as the public-facing edge, no host ports exposed; all inbound traffic arrives via an outbound-initiated tunnel
 * **[BunkerWeb reverse proxy + WAF](#%EF%B8%8F-bunkerweb-reverse-proxy--waf)** for HTTPS, security headers, ACME via DNS-01, CRS-based WAF, country/UA blacklists, rate limits, and the CrowdSec bouncer
 * **[Containerized CrowdSec](#%EF%B8%8F-crowdsec-integration)** with custom Vaultwarden parsers, scenarios, and whitelists; bans enforced inline at BunkerWeb (no separate edge worker)
-* **Unified outbound proxy on the `proxy-home` VM**, [Squid for HTTP/HTTPS egress](#-outbound-httphttps-proxy--squid-on-the-proxy-home-vm) (domain allowlist–enforced) plus [dnsproxy for DNS](#-outbound-dns-gateway--dnsproxy-on-the-same-proxy-home-vm) (DoH-encrypted to Cloudflare Family, fully logged); same VM hosts both, together they cover every outbound protocol the Vaultwarden VM uses
+* **Outbound HTTP/HTTPS via [Squid on the `proxy-home` VM](#-outbound-httphttps-proxy--squid-on-the-proxy-home-vm)** (domain allowlist–enforced) and **[outbound DNS via the homelab's LAN Pi-hole](#-outbound-dns-via-the-lan-pi-hole--wazuh-visibility)**, with every Vault VM query shipped into Wazuh as a level-3 alert via a custom decoder + rule chain (see `wazuh-home/`)
 * **[Daily automated maintenance](#-automation-scripts)** via `main.sh`: [age](https://github.com/FiloSottile/age)-encrypted backups [minisign](https://jedisct1.github.io/minisign/)-signed for tamper detection, image updates, full system update, and reboot
 * **[Automated off-site replication](#-automation-scripts)** to TrueNAS and Hetzner Storage Box
 * **Strict [Cloudflare](#cloudflare) security policies** for zero trust access
@@ -67,10 +67,16 @@ vaultwarden/
 │   └── whitelists/
 │       └── admin-diagnostics.yaml             # Drops Vaultwarden's intentional /admin/diagnostics 4xx probes
 │
-├── proxy-home/                                # Everything that targets the proxy-home VM (unified outbound proxy for the Vaultwarden VM: Squid HTTP/HTTPS egress + dnsproxy DNS gateway)
-│   ├── docker-compose.yml                     # adguard/dnsproxy: serves DNS to the Vaultwarden VM, DoH-encrypted upstream to Cloudflare Family, fully logged
+├── proxy-home/                                # Targets the proxy-home VM (HTTP/HTTPS egress chokepoint via Squid; DNS now uses the LAN Pi-hole instead, see wazuh-home/)
 │   ├── squid.conf                             # Squid proxy configuration for domain allowlisting
 │   └── vault_domains_allow_proxy.txt          # List of domains allowed for the Squid proxy
+│
+├── wazuh-home/                                # Targets the wazuh-home VM (Wazuh manager) + a localfile snippet for the LAN Pi-hole VM's agent
+│   ├── README.md                              # Architecture, apply order, verification steps
+│   ├── pihole-agent.localfile.xml             # <localfile> blocks for the Pi-hole VM's wazuh-agent
+│   ├── manager-global.snippet.xml             # logall_json toggle for the wazuh-home <global> block
+│   ├── manager-decoder.xml                    # Custom dnsmasq query-line decoder (Wazuh stock has none)
+│   └── manager-rules.xml                      # Rule 100190 (archive-only) + 100200 (Vault VM srcip alert)
 │
 ├── scripts/                                   # Repo-side split by lifecycle / target user; all root_scripts/ + setups_scripts/ deploy to /root/vault/ on the VM
     ├── root_scripts/                          # Recurring scripts run by root nightly via cron
@@ -456,13 +462,13 @@ The Vaultwarden service is isolated on its **own VLAN (VLAN-DMZ)** behind strict
 | # | Action | Protocol  | Source     | Destination                                                                                 | Port     | Description                        | Log |
 |---|--------|-----------|-----------|---------------------------------------------------------------------------------------------|----------|-------------------------------------|-----|
 | 1 | Pass   | TCP       | VLAN-DMZ  | 192.168.173.9 (`proxy-home` VM, Squid)                                                     | 3128     | Allow HTTP/HTTPS egress via Squid  | Yes |
-| 2 | Pass   | TCP/UDP   | VLAN-DMZ  | 192.168.173.9 (`proxy-home` VM, dnsproxy)                                                  | 53       | Allow DNS via dnsproxy             | Yes |
+| 2 | Pass   | TCP/UDP   | VLAN-DMZ  | 192.168.173.2 (LAN Pi-hole VM)                                                              | 53       | Allow DNS via Pi-hole              | Yes |
 | 3 | Block  | Any       | VLAN-DMZ  | (Any other VLANs)                                                                           | Any      | Block DMZ to other VLANs           | Yes |
 | 4 | Pass   | UDP       | VLAN-DMZ  | This Firewall                                                                              | 123      | Allow NTP                          | Yes |
 | 5 | Pass   | UDP       | VLAN-DMZ  | [Cloudflare_IPs](https://www.cloudflare.com/ips/)                                          | 7844 | Allow QUIC from Cloudflare         | Yes |
 | 6 | Pass   | TCP       | VLAN-DMZ  | Mailjet_SMTP (`in-v3.mailjet.com`)                                                          | 587      | Allow SMTP                         | Yes |
 
-Rules 1 and 2 both point at the same destination (`192.168.173.9`, the `proxy-home` VM), that single VM hosts both outbound chokepoints, Squid on `:3128` for HTTP/HTTPS and dnsproxy on `:53` for DNS. The order matters: both proxy-home allows sit **above** the catch-all VLAN block (rule 3), so DMZ → proxy-home traffic is permitted before the catch-all denies everything else cross-VLAN.
+Rules 1 and 2 are the two outbound chokepoints. Rule 1 points at the `proxy-home` VM (Squid for HTTP/HTTPS); rule 2 points at the homelab's LAN Pi-hole (DNS, with logging shipped into Wazuh, see [Outbound DNS via the LAN Pi-hole + Wazuh visibility](#-outbound-dns-via-the-lan-pi-hole--wazuh-visibility)). Both allows sit **above** the catch-all VLAN block (rule 3), so DMZ → chokepoint traffic is permitted before the catch-all denies everything else cross-VLAN.
 
 📄 **References**:
 - `proxy-home/vault_domains_allow_proxy.txt` contains all domain allowlists configured in the Squid proxy
@@ -474,11 +480,11 @@ Rules 1 and 2 both point at the same destination (`192.168.173.9`, the `proxy-ho
 
 ## 🌐 Outbound HTTP/HTTPS proxy, Squid on the `proxy-home` VM
 
-> The Vaultwarden VM has **two outbound chokepoints**, both hosted on the same `proxy-home` VM (`192.168.173.9`):
-> - **HTTP/HTTPS** → Squid on `:3128` (this section)
-> - **DNS** → dnsproxy on `:53` ([next section](#-outbound-dns-gateway--dnsproxy-on-the-same-proxy-home-vm))
+> The Vaultwarden VM has **two outbound chokepoints** on different VMs:
+> - **HTTP/HTTPS** → Squid on the `proxy-home` VM, `192.168.173.9:3128` (this section)
+> - **DNS** → the homelab's LAN Pi-hole, `192.168.173.2:53` ([next section](#-outbound-dns-via-the-lan-pi-hole--wazuh-visibility))
 >
-> Same VM, two services, two separate compose files under `proxy-home/`. They share host (and `ufw`) but are otherwise independent, editing one doesn't require touching the other.
+> The Vault VM doesn't reach the public internet directly for either protocol. HTTP/HTTPS goes through Squid's domain allowlist; DNS goes through Pi-hole, which logs every query, ships the log to Wazuh, and forwards upstream over DoH to Cloudflare Family. Each chokepoint is configured independently.
 
 Previously, domain access was restricted using firewall rules with domain allowlisting, but this approach was not reliable. I replaced it with a **dedicated Squid proxy** running in a separate VM on the Proxmox server.
 
@@ -568,162 +574,97 @@ Without these entries, container startup would fail with cryptic Squid `407` / `
 
 ---
 
-## 🌐 Outbound DNS gateway, dnsproxy on the same `proxy-home` VM
+## 🌐 Outbound DNS via the LAN Pi-hole + Wazuh visibility
 
-> Second half of the `proxy-home` VM's job. **Same VM** as Squid above (`192.168.173.9`), but a different service on a different port (`:53`) with its own compose file (`proxy-home/docker-compose.yml`). Squid handles HTTP/HTTPS egress via allowlist; dnsproxy handles DNS via DoH. Together they cover every outbound protocol the Vaultwarden VM uses.
+> Second outbound chokepoint. Different VM than Squid: the Vault VM's `/etc/resolv.conf` points at the homelab's existing **LAN Pi-hole** (`192.168.173.2`) instead of running a dedicated DoH gateway purely for the Vault VM. The DoH-encrypted upstream is inherited from Pi-hole's existing `adguard/dnsproxy` sidecar (Cloudflare Family), and full visibility comes from shipping Pi-hole's `pihole.log` into Wazuh through a custom decoder + rule chain.
 
-Serves DNS to clients on `192.168.50.0/24`, primarily the Vaultwarden VM, whose `/etc/resolv.conf` points here. Lives in this repo under `proxy-home/` (alongside `squid.conf` and `vault_domains_allow_proxy.txt`) because the two halves of the proxy story belong together, the compose file targets a different VM than the Vaultwarden stack, but operationally it's paired with it. Before this was added, the Vaultwarden VM resolved names by plaintext UDP straight to upstream, no visibility, no logging, sniffable on the LAN segment. Pointing `/etc/resolv.conf` here closes both gaps.
+### Why Pi-hole instead of a dedicated dnsproxy
 
-### What it does
+The earlier iteration ran `adguard/dnsproxy` directly on the `proxy-home` VM, with the Vault VM's `/etc/resolv.conf` pointing there. That worked, but had two costs: a second DoH stack to maintain just for one client, and DNS visibility limited to a `tail -f /srv/dnsproxy-logs/queries.log` on the proxy-home host (no SIEM integration at the time).
 
-Runs **[`adguard/dnsproxy`](https://github.com/AdguardTeam/dnsproxy)** as a single container in host network mode. Listens on `0.0.0.0:53` and forwards every query encrypted to **Cloudflare Family DNS-over-HTTPS** (`https://family.cloudflare-dns.com/dns-query`). Bootstrap resolvers `1.1.1.1` / `1.0.0.1` are used to resolve `family.cloudflare-dns.com` itself before the DoH connection is established.
+Reusing the existing LAN Pi-hole drops the duplicate stack and bolts the visibility piece directly onto Wazuh: every Vault VM query becomes a level-3 alert in the dashboard, scoped to the Vault VM's source IP, with full per-query metadata (qtype, query, srcip).
 
-Result: every DNS query from a client on the trusted LAN is upgraded from cleartext UDP/53 to encrypted HTTPS to Cloudflare, with Family-DNS-level malware + adult-content filtering at the resolver.
+The same encrypted-upstream story is preserved: Pi-hole forwards to Cloudflare Family DoH via its own dnsproxy sidecar, so plaintext UDP never leaves the LAN.
 
 ### Architecture
 
 ```
-[ LAN client on 192.168.50.X ]
+[ Vaultwarden VM, 192.168.50.3 ]
+  /etc/resolv.conf -> 192.168.173.2
             │
-            │  UDP/53 cleartext (LAN-internal)
+            │  UDP/53 (DMZ -> LAN; OPNsense pass rule 2)
             ▼
-[ proxy-home VM, 192.168.173.9 ]
-   ├─ ufw           ← drops anything to :53 not from 192.168.50.0/24
-   ├─ dnsproxy      ← bound to 0.0.0.0:53, host network mode, container hardened
-   │     │
-   │     │  HTTPS (DoH) outbound
-   │     ▼
-   └─→ family.cloudflare-dns.com
-         (bootstrap: 1.1.1.1, 1.0.0.1)
+[ LAN Pi-hole VM, 192.168.173.2 ]
+   ├─ pihole-FTL (dnsmasq)
+   │     └─ writes /var/log/pihole/pihole.log (host bind mount)
+   ├─ adguard/dnsproxy (sidecar, DoH upstream to Cloudflare Family)
+   └─ wazuh-agent
+         │  tails /var/log/pihole/pihole.log
+         ▼
+[ wazuh-home (Wazuh manager) ]
+   ├─ custom decoder pihole-dnsmasq-query
+   ├─ rule 100190 (level 0): every Pi-hole DNS query, archived
+   └─ rule 100200 (level 3): only Vault VM srcip, alerts in dashboard
 ```
 
-The same VM also runs Squid on port 3128. Together they make `proxy-home` the unified outbound proxy for the Vaultwarden VM: Squid handles HTTP/HTTPS egress (allowlist-enforced), dnsproxy handles DNS (DoH-encrypted, fully logged). Two containers in two separate compose files, but **operationally paired**, if either is down, the Vaultwarden VM's outbound story breaks (no DNS fallback, no HTTP fallback by design).
+### What's where in this repo
 
-### Host prerequisite, `systemd-resolved` stub listener
+The Pi-hole stack itself lives in [`PiHole/`](../PiHole/) at the root of this repo. The Wazuh-side configuration that gives Vault-VM-specific visibility lives in [`wazuh-home/`](./wazuh-home/), see its README for the architecture diagram, file mapping (which snippet goes on which VM), apply order, and verification steps.
 
-Ubuntu's default `systemd-resolved` binds a stub resolver on `127.0.0.53:53`, which conflicts with dnsproxy's `0.0.0.0:53` binding (since `127.0.0.53` is part of `0.0.0.0`). Disable just the stub listener, keeps the rest of `systemd-resolved` running so the VM's own DNS still uses DHCP-supplied resolvers:
+Quick summary of what's in `wazuh-home/`:
 
-```bash
-sudo mkdir -p /etc/systemd/resolved.conf.d
-sudo nano /etc/systemd/resolved.conf.d/no-stub.conf
-```
+| File | Where it goes | What it does |
+|------|---------------|--------------|
+| `wazuh-home/pihole-agent.localfile.xml` | Append to `<ossec_config>` in **Pi-hole VM** `/var/ossec/etc/ossec.conf` | Tells the agent to tail `pihole.log` and `FTL.log` |
+| `wazuh-home/manager-global.snippet.xml` | One line inside `<global>` in **wazuh-home** `/var/ossec/etc/ossec.conf` | Enables `logall_json` so level-0 events land in `archives.json` |
+| `wazuh-home/manager-decoder.xml` | Append inside **wazuh-home** `/var/ossec/etc/decoders/local_decoder.xml` | Custom dnsmasq query-line decoder (Wazuh's stock ruleset has none) |
+| `wazuh-home/manager-rules.xml` | Append inside **wazuh-home** `/var/ossec/etc/rules/local_rules.xml` | Rule 100190 (catch-all archive) + 100200 (Vault VM srcip, level 3) |
 
-Paste into the file:
+### Pi-hole groups, no DNS-layer blocking for the Vault VM
 
-```ini
-[Resolve]
-DNSStubListener=no
-```
+**Pi-hole is positioned here as a passive observer, not a filter.** Every query the Vault VM makes is forwarded straight upstream (DoH to Cloudflare Family) and the answer comes back unchanged; Pi-hole sits in the middle purely so the query lands in `pihole.log`, where the Wazuh agent can pick it up. None of Pi-hole's adlists or blocklists apply to the Vault VM.
 
-Then:
+That choice is intentional. Squid (`proxy-home/squid.conf` + `vault_domains_allow_proxy.txt`) is the actual content gate for the Vault VM's HTTP/HTTPS egress. Layering DNS-layer blocking on top of that would just add a second, less observable failure mode: the day an apt mirror or container registry shows up on a community blocklist, the Vault VM's nightly maintenance silently breaks with no Squid log to point at. Keeping Pi-hole in pure-logging mode for this client means there's exactly one outbound chokepoint making policy decisions (Squid), and one separate layer providing visibility (Pi-hole + Wazuh).
 
-```bash
-sudo systemctl restart systemd-resolved
+How to wire it in Pi-hole's web UI:
 
-# Repoint /etc/resolv.conf at the REAL resolver list (not the stub).
-# This file is auto-populated by systemd-resolved with whatever DHCP /
-# netplan / static config provides, VM's own DNS still uses
-# DHCP-supplied resolvers, just no longer through the stub.
-sudo rm /etc/resolv.conf
-sudo ln -sf /run/systemd/resolve/resolv.conf /etc/resolv.conf
+1. **Group Management → Groups**: create a `vaultwarden-vm` group.
+2. **Group Management → Clients**: add the Vault VM's IP and assign it to that group.
+3. **Group Management → Adlists**: untick every adlist for the `vaultwarden-vm` group.
 
-# Verify
-ss -tunlp | grep ':53\b'   # expect: NO line for 127.0.0.53 anymore
-nslookup example.com       # expect: still resolves via DHCP DNS
-```
-
-No netplan changes needed, netplan still does interface + DHCP, `systemd-resolved` still does DNS, and dnsproxy now has port 53 free.
-
-### Firewall (`ufw`)
-
-Source-IP filtering is enforced by `ufw` on the host (dnsproxy itself has no built-in client-IP allowlist flag).
-
-```bash
-# Always allow SSH first, DON'T `ufw enable` without this or you lock yourself out
-sudo ufw allow OpenSSH                                                        comment 'SSH'
-
-# Squid, colocated on this VM, same trusted subnet
-sudo ufw allow from 192.168.50.0/24 to any port 3128 proto tcp comment 'Squid HTTP proxy'
-
-# DNS, allow trusted subnet, deny everything else
-sudo ufw allow from 192.168.50.0/24 to any port 53   proto udp comment 'DNS allowed clients'
-sudo ufw allow from 192.168.50.0/24 to any port 53   proto tcp comment 'DNS allowed clients'
-sudo ufw deny 53/udp                                                          comment 'DNS deny default'
-sudo ufw deny 53/tcp                                                          comment 'DNS deny default'
-
-sudo ufw enable
-sudo ufw status numbered
-```
-
-UFW evaluates rules **in order, first match wins**, the allow rules for `192.168.50.0/24` match before the broad deny rules, so trusted clients pass while everyone else gets dropped at the kernel level (before dnsproxy ever sees the packet).
-
-### Container hardening
-
-Same defense-in-depth pattern as the Vaultwarden compose files:
-
-| Setting | Why |
-|---------|-----|
-| `security_opt: no-new-privileges` | Child processes can't gain privileges via setuid binaries. |
-| `cap_drop: ALL` + `cap_add: NET_BIND_SERVICE` | Container starts with no caps; the only one needed is `NET_BIND_SERVICE` for binding to port 53 (privileged, <1024). |
-| `read_only: true` + `tmpfs: /tmp` | Container rootfs is read-only, only the bind-mounted log path is writable. |
-| `deploy.resources.limits` (64M / 0.25 CPU) | Caps memory + CPU so a runaway can't eat the host. dnsproxy uses well under this in practice. |
-| `network_mode: host` | Required so `0.0.0.0:53` binds to the host's actual interfaces, reachable by other VMs on the LAN. |
-| `logging: json-file` (10m × 3 files) | Stdout (startup messages, errors) bounded at ~30 MB total per container. The verbose query log goes to a bind mount, not stdout. |
-
-### Logging
-
-The compose runs dnsproxy with `-v` (verbose) and `-o /var/log/dnsproxy/queries.log`. The container path is bind-mounted onto the host's `/srv/dnsproxy-logs/` so the file is readable by anything tailing on the host (currently just operators via `tail -f`; a future SIEM agent will tail it too, see [ideas.md](ideas.md) #7).
-
-Each query produces a line like:
-
-```
-2026-04-25T13:00:00.000Z [info] handler.go:123: 192.168.50.10:54321 -> example.com. (A) -> 1.2.3.4 (12.345ms)
-```
-
-#### One-time host setup
-
-```bash
-sudo mkdir -p /srv/dnsproxy-logs
-sudo chmod 750 /srv/dnsproxy-logs
-```
-
-#### Wazuh agent (current state: install + auto-update + enrolled with manager)
-
-The Wazuh agent is installed on the Vaultwarden VM and on this `proxy-home` VM, with the official Wazuh apt repo (`packages.wazuh.com`) configured on each so the agent gets pulled in by normal `apt upgrade` cycles, the nightly `system-update.sh` phase on the Vaultwarden VM, and standard unattended-upgrades on `proxy-home`. `packages.wazuh.com` is on the Vaultwarden VM's Squid allowlist (`proxy-home/vault_domains_allow_proxy.txt`) for that reason. Upgrade procedure documented upstream: [Wazuh agent, Linux upgrade guide](https://documentation.wazuh.com/current/upgrade-guide/wazuh-agent/linux.html).
-
-Both agents are **enrolled with a dedicated Wazuh manager VM (`wazuh-home`)** and report keepalives, so the manager has live agent inventory and "agent disconnected" can fire as a built-in alert.
-
-That is the **entire** current Wazuh deployment. Beyond the install + apt repo + manager enrollment, **nothing else has been touched**, `/var/ossec/etc/ossec.conf` is at stock defaults on both agents, no `<localfile>` entries added, no custom FIM paths beyond defaults, no rootkit-scan tuning, no log-shipping for `vw-logs/` / `bw-logs/` / `dnsproxy/queries.log` / `main.sh` status, no custom decoders or rules on the manager side, no alert routing. Whatever Wazuh's stock agent does on a freshly-enrolled Debian box is exactly what's running here.
-
-Everything that turns this into an actual SIEM (log shipping, custom decoders, alert rules, Discord Active Response) is still ahead, tracked in [ideas.md](ideas.md) #7.
-
-The full Wazuh build-out (manager VM, agent enrollment, log shipping for `bw-logs/` + `vw-logs/` + `dnsproxy/queries.log` + `main.sh` JSON status, decoders for the non-standard dnsproxy format, alert rules, Discord Active Response) is tracked in [ideas.md](ideas.md) #7.
+Net effect: full resolution, DoH upstream, every query logged in `pihole.log`, zero domains blocked at the DNS layer for this client. Other LAN clients keep using Pi-hole's normal filtered behaviour through the default group, this configuration only carves out an exception for the Vault VM.
 
 ### Operations cheat sheet
 
 ```bash
-# Deploy / restart
-cd ~/dns
-sudo docker-compose up -d --force-recreate
-sudo docker logs -f dnsproxy             # expect: "listening on 0.0.0.0:53"
+# Confirm the Pi-hole compose has the host bind mount for the log dir
+grep -A1 'volumes:' ~/pihole/docker-compose.yml | grep '/var/log/pihole'
 
-# Verify port binding + active rules
-sudo ss -tunlp | grep ':53\b'
-sudo ufw status numbered
+# Live-tail the dnsmasq query log on the Pi-hole VM
+sudo tail -f /var/log/pihole/pihole.log
 
-# Test from a 192.168.50.X host:
-nslookup google.com 192.168.173.9        # expect real answers
+# Confirm the wazuh-agent on the Pi-hole VM is tailing the right file
+sudo grep "pihole.log" /var/ossec/logs/ossec.log | tail
+# expect: Analyzing file: '/var/log/pihole/pihole.log'
 
-# Test from outside the trusted subnet:
-nslookup google.com 192.168.173.9        # expect timeout (ufw drop)
+# On wazuh-home, watch Vault-VM alerts arrive in real time
+sudo tail -f /var/ossec/logs/alerts/alerts.json \
+  | jq -r 'select(.rule.id=="100200") | "\(.timestamp) \(.data.qtype) \(.data.query) from \(.data.srcip)"'
 
-# Watch the live query log
-sudo tail -f /srv/dnsproxy-logs/queries.log
+# Offline-test a sample log line through the decoder + rule chain
+# (no agent / Pi-hole / live traffic needed)
+sudo /var/ossec/bin/wazuh-logtest
+# then paste:
+#   May  1 15:00:32 dnsmasq[52]: query[A] github.com from 192.168.50.3
+# expect: decoder pihole-dnsmasq-query, rule 100200 fires
 
-# Stop / down
-sudo docker-compose stop
-sudo docker-compose down
+# Validate manager config after editing local_decoder.xml or local_rules.xml
+sudo /var/ossec/bin/wazuh-analysisd -t
 ```
+
+### Planned next step (not yet implemented)
+
+Right now every Vault VM DNS query is a level-3 alert: full visibility, but uniform noise. The next iteration runs a Wazuh integrator that cross-checks each query against the Squid allowlist (`proxy-home/vault_domains_allow_proxy.txt`, mirrored onto wazuh-home) and emits a higher-level alert only for misses. Sketch in [`wazuh-home/README.md`](./wazuh-home/README.md) under "Planned next step"; full design tracked in [ideas.md](ideas.md) #7.
 
 ---
 
@@ -743,31 +684,46 @@ A map of every log this stack writes, what each one captures, and what consumes 
 | `/srv/bw-logs/letsencrypt/*` | certbot logs from BW's bundled ACME flow. **Rotated internally by BW**, not in scope for the host logrotate config. | Operator (cert renewal debugging) |, |
 | `/srv/logs/{main,backup,docker,system}/*.log` | Maintenance script logs, one file per phase per day. `main-YYYY-MM-DD.log` (orchestrator), `vault-backup-YYYY-MM-DD.log`, `update-YYYY-MM-DD.log` (docker), `system-autoupdate-YYYY-MM-DD.log`. 30-day retention enforced by `find -mtime +30 -delete` at the end of each phase script (NOT logrotate). | Operator, TrueNAS (pulled nightly via `truenas-script.sh`) | Wazuh (planned: structured JSONL status log per ideas.md #7 Phase A, then ingested by Phase B) |
 
-### proxy-home VM
+### LAN Pi-hole VM
 
 | Log file | What it captures | Currently consumed by | Future consumers |
 |----------|------------------|------------------------|------------------|
-| `/srv/dnsproxy-logs/queries.log` | Every DNS query the Vaultwarden VM (or any other client on the trusted subnet) makes via dnsproxy: timestamp, source IP+port, domain, query type, resolved answer, latency. Verbose mode (`-v`). | Operator (`tail -f`) | Wazuh (planned: `<localfile>` entry + custom decoder for the non-standard format, template in ideas.md #7 Phase B) |
+| `/var/log/pihole/pihole.log` | dnsmasq query log: `query[A/AAAA/HTTPS/PTR] <domain> from <client-ip>`, plus matching `forwarded` / `reply` / `cached` / `gravity blocked` lines. Bind-mounted from inside the Pi-hole container, see [`PiHole/docker-compose.yml`](../PiHole/docker-compose.yml). | Wazuh agent (tails the file; custom decoder + rules in [`wazuh-home/`](./wazuh-home/) elevate Vault-VM-srcip queries to level-3 alerts) | Wazuh integrator script for allowlist-anomaly detection (planned, see [ideas.md](ideas.md) #7) |
+| `/var/log/pihole/FTL.log` | Pi-hole FTL daemon log: gravity reloads, blocklist updates, errors. | Wazuh agent (tails the file, base ruleset only) | n/a |
+
+### Wazuh agent (current state)
+
+Wazuh agents are installed and enrolled across three VMs in the homelab, with very different scopes per VM:
+
+| VM | Agent state | What's actually shipping |
+|----|-------------|--------------------------|
+| Vaultwarden VM | Installed, enrolled, **stock defaults** | Nothing app-specific. No `<localfile>` entries for `vw-logs/` / `bw-logs/` / `main.sh` status; no custom FIM beyond defaults; no custom decoders or rules on the manager side scoped to this VM. Stock keepalives + base syscheck/inventory only. |
+| `proxy-home` VM | Installed, enrolled, **stock defaults** | Stock keepalives + base syscheck/inventory only. With dnsproxy gone, the proxy-home VM has nothing application-specific to ship. |
+| LAN Pi-hole VM | Installed, enrolled, **with custom localfile + manager-side decoder/rules** | `pihole.log` + `FTL.log` shipped; custom decoder `pihole-dnsmasq-query` + rules 100190/100200 on `wazuh-home` produce a level-3 alert per Vault-VM DNS query. Configuration snippets in [`wazuh-home/`](./wazuh-home/). |
+
+The Wazuh apt repo (`packages.wazuh.com`) is configured on each VM so the agent gets pulled in by normal `apt upgrade` cycles, the nightly `system-update.sh` phase on the Vaultwarden VM, and standard unattended-upgrades elsewhere. `packages.wazuh.com` is on the Vaultwarden VM's Squid allowlist (`proxy-home/vault_domains_allow_proxy.txt`) for that reason. Upgrade procedure documented upstream: [Wazuh agent, Linux upgrade guide](https://documentation.wazuh.com/current/upgrade-guide/wazuh-agent/linux.html).
+
+The full Wazuh build-out for Vault-VM-internal logs (log shipping for `bw-logs/` + `vw-logs/` + `main.sh` JSON status, custom decoders, alert rules, Discord Active Response) is still ahead, tracked in [ideas.md](ideas.md) #7. The DNS visibility piece in [`wazuh-home/`](./wazuh-home/) is the first slice of it that's actually live.
 
 ### Where logs do NOT go
 
 - **`stdout` for the application containers**, Vaultwarden's own log goes to `/srv/vw-logs/vaultwarden.log` (file mode), not container stdout. BW's logs likewise go to `/srv/bw-logs/`. Container stdout is bounded at 30 MB per container (`json-file` driver, 10m × 3 files) and only carries startup messages and unhandled errors. Don't `podman logs` for application-level events, read the files.
-- **Off-box, in real time**, log shipping to Wazuh is **not yet wired up** (the agent is enrolled with `wazuh-home` but stock defaults apply, no `<localfile>` entries, see [Wazuh agent (current state)](#wazuh-agent-current-state-install--auto-update--enrolled-with-manager) above). All centralized retention happens at TrueNAS pull time, nightly.
+- **Off-box, in real time, for the Vaultwarden VM itself**, log shipping to Wazuh is **not yet wired up** (the agent is enrolled with `wazuh-home` but stock defaults apply on the Vault VM, no `<localfile>` entries for `vw-logs/` / `bw-logs/`, see [Wazuh agent (current state)](#wazuh-agent-current-state) below). All centralized retention happens at TrueNAS pull time, nightly. The DNS visibility piece is the only Vault-VM-related log stream currently flowing live into Wazuh, and that's because it's tapped at the Pi-hole side, not on the Vault VM.
 
 ### Consumer summary
 
 - **CrowdSec**, tails `vaultwarden.log` + `access.log` + `error.log` + `modsec_audit.log` in real time, parses them, applies bouncer decisions back at BunkerWeb. The parser/scenario/whitelist files in `crowdsec/` are the contract between log format and detection rules.
 - **TrueNAS**, pulls the encrypted backup bundle + the four `/srv/logs/{main,backup,docker,system}/` phase logs via scp using the `fetcher` user (see [Off-site replication](#off-site-replication-truenas-via-cron)).
-- **Wazuh agent**, currently a no-op consumer (enrolled, stock defaults, no log shipping). See [ideas.md](ideas.md) #7 for the planned per-source ingestion.
+- **Wazuh**, agent on the LAN Pi-hole VM ships `pihole.log` + `FTL.log` live; manager-side custom decoder + rules in [`wazuh-home/`](./wazuh-home/) elevate every Vault-VM-srcip DNS query to a level-3 alert in the dashboard. Agents on the Vaultwarden VM and `proxy-home` VM are enrolled but otherwise at stock defaults (no `vw-logs/` / `bw-logs/` shipping yet, see [ideas.md](ideas.md) #7).
 - **Operator**, `tail -f` for live debugging; log files are the source of truth for everything except the BW internal scheduler/UI/Redis logs (those are debug-only).
 
 ---
 
 ## 🔁 Log Rotation
 
-Vaultwarden, BunkerWeb's nginx workers, and dnsproxy all append to their log files indefinitely, none rotate themselves. Three host-side configs cover this, split across the two VMs. They live in `/etc/logrotate.d/<name>` on the relevant VM and are NOT checked into this repo.
+Vaultwarden and BunkerWeb's nginx workers append to their log files indefinitely, none rotate themselves. Two host-side configs cover this on the Vaultwarden VM. They live in `/etc/logrotate.d/<name>` and are NOT checked into this repo. The LAN Pi-hole VM handles its own `pihole.log` rotation via Pi-hole's bundled logrotate setup, no extra config needed there.
 
-`copytruncate` is **load-bearing** in every config below: the standard logrotate mode (rename + create new file) changes the file's inode, and CrowdSec tails by file descriptor, it would keep reading the renamed (eventually compressed-and-deleted) file forever and miss new entries. `copytruncate` keeps the same inode and truncates in place, so its open fd keeps seeing fresh writes uninterrupted. The dnsproxy config uses the same mode for forward-compatibility with a future log-tailing agent (see [ideas.md](ideas.md) #7) even though nothing currently tails it.
+`copytruncate` is **load-bearing** in every config below: the standard logrotate mode (rename + create new file) changes the file's inode, and CrowdSec tails by file descriptor, it would keep reading the renamed (eventually compressed-and-deleted) file forever and miss new entries. `copytruncate` keeps the same inode and truncates in place, so its open fd keeps seeing fresh writes uninterrupted.
 
 ### Vaultwarden VM
 
@@ -798,21 +754,6 @@ Vaultwarden, BunkerWeb's nginx workers, and dnsproxy all append to their log fil
 ```
 
 The `letsencrypt/` subdir under `/srv/bw-logs/` is rotated internally by BunkerWeb's bundled certbot, the glob above won't recurse into it, which is intentional. Leave it alone.
-
-### proxy-home VM
-
-#### `/etc/logrotate.d/dnsproxy`
-
-```
-/srv/dnsproxy-logs/queries.log {
-    daily
-    rotate 7
-    compress
-    missingok
-    notifempty
-    copytruncate
-}
-```
 
 ### Maintenance script logs (Vaultwarden VM)
 
@@ -898,7 +839,7 @@ Periodically auditing the VM with [Lynis](https://cisofy.com/lynis/) and trackin
 
 A handful of Lynis suggestions are intentionally not acted on:
 
-* **Single nameserver** (NETW-2705): the `proxy-home` dnsproxy is the unified trusted DNS gateway; adding a fallback would defeat the encrypted-DNS architecture.
+* **Single nameserver** (NETW-2705): the LAN Pi-hole is the trusted DNS chokepoint (DoH-encrypted upstream + queries logged into Wazuh); adding a fallback resolver would route around both, making it pointless.
 * **Separate /home, /var partitions** (FILE-6310): overkill for a single-purpose 30 GB VM.
 * **GRUB password** (BOOT-5122): low value when only the Proxmox console can boot the VM.
 * **Remote logging** (LOGG-2154) and **malware scanner** (HRDN-7230): the Wazuh agent + syscheck cover both layers.

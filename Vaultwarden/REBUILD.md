@@ -27,9 +27,10 @@ the scripts in this repo. If you want a 1:1 replica of that setup,
 same VM layout (Vaultwarden VM + `proxy-home` VM + `wazuh-home` VM),
 same paths (`/srv/vw-data`, `/root/vault/`, `/home/poduser/vault/`),
 same users (`vwadmin`, `poduser`, `fetcher`), same hardening choices
-(Cloudflare Tunnel front-end, Squid + dnsproxy egress, CrowdSec inline
-at BunkerWeb, signed-and-encrypted backups with externally-stored
-pubkey, etc.), **follow this top to bottom and don't skip steps**.
+(Cloudflare Tunnel front-end, Squid for HTTP/HTTPS egress, LAN Pi-hole
+for DNS with Wazuh visibility, CrowdSec inline at BunkerWeb,
+signed-and-encrypted backups with externally-stored pubkey, etc.),
+**follow this top to bottom and don't skip steps**.
 The whole stack is a system; missing a step typically only manifests
 later (a backup that can't be decrypted, a container that can't reach
 DNS, a cron that runs the wrong path).
@@ -59,9 +60,11 @@ concrete. Adapt freely if your situation differs:
   `docker-compose.http-challenge.yml` and skip Phase 11. The rest of
   the runbook is identical.
 - **Different VLAN / IP / hostname conventions** → search-and-replace
-  `192.168.173.9` (proxy-home), `vault.example.com` (the public
-  hostname), `vaultwarden-prod` (the Cloudflare tunnel name), and any
-  internal subnet references with your own values.
+  `192.168.173.9` (proxy-home / Squid), `192.168.173.2` (LAN Pi-hole),
+  `192.168.50.3` (Vault VM, used in `wazuh-home/manager-rules.xml`),
+  `vault.example.com` (the public hostname), `vaultwarden-prod` (the
+  Cloudflare tunnel name), and any internal subnet references with your
+  own values.
 
 What you should **not** adapt without thinking carefully:
 
@@ -150,9 +153,14 @@ logic.
   dns-challenge flavour, the Cloudflare Tunnel).
 - TrueNAS (or equivalent) for first-tier backup storage. Hetzner Storage
   Box (or equivalent) for second-tier off-site replication.
-- A **separate `proxy-home` VM** already running Squid + dnsproxy (Phase 3
+- A **separate `proxy-home` VM** already running Squid (Phase 3
   describes what must be true on it; if you're rebuilding both, do
   proxy-home first).
+- A **DNS resolver reachable from VLAN-DMZ**, the reference setup uses
+  the homelab's existing LAN Pi-hole (`192.168.173.2`); any encrypted-
+  upstream resolver the firewall lets you reach works. Phase 3 covers
+  pointing the Vault VM at it. The Wazuh-side visibility config in
+  `wazuh-home/` assumes the LAN Pi-hole specifically.
 - A **separate Wazuh manager VM (`wazuh-home`)** if you're matching the
   reference layout, Phase 2 enrols agents to it. If you don't have one
   yet, skip the Wazuh enrollment step and add it later (idea #7 in
@@ -378,8 +386,8 @@ defence-in-depth):
 - Default-deny everything else.
 
 No further on-host firewalling is needed because egress control is
-enforced upstream at the `proxy-home` VM (Squid for HTTP/HTTPS, dnsproxy
-for DNS).
+enforced upstream: HTTP/HTTPS via Squid on the `proxy-home` VM, DNS via
+the LAN Pi-hole.
 
 ### QUIC UDP buffer tuning (host kernel)
 
@@ -401,11 +409,16 @@ This is a host-level kernel setting, applies to every container.
 ### Wazuh agent (if matching the reference setup)
 
 The reference setup runs the Wazuh agent on every VM (Vaultwarden VM +
-proxy-home VM), enrolled with a dedicated `wazuh-home` manager. The
+`proxy-home` VM + LAN Pi-hole VM), enrolled with a dedicated
+`wazuh-home` manager. On the Vaultwarden VM and `proxy-home` VM the
 agent runs with stock defaults, binary present, kept patched via apt,
-talking to the manager. No `<localfile>` entries, no custom rules. See
-README §Wazuh agent (current state) for scope; idea #7 in `ideas.md`
-covers the full SIEM rollout.
+talking to the manager. The LAN Pi-hole VM is the one with custom
+config: it tails `/var/log/pihole/pihole.log` and `FTL.log`, paired with
+a custom decoder + rule chain on the manager so every Vault-VM-srcip
+DNS query becomes a level-3 alert in the dashboard. See
+[`wazuh-home/README.md`](./wazuh-home/README.md) for the full apply
+procedure; idea #7 in `ideas.md` covers the wider SIEM rollout for
+`vw-logs/` / `bw-logs/`.
 
 If you don't have a Wazuh manager and don't plan to add one, skip this
 sub-section entirely.
@@ -416,65 +429,79 @@ in `proxy-home/vault_domains_allow_proxy.txt` so the apt fetch flows
 through Squid (Phase 4 wires Squid up; the agent install can wait
 until after Phase 4 if it's blocking on Squid availability).
 
-## Phase 3, `proxy-home` VM (prerequisite, separate host)
+## Phase 3, prerequisites on other hosts
 
-You almost certainly already have this. Quick recap of what must be true
-**before** the Vaultwarden VM tries to use it:
+The Vaultwarden VM does no outbound itself; it relies on two upstream
+chokepoints that need to be in place **before** Phase 4 wires the VM up
+to use them.
 
-The `proxy-home` VM is the **unified outbound chokepoint** for the
-Vaultwarden VM, hosting two services:
+### `proxy-home` VM (HTTP/HTTPS egress)
 
-- **Squid** on port `3128` for HTTP/HTTPS egress, allowlist-enforced by
-  `proxy-home/squid.conf` (the canonical allowlist is
-  `proxy-home/vault_domains_allow_proxy.txt`, deployed to
-  `/etc/squid/allowed_domains.txt` on the proxy-home VM).
-- **dnsproxy** (`adguard/dnsproxy`) on port `53` for DNS, forwarding
-  every query DoH-encrypted to Cloudflare Family. Lives at
-  `proxy-home/docker-compose.yml`. Listens on `0.0.0.0:53`. Source-IP
-  filtering is enforced by `ufw` on the proxy-home host (not by
-  dnsproxy itself, it has no built-in client-IP allowlist flag).
-  Runs with `-v` (verbose) so every query is captured at
-  `/srv/dnsproxy-logs/queries.log` on the proxy-home host, see the
-  next paragraph for why that matters.
+Hosts **Squid** on port `3128`, allowlist-enforced by
+`proxy-home/squid.conf` (the canonical allowlist is
+`proxy-home/vault_domains_allow_proxy.txt`, deployed to
+`/etc/squid/allowed_domains.txt` on the proxy-home VM). The Vaultwarden
+VM uses this as its `http_proxy` / `https_proxy` for all egress.
 
-Routing the Vaultwarden VM's DNS through this VM serves **two purposes**,
-and both matter:
-
-1. **Encryption.** Plaintext UDP/53 queries straight to a public
-   resolver are sniffable on every hop between the VM and that
-   resolver. Going through dnsproxy upgrades that to DoH on the
-   internet-facing leg, with the LAN-internal hop being a single short
-   trusted-subnet trip.
-2. **Logging visibility.** Every name the Vaultwarden VM ever resolves
-   (`vault.example.com`, Let's Encrypt endpoints, Cloudflare Tunnel,
-   CrowdSec hub, apt mirrors, container registries, Wazuh feeds, the
-   icons.bitwarden.net redirect, …) is captured in
-   `/srv/dnsproxy-logs/queries.log`. That's the difference between "I
-   trust the VM is only resolving what it should" and "I can prove
-   it." Without this layer there is **no** record of what the VM
-   asked for at the DNS level, a meaningful blind spot if anything
-   ever goes wrong on the host. The log is staged for future Wazuh
-   ingestion (idea #7); even before that, it's there for `tail -f`
-   investigations.
-
-Both services live in two **separate compose files** under `proxy-home/`,
-operationally paired but independently editable. See README §Outbound
-HTTP/HTTPS proxy and §Outbound DNS gateway for the full setup.
-
-Things to verify on the proxy-home VM before continuing:
+You almost certainly already have this VM running. Things to verify:
 
 - Squid running, allowlist applied, port 3128 reachable from VLAN-DMZ.
-- dnsproxy container running (`podman logs dnsproxy` should show
-  `listening on 0.0.0.0:53`).
-- `systemd-resolved`'s stub listener on `127.0.0.53:53` is **disabled**
-  on proxy-home (via `DNSStubListener=no`, see README §Host
-  prerequisite, `systemd-resolved` stub listener). Without this,
-  port 53 is occupied and dnsproxy can't bind.
-- `ufw` allows port 53 (TCP+UDP) from the VLAN-DMZ subnet only.
-- Firewall (OPNsense or equivalent), see README §DMZ Firewall Rules.
-  The two relevant allows for this VM: rule 1 (`VLAN-DMZ → 192.168.173.9:3128`,
-  Squid) and rule 2 (`VLAN-DMZ → 192.168.173.9:53`, dnsproxy). Rule 3 is
-  the catch-all VLAN block, sitting **after** both proxy-home allows.
+- `ufw` allows port 3128/tcp from the VLAN-DMZ subnet only.
+
+### LAN Pi-hole (DNS resolution + Wazuh visibility)
+
+The Vault VM's DNS goes to the homelab's existing **LAN Pi-hole**
+(`192.168.173.2`) instead of running a dedicated DoH gateway just for
+this VM. Pi-hole forwards upstream over DoH to Cloudflare Family via
+its own `adguard/dnsproxy` sidecar, so the encryption story is
+preserved; visibility comes from Pi-hole's `pihole.log` being shipped
+to Wazuh through a custom decoder + rule chain (see
+[`wazuh-home/README.md`](./wazuh-home/README.md)).
+
+Routing the Vault VM's DNS through this layer serves two purposes, both
+of which matter:
+
+1. **Encryption.** Plaintext UDP/53 to a public resolver is sniffable on
+   every hop between the VM and that resolver. Pi-hole's DoH upstream
+   means that leg is encrypted; the LAN-internal DMZ → LAN hop stays
+   on trusted infrastructure.
+2. **Logging visibility.** Every name the Vault VM ever resolves
+   (`vault.example.com`, Let's Encrypt endpoints, Cloudflare Tunnel,
+   CrowdSec hub, apt mirrors, container registries, Wazuh feeds, the
+   `icons.bitwarden.net` redirect, …) is captured in `pihole.log` and
+   surfaced as a level-3 Wazuh alert filtered to the Vault VM's source
+   IP. That's the difference between "I trust the VM is only resolving
+   what it should" and "I can prove it." Without this layer there is
+   **no** record of what the VM asked for at the DNS level, a
+   meaningful blind spot if anything ever goes wrong on the host.
+
+Things to verify on the LAN Pi-hole VM before continuing:
+
+- Pi-hole running, dnsproxy sidecar (or your equivalent) doing the DoH
+  upstream resolution, port 53 reachable from VLAN-DMZ.
+- `pihole.log` is being written to the host (Pi-hole compose has
+  `/var/log/pihole:/var/log/pihole` bind mount, see
+  `PiHole/docker-compose.yml`). Confirm with
+  `sudo tail -f /var/log/pihole/pihole.log`.
+- Pi-hole group `vaultwarden-vm` exists with the Vault VM as client and
+  **no adlists ticked** for that group (Squid is the actual content
+  gate; DNS-layer blocking would just add a hard-to-diagnose failure
+  mode).
+- Wazuh agent installed on the Pi-hole VM with the localfile blocks
+  from `wazuh-home/pihole-agent.localfile.xml` applied; manager-side
+  decoder + rules from `wazuh-home/manager-decoder.xml` +
+  `wazuh-home/manager-rules.xml` applied to wazuh-home; `logall_json`
+  from `wazuh-home/manager-global.snippet.xml` flipped on. Smoke test
+  with `sudo /var/ossec/bin/wazuh-logtest` and a sample query line.
+  Full apply procedure in [`wazuh-home/README.md`](./wazuh-home/README.md).
+
+### Firewall (DMZ → both chokepoints)
+
+OPNsense (or equivalent), see README §DMZ Firewall Rules. The two
+relevant allows: rule 1 (`VLAN-DMZ → 192.168.173.9:3128`, Squid on the
+`proxy-home` VM) and rule 2 (`VLAN-DMZ → 192.168.173.2:53`, the LAN
+Pi-hole). Rule 3 is the catch-all VLAN block, sitting **after** both
+allows.
 - Rule 6 (SMTP/587 direct to Mailjet) is in place so the Vaultwarden VM
   can reach SMTP without going through Squid.
 
@@ -482,13 +509,14 @@ Smoke test from the Vaultwarden VM (will work once Phase 4 is done):
 
 ```bash
 http_proxy=http://192.168.173.9:3128 curl -I https://deb.debian.org   # expect 200
-nslookup deb.debian.org 192.168.173.9                                  # expect real answers
+nslookup deb.debian.org 192.168.173.2                                  # expect real answers
 ```
 
-## Phase 4, Wire the Vaultwarden VM through `proxy-home`
+## Phase 4, Wire the Vaultwarden VM through its chokepoints
 
-The VM has **two** outbound paths to wire, HTTP/HTTPS via Squid, and
-DNS via dnsproxy. Both terminate on the same `192.168.173.9`.
+The VM has **two** outbound paths to wire: HTTP/HTTPS via Squid on the
+`proxy-home` VM (`192.168.173.9:3128`), and DNS via the LAN Pi-hole
+(`192.168.173.2:53`).
 
 ### apt → Squid
 
@@ -557,25 +585,24 @@ Add:
 Defaults env_keep += "HTTP_PROXY HTTPS_PROXY NO_PROXY http_proxy https_proxy no_proxy"
 ```
 
-### DNS → dnsproxy on `proxy-home`
+### DNS → LAN Pi-hole
 
-The Vaultwarden VM's resolver must be **`192.168.173.9` only** (the
-`proxy-home` VM running dnsproxy), with **no fallback** to a public
-resolver. Both parts of the design, encryption AND log visibility (see
-Phase 3 for the rationale), depend on every query going through
-dnsproxy. Leaving `1.1.1.1` or `8.8.8.8` in the resolver list as a
-fallback quietly defeats both: queries to those fallbacks aren't
-encrypted, and they don't show up in `proxy-home`'s
-`/srv/dnsproxy-logs/queries.log`. The moment dnsproxy briefly hiccups,
-the VM silently bypasses the entire layer with no record of what it
-asked for.
+The Vaultwarden VM's resolver must be **`192.168.173.2` only** (the LAN
+Pi-hole), with **no fallback** to a public resolver. Both parts of the
+design, encryption AND log visibility (see Phase 3 for the rationale),
+depend on every query going through Pi-hole. Leaving `1.1.1.1` or
+`8.8.8.8` in the resolver list as a fallback quietly defeats both:
+queries to those fallbacks aren't routed through Pi-hole's DoH upstream,
+and they don't show up in `pihole.log` (and therefore don't surface as
+Wazuh alerts). The moment Pi-hole briefly hiccups, the VM silently
+bypasses the entire layer with no record of what it asked for.
 
 Two ways to land that, pick one (mirroring the Phase 1 IP-pinning
 choice):
 
 **Option A, DHCP option 6 from OPNsense.** In *Services → DHCPv4 →
-\[VLAN-DMZ\]*, set the DNS server to `192.168.173.9` (and **only**
-`192.168.173.9`). Renew the lease on the VM (`sudo dhclient -r && sudo
+\[VLAN-DMZ\]*, set the DNS server to `192.168.173.2` (and **only**
+`192.168.173.2`). Renew the lease on the VM (`sudo dhclient -r && sudo
 dhclient` or just reboot). `/etc/resolv.conf` populates automatically.
 Keeps the resolver source-of-truth in OPNsense alongside the IP
 reservation, recommended if you also chose DHCP-reservation in
@@ -592,7 +619,7 @@ sudo nano /etc/resolv.conf
 Replace contents with:
 
 ```
-nameserver 192.168.173.9
+nameserver 192.168.173.2
 ```
 
 Don't fight the auto-population: if `systemd-resolved` is managing
@@ -606,9 +633,19 @@ you also chose static-on-VM in Phase 1.
 ```bash
 # Re-login or `source /etc/environment` first, then:
 sudo apt update                                        # expect: 200s, no 403s
-nslookup deb.debian.org                                # expect: real answers via 192.168.173.9
+nslookup deb.debian.org                                # expect: real answers via 192.168.173.2
 http_proxy=http://192.168.173.9:3128 curl -I https://deb.debian.org   # expect: 200
 ```
+
+If you applied the `wazuh-home/` config earlier, also confirm the alert
+chain end-to-end. On wazuh-home:
+
+```bash
+sudo tail -f /var/ossec/logs/alerts/alerts.json \
+  | jq -r 'select(.rule.id=="100200") | "\(.timestamp) \(.data.qtype) \(.data.query) from \(.data.srcip)"'
+```
+
+The `nslookup` above should produce a level-3 alert within seconds.
 
 If `apt update` 403s, the Squid allowlist is missing a Debian mirror,
 cross-check `proxy-home/vault_domains_allow_proxy.txt` against the
@@ -1180,7 +1217,9 @@ Tick all of these before declaring the rebuild done:
       multi-week-long phase, not a one-shot).
 - [ ] Wazuh agent (if matching the reference setup) is reporting to
       your `wazuh-home` manager and visible in the manager's agent
-      inventory.
+      inventory. If the LAN Pi-hole agent + manager-side `wazuh-home/`
+      config are in place, an `nslookup` from the Vault VM produces a
+      level-3 alert on rule 100200 within seconds.
 - [ ] Deadman's switch (if configured, `ideas.md` #2) is pinging on
       schedule.
 
