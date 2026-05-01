@@ -27,15 +27,15 @@ acme-staging-v02.api.letsencrypt.org
 # ================================
 # Cloudflare / Cloudflared Tunnel
 # ================================
+# .argotunnel.com (apex) covers the apex itself plus every subdomain:
+# update., protocol-v2., region1.v2., region2.v2., cfd-features., and
+# the DNS-SD-style SRV names cloudflared invents on its own (e.g.
+# _v2-origintunneld._tcp.argotunnel.com). Cloudflare adds new endpoint
+# patterns over time, so allowlisting individual subdomains was brittle.
 cloudflare.com
 www.cloudflare.com
 api.cloudflare.com
-argotunnel.com
-update.argotunnel.com
-protocol-v2.argotunnel.com
-region1.v2.argotunnel.com
-region2.v2.argotunnel.com
-cfd-features.argotunnel.com
+.argotunnel.com
 .r2.cloudflarestorage.com
 
 # ================================
@@ -99,6 +99,18 @@ pkg.go.dev
 # www.dan.me.uk publishes the canonical Tor exit list. Pulled by BunkerWeb
 # when the default blacklist is enabled.
 www.dan.me.uk
+
+# ================================
+# BunkerWeb: DNSBL feeds
+# ================================
+# BunkerWeb's DNSBL plugin (USE_DNSBL=yes, DNSBL_LIST="bl.blocklist.de
+# dnsbl.dronebl.org") checks each connecting client IP against these zones
+# by issuing an A query for <reversed-IP>.<zone>. Apex match needed because
+# every check produces a different subdomain (the reversed IP).
+# Strictly speaking these are DNS-only (Squid doesn't see them), but kept
+# here for symmetry with vault_domains_allow_dns.txt.
+.dnsbl.dronebl.org
+.bl.blocklist.de
 
 # ================================
 # CrowdSec hub + console
