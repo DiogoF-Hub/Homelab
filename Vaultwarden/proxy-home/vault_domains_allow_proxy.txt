@@ -113,6 +113,16 @@ www.dan.me.uk
 .bl.blocklist.de
 
 # ================================
+# Reverse DNS (PTR queries)
+# ================================
+# Linux libc does rDNS on every connect for connection logging, BunkerWeb
+# client identification, etc. The reversed IP becomes a subdomain of
+# in-addr.arpa (IPv4) or ip6.arpa (IPv6). DNS-only (Squid doesn't see
+# PTR queries), but kept here for symmetry with vault_domains_allow_dns.txt.
+.in-addr.arpa
+.ip6.arpa
+
+# ================================
 # CrowdSec hub + console
 # ================================
 # Covers api.crowdsec.net, hub-cdn.crowdsec.net, app.crowdsec.net; used for

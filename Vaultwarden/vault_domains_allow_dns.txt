@@ -135,3 +135,5 @@ test.example.com
 #   (^|\.)bl\.blocklist\.de$             # BunkerWeb DNSBL plugin (blocklist.de); reversed-IP becomes a subdomain
 #   (^|\.)crowdsec\.net$                 # CrowdSec hub + console + community blocklist
 #   (^|\.)cloudfront\.net$               # AWS CloudFront-hosted content (random subdomains)
+#   (^|\.)in-addr\.arpa$                 # IPv4 reverse DNS (libc rDNS on every connect); broad but rDNS is informational only
+#   (^|\.)ip6\.arpa$                     # IPv6 reverse DNS (same)
