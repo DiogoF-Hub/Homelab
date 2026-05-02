@@ -1347,5 +1347,5 @@ The old version remains at `/srv/tools/{age,minisign}/{old-version}/` and is nev
 
 ## 📚 Further Reading
 
-* **`ideas.md`**, numbered list of pending hardening / improvement ideas (gh-attestation supply-chain verification, Wazuh-native alerting to replace the deadman switch, etc.)
+* **`ideas.md`**, numbered list of pending hardening / improvement ideas (gh-attestation supply-chain verification, Wazuh-native alerting to replace the deadman switch, etc, more to come)
 * **`REBUILD.md`**, step-by-step VM rebuild procedure
