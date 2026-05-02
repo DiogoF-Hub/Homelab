@@ -489,6 +489,8 @@ Rules 1 and 2 are the two outbound chokepoints. Rule 1 points at the `proxy-home
 > - **DNS** → the homelab's LAN Pi-hole, `192.168.173.2:53` ([next section](#-outbound-dns-via-the-lan-pi-hole--wazuh-visibility))
 >
 > The Vault VM doesn't reach the public internet directly for either protocol. HTTP/HTTPS goes through Squid's domain allowlist; DNS goes through Pi-hole, which logs every query, ships the log to Wazuh, and forwards upstream over DoH to Cloudflare Family. Each chokepoint is configured independently.
+>
+> One important nuance: when an app on the Vault VM uses the system's `http_proxy` env vars (apt, etc.), **Squid does the DNS lookup**, not the Vault VM. So those specific queries don't appear in Pi-hole's Vault-VM-scoped stream; Squid's allowlist is the gate for that path. The split between what each layer covers is documented in detail under [Which DNS queries Pi-hole actually sees from the Vault VM](#which-dns-queries-pi-hole-actually-sees-from-the-vault-vm).
 
 Previously, domain access was restricted using firewall rules with domain allowlisting, but this approach was not reliable. I replaced it with a **dedicated Squid proxy** running in a separate VM on the Proxmox server.
 
@@ -634,6 +636,40 @@ Quick summary of what's in `wazuh-home/`:
 | `wazuh-home/pihole-agent.localfile.xml` | Append to `<ossec_config>` in **Pi-hole VM** `/var/ossec/etc/ossec.conf` | Tells the agent to tail the sidecar's `/var/log/vault-dns/events.log` (JSON format) |
 | `wazuh-home/manager-global.snippet.xml` | One line inside `<global>` in **wazuh-home** `/var/ossec/etc/ossec.conf` | Enables `logall_json` so level-0 events land in `archives.json` |
 | `wazuh-home/manager-rules.xml` | Append inside **wazuh-home** `/var/ossec/etc/rules/local_rules.xml` | Three-rule chain (100250 archive base + 100251 resolved + 100252 blocked) |
+
+### Which DNS queries Pi-hole actually sees from the Vault VM
+
+The diagram above shows `/etc/resolv.conf -> 192.168.173.2`, but that's only half the story. The Vault VM uses **explicit proxy mode** for HTTP/HTTPS via Squid, which means a lot of name resolution doesn't happen on the Vault VM at all.
+
+When something on the Vault VM uses the system's `http_proxy` / `https_proxy` env vars (apt, BunkerWeb's blacklist downloads, CrowdSec hub fetches, Vaultwarden's icon redirects, etc.), the actual DNS lookup is done by **Squid on `proxy-home`**, not by the Vault VM:
+
+1. The app sends `CONNECT example.com:443 HTTP/1.1` (or `GET http://example.com/...` for plain HTTP) to Squid.
+2. Squid receives the request, calls its own resolver to turn `example.com` into an IP, checks `example.com` against `vault_domains_allow_proxy.txt`, and either proxies the connection or returns 403.
+3. The Vault VM never issued a DNS query for `example.com`. Pi-hole's per-Vault-VM allowlist never sees it.
+
+So Pi-hole's strict allowlist for the Vault VM doesn't cover everything. It covers the queries the **Vault VM does itself**, which excludes anything proxied through Squid. The two layers are complementary, not redundant.
+
+#### Coverage by egress path
+
+| Egress path | DNS gate | Connection gate |
+|---|---|---|
+| HTTP/HTTPS via `http_proxy` (apt, app SDKs, etc.) | proxy-home's resolver, NOT Pi-hole-filtered for Vault VM | **Squid** allowlist |
+| Direct UDP/QUIC (e.g. `cloudflared` to Cloudflare edge) | **Pi-hole** (Vault-VM group) | OPNsense rule 5 (UDP/7844 to Cloudflare IPs only) |
+| Direct TCP outside Squid (e.g. SMTP to Mailjet `:587`) | **Pi-hole** (Vault-VM group) | OPNsense (specific allows; default-deny otherwise) |
+| DNS itself (potential exfiltration channel) | **Pi-hole** (Vault-VM group) | n/a |
+| Reverse DNS (`*.in-addr.arpa`, `*.ip6.arpa`) | **Pi-hole** (Vault-VM group) | n/a |
+
+Each row has at least one chokepoint enforcing the allowlist. No single layer is solely responsible for any path.
+
+A malicious process on the Vault VM trying to phone home:
+
+- **Via HTTP/HTTPS proxy**: Squid's allowlist denies the CONNECT, even though proxy-home's DNS resolved the destination. The TCP connection to the C2 IP never opens.
+- **Via raw TCP/UDP not through Squid**: Pi-hole's allowlist denies the DNS lookup, so the process can't get an IP. Even if it had a hardcoded IP, OPNsense default-denies the egress at L3/L4.
+- **Via DNS-tunneling exfiltration** (encoding data in subdomain names): Pi-hole's allowlist denies the lookup. This is the failure mode Squid alone wouldn't catch, which is why Pi-hole's role isn't redundant.
+
+#### proxy-home's own DNS, deliberately not strict
+
+The `proxy-home` VM itself isn't subject to the Vault-VM strict allowlist. It's in Pi-hole's `Default` group and can resolve any domain. That's intentional: proxy-home only resolves domains it's about to proxy traffic to, and Squid's allowlist gates that traffic. proxy-home is essentially a "resolve + connect on behalf of Vault VM" service whose actual policy gate is Squid. If proxy-home itself is compromised the entire egress story falls apart, but that's a higher-trust component protected by its own Wazuh agent, FIM, and host hardening, not by adding more DNS-layer rules.
 
 ### Pi-hole groups + DNS-layer allowlist for the Vault VM
 
