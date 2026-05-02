@@ -112,6 +112,9 @@ packages.wazuh.com
 # === Healthchecks.io: backup deadman's switch ===
 hc-ping.com
 
+# === Mailjet: SMTP for Vaultwarden's outbound emails ===
+in-v3.mailjet.com
+
 # === Your services ===
 test.example.com
 
