@@ -18,18 +18,40 @@
 
   logall_json:yes makes the manager additionally write every decoded
   event to /var/ossec/logs/archives/archives.json regardless of level.
-  That's how the Vault VM DNS event stream becomes searchable:
+  That's how the Vault VM DNS event stream becomes searchable on disk:
     - rule 100250 (level 0): visible in archives.json, not alerts.json
-    - rule 100251 (level 3, resolved): visible in both
-    - rule 100252 (level 6, blocked):  visible in both
+    - rule 100251 (level 3, resolved):              visible in both
+    - rule 100252 (level 6, Pi-hole policy block):  visible in both
+    - rule 100253 (level 4, upstream no-answer):    visible in both
 
-  Trade-off: archives.json grows fast (one line per decoded event).
-  Wazuh's default logrotate config under /etc/logrotate.d/wazuh
-  handles this, but worth checking disk usage with
-      du -sh /var/ossec/logs/archives/
-  after a few days.
+  TWO-PART REQUIREMENT for dashboard visibility of archives:
 
-  After editing, restart the manager:
+  This setting only writes to disk. To also see archives in the
+  Wazuh dashboard's wazuh-archives-4.x-* index (so you can filter
+  rule.id=100250 there for catch-all events instead of grepping
+  archives.json on the manager by hand), filebeat needs the wazuh
+  archives module enabled too. Default is OFF; flip in
+  /etc/filebeat/filebeat.yml under filebeat.modules:
+
+      - module: wazuh
+        alerts:
+          enabled: true
+        archives:
+          enabled: true     # <-- change this from false to true
+
+  Then `sudo systemctl restart filebeat`. The index pattern appears
+  in the dashboard data-source picker within seconds.
+
+  Trade-offs of enabling both halves:
+    - archives.json on disk grows fast (one line per decoded event).
+      Wazuh's default logrotate config under /etc/logrotate.d/wazuh
+      handles rotation; check `du -sh /var/ossec/logs/archives/`
+      after a few days to confirm it's bounded.
+    - The wazuh-archives-* index in the indexer also grows fast.
+      Set up ILM (or manually delete old indices) eventually so the
+      indexer doesn't fill up.
+
+  After editing /var/ossec/etc/ossec.conf, restart the manager:
       sudo systemctl restart wazuh-manager
 -->
 

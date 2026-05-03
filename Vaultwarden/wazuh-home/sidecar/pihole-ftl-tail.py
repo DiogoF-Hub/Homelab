@@ -6,8 +6,9 @@ Polls Pi-hole's FTL SQLite database (`pihole-FTL.db`) on a tick, picks
 up new query rows since the last processed `id`, formats each as a
 JSON line, and appends to /var/log/vault-dns/events.log. Wazuh agent
 on this VM tails that file via a <localfile> entry; the manager fires
-rule 100250 / 100251 / 100252 (see Vaultwarden/wazuh-home/manager-rules.xml)
-on the resulting decoded events.
+rule 100250 / 100251 / 100252 / 100253 (see
+Vaultwarden/wazuh-home/manager-rules.xml) on the resulting decoded
+events.
 
 WHY THIS EXISTS
 
@@ -45,10 +46,11 @@ ARCHITECTURE
     ships event over encrypted channel to wazuh-home
                                 ^
                                 v
-                                rules 100250 / 100251 / 100252 fire
+                                rules 100250 / 100251 / 100252 / 100253 fire
                                 100250 (level 0): every Vault DNS event, archived
                                 100251 (level 3): resolved (forwarded / cached / etc)
-                                100252 (level 6): blocked (any flavor)
+                                100252 (level 6): Pi-hole's allowlist policy denied (gravity / regex / exact deny / CNAME variants)
+                                100253 (level 4): upstream returned non-answer (NULL / NXDOMAIN / NODATA)
 
 STATE
 

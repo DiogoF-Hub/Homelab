@@ -112,9 +112,6 @@ packages.wazuh.com
 # === Healthchecks.io: backup deadman's switch ===
 hc-ping.com
 
-# === Mailjet: SMTP for Vaultwarden's outbound emails ===
-in-v3.mailjet.com
-
 # === Your services ===
 test.example.com
 
@@ -138,5 +135,6 @@ test.example.com
 #   (^|\.)bl\.blocklist\.de$             # BunkerWeb DNSBL plugin (blocklist.de); reversed-IP becomes a subdomain
 #   (^|\.)crowdsec\.net$                 # CrowdSec hub + console + community blocklist
 #   (^|\.)cloudfront\.net$               # AWS CloudFront-hosted content (random subdomains)
+#   (^|\.)mailjet\.com$                  # Mailjet SMTP (in-v3.mailjet.com primary, also in.mailjet.com etc. during connection setup)
 #   (^|\.)in-addr\.arpa$                 # IPv4 reverse DNS (libc rDNS on every connect); broad but rDNS is informational only
 #   (^|\.)ip6\.arpa$                     # IPv6 reverse DNS (same)

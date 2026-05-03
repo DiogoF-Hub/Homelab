@@ -416,7 +416,7 @@ talking to the manager. The LAN Pi-hole VM is the one with custom
 config: a sidecar daemon (`pihole-ftl-tail.py`) polls Pi-hole's FTL
 SQLite DB and emits structured JSON events to
 `/var/log/vault-dns/events.log`; the agent tails that log; manager
-rules 100250 / 100251 / 100252 produce per-query alerts. See
+rules 100250 / 100251 / 100252 / 100253 produce per-query alerts. See
 [`wazuh-home/README.md`](./wazuh-home/README.md) for the full apply
 procedure; idea #7 in `ideas.md` covers the wider SIEM rollout for
 `vw-logs/` / `bw-logs/`.
@@ -499,10 +499,14 @@ Things to verify on the LAN Pi-hole VM before continuing:
   `wazuh-home/pihole-agent.localfile.xml` applied (tails the sidecar's
   output log); manager-side rules from
   `wazuh-home/manager-rules.xml` applied to wazuh-home; `logall_json`
-  from `wazuh-home/manager-global.snippet.xml` flipped on. Smoke test:
-  trigger an `nslookup` from the Vault VM and watch alerts.json for
-  rule 100251 (resolved) or 100252 (blocked). Full apply procedure in
-  [`wazuh-home/README.md`](./wazuh-home/README.md).
+  from `wazuh-home/manager-global.snippet.xml` flipped on; optionally
+  filebeat's wazuh archives module also enabled
+  (`/etc/filebeat/filebeat.yml`, `archives.enabled: true`) so the
+  `wazuh-archives-4.x-*` index appears in the dashboard for catch-all
+  rule 100250 events. Smoke test: trigger an `nslookup` from the
+  Vault VM and watch alerts.json for rule 100251 (resolved), 100252
+  (Pi-hole policy block), or 100253 (upstream no-answer). Full apply
+  procedure in [`wazuh-home/README.md`](./wazuh-home/README.md).
 
 ### Firewall (DMZ → both chokepoints)
 
@@ -651,13 +655,16 @@ chain end-to-end. On wazuh-home:
 
 ```bash
 sudo tail -f /var/ossec/logs/alerts/alerts.json \
-  | jq -r 'select(.rule.id=="100251" or .rule.id=="100252") | "\(.timestamp) [\(.rule.id)] \(.data.qtype) \(.data.query) \(.data.status)"'
+  | jq -r 'select(.rule.id=="100251" or .rule.id=="100252" or .rule.id=="100253") | "\(.timestamp) [\(.rule.id)] \(.data.qtype) \(.data.query) \(.data.status)"'
 ```
 
 The `nslookup` above should produce a rule-100251 (resolved) alert
 within ~10 seconds (the sidecar's polling interval). Try also
 `nslookup ads.google.com 192.168.173.2` to confirm rule 100252
-(blocked) fires for an exact-deny test domain in Pi-hole.
+(Pi-hole policy block) fires for an exact-deny test domain in
+Pi-hole, and `nslookup rivestream.xyz 192.168.173.2` to confirm
+rule 100253 (upstream no-answer) for a Cloudflare-Family-blocked
+domain.
 
 If `apt update` 403s, the Squid allowlist is missing a Debian mirror,
 cross-check `proxy-home/vault_domains_allow_proxy.txt` against the
@@ -1231,8 +1238,9 @@ Tick all of these before declaring the rebuild done:
       your `wazuh-home` manager and visible in the manager's agent
       inventory. If the LAN Pi-hole sidecar daemon + manager-side
       `wazuh-home/` config are in place, an `nslookup` from the Vault
-      VM produces a rule-100251 (resolved) or rule-100252 (blocked)
-      alert within ~10 seconds (the sidecar's poll interval).
+      VM produces a rule-100251 (resolved), rule-100252 (Pi-hole
+      policy block), or rule-100253 (upstream no-answer) alert
+      within ~10 seconds (the sidecar's poll interval).
 - [ ] Deadman's switch (if configured, `ideas.md` #2) is pinging on
       schedule.
 
