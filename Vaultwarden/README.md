@@ -75,7 +75,7 @@ vaultwarden/
 │   ├── README.md                              # Architecture, apply order, verification, migration notes
 │   ├── pihole-agent.localfile.xml             # <localfile> block for the Pi-hole VM's wazuh-agent (tails the sidecar's vault-dns/events.log)
 │   ├── manager-global.snippet.xml             # logall_json toggle for the wazuh-home <global> block
-│   ├── manager-rules.xml                      # Rules 100250 (base) + 100251 (resolved, level 3) + 100252 (blocked, level 6)
+│   ├── manager-rules.xml                      # Rules 100250 (base) + 100251 (resolved, level 3) + 100252 (Pi-hole policy block, level 6) + 100253 (upstream no-answer, level 4)
 │   └── sidecar/
 │       ├── pihole-ftl-tail.py                 # Daemon: polls Pi-hole's FTL SQLite DB, emits one structured JSON event per query
 │       └── pihole-ftl-tail.service            # systemd unit (root, hardened, 10s polling tick)
@@ -620,7 +620,8 @@ The FTL SQLite DB at `/etc/pihole/pihole-FTL.db` (host bind mount: `/home/pi/pih
    ├─ built-in JSON decoder auto-extracts data.* fields
    ├─ rule 100250 (level 0): every Vault DNS event, archived
    ├─ rule 100251 (level 3): resolved query (forwarded / cached / etc)
-   └─ rule 100252 (level 6): blocked query (any flavor)
+   ├─ rule 100252 (level 6): Pi-hole's allowlist policy denied (gravity / regex / exact / CNAME variants)
+   └─ rule 100253 (level 4): upstream returned non-answer (NULL / NXDOMAIN / NODATA, e.g. Cloudflare Family filtering or domain has no A record)
 ```
 
 ### What's where in this repo
@@ -634,8 +635,8 @@ Quick summary of what's in `wazuh-home/`:
 | `wazuh-home/sidecar/pihole-ftl-tail.py` | Install at **Pi-hole VM** `/usr/local/sbin/pihole-ftl-tail.py` | Daemon: polls Pi-hole's FTL SQLite DB, emits one JSON event per Vault VM query |
 | `wazuh-home/sidecar/pihole-ftl-tail.service` | Install at **Pi-hole VM** `/etc/systemd/system/` | systemd unit (root, hardened, 10s polling tick) |
 | `wazuh-home/pihole-agent.localfile.xml` | Append to `<ossec_config>` in **Pi-hole VM** `/var/ossec/etc/ossec.conf` | Tells the agent to tail the sidecar's `/var/log/vault-dns/events.log` (JSON format) |
-| `wazuh-home/manager-global.snippet.xml` | One line inside `<global>` in **wazuh-home** `/var/ossec/etc/ossec.conf` | Enables `logall_json` so level-0 events land in `archives.json` |
-| `wazuh-home/manager-rules.xml` | Append inside **wazuh-home** `/var/ossec/etc/rules/local_rules.xml` | Three-rule chain (100250 archive base + 100251 resolved + 100252 blocked) |
+| `wazuh-home/manager-global.snippet.xml` | One line inside `<global>` in **wazuh-home** `/var/ossec/etc/ossec.conf` | Enables `logall_json` so level-0 events land in `archives.json` (paired with `archives.enabled: true` in `/etc/filebeat/filebeat.yml` to also expose them as the `wazuh-archives-4.x-*` index in the dashboard) |
+| `wazuh-home/manager-rules.xml` | Append inside **wazuh-home** `/var/ossec/etc/rules/local_rules.xml` | Four-rule chain: 100250 (archive base) + 100251 (resolved) + 100252 (Pi-hole policy block) + 100253 (upstream no-answer) |
 
 ### Which DNS queries Pi-hole actually sees from the Vault VM
 
@@ -692,7 +693,7 @@ How to wire it in Pi-hole's web UI:
 5. **Domain Management → Domains**: for each line in the **APEX section** at the bottom of `vault_domains_allow_dns.txt`, add an Allow Regex entry, scoped to `vaultwarden-vm` group only. There are 8 of them at time of writing (Let's Encrypt OCSP, Cloudflare R2, BunkerWeb apex, etc.), one-time setup.
 6. **Domain Management → Domains**: add **one** Deny Regex entry, value `.*`, scoped to `vaultwarden-vm` group only. This is the default-deny that catches everything not allowed by steps 4 + 5. Pi-hole evaluates Allow before Deny, so `.*` only applies to lookups that didn't match.
 
-Net effect: full resolution for allowlisted domains via Pi-hole's DoH upstream; every other domain returns `0.0.0.0` at DNS time. Each blocked attempt becomes a level-6 Wazuh alert (rule 100252, `status=blocked-regex`) so misconfigurations and unknown unknowns are immediately visible.
+Net effect: full resolution for allowlisted domains via Pi-hole's DoH upstream; every other domain returns `0.0.0.0` at DNS time. Each blocked attempt becomes a level-6 Wazuh alert (rule 100252, `status=blocked-regex`) so misconfigurations and unknown unknowns are immediately visible. Upstream-driven non-answers (Cloudflare Family filtering, domains with no A record, etc.) fire rule 100253 at level 4 instead — visible but distinct from "your allowlist policy hit."
 
 #### Updating the allowlist later
 
@@ -732,7 +733,7 @@ sudo grep "vault-dns-events" /var/ossec/logs/ossec.log | tail
 
 # Watch Vault-VM alerts arrive in real time
 sudo tail -f /var/ossec/logs/alerts/alerts.json \
-  | jq -r 'select(.rule.id=="100251" or .rule.id=="100252") | "\(.timestamp) [\(.rule.id)] \(.data.qtype) \(.data.query) \(.data.status)"'
+  | jq -r 'select(.rule.id=="100251" or .rule.id=="100252" or .rule.id=="100253") | "\(.timestamp) [\(.rule.id)] \(.data.qtype) \(.data.query) \(.data.status)"'
 
 # Validate manager config after editing local_rules.xml
 sudo /var/ossec/bin/wazuh-analysisd -t
@@ -765,7 +766,7 @@ A map of every log this stack writes, what each one captures, and what consumes 
 | Log file | What it captures | Currently consumed by | Future consumers |
 |----------|------------------|------------------------|------------------|
 | `/etc/pihole/pihole-FTL.db` (host bind: `/home/pi/pihole/data/etc-pihole/pihole-FTL.db`) | Pi-hole FTL's SQLite database: one row per resolved query in the `queries` view, with normalized columns for timestamp / qtype / status / domain / client / forward. Authoritative source of "what happened to this query." | Sidecar daemon `pihole-ftl-tail.py` (polls every 10s, filters to Vault VM, emits one JSON line per query to `/var/log/vault-dns/events.log`). See [`wazuh-home/`](./wazuh-home/) | Allowlist-anomaly extension to the sidecar (planned, see [ideas.md](ideas.md) #7) |
-| `/var/log/vault-dns/events.log` | Sidecar output: one JSON line per Vault VM DNS query with `srcip / qtype / query / status / status_code / blocked / forward`. | Wazuh agent (tails the file as `log_format=json`; manager auto-decodes with built-in JSON decoder; rules 100250 / 100251 / 100252 in [`wazuh-home/manager-rules.xml`](./wazuh-home/manager-rules.xml) fire per event) | n/a |
+| `/var/log/vault-dns/events.log` | Sidecar output: one JSON line per Vault VM DNS query with `srcip / qtype / query / status / status_code / blocked / forward`. | Wazuh agent (tails the file as `log_format=json`; manager auto-decodes with built-in JSON decoder; rules 100250 / 100251 / 100252 / 100253 in [`wazuh-home/manager-rules.xml`](./wazuh-home/manager-rules.xml) fire per event) | n/a |
 
 ### Wazuh agent (current state)
 
@@ -775,7 +776,7 @@ Wazuh agents are installed and enrolled across three VMs in the homelab, with ve
 |----|-------------|--------------------------|
 | Vaultwarden VM | Installed, enrolled, **stock defaults** | Nothing app-specific. No `<localfile>` entries for `vw-logs/` / `bw-logs/` / `main.sh` status; no custom FIM beyond defaults; no custom decoders or rules on the manager side scoped to this VM. Stock keepalives + base syscheck/inventory only. |
 | `proxy-home` VM | Installed, enrolled, **stock defaults** | Stock keepalives + base syscheck/inventory only. With dnsproxy gone, the proxy-home VM has nothing application-specific to ship. |
-| LAN Pi-hole VM | Installed, enrolled, **with custom localfile + sidecar daemon + manager-side rules** | `pihole-ftl-tail.py` daemon polls Pi-hole's FTL SQLite DB and emits structured JSON events to `/var/log/vault-dns/events.log`; agent ships those; manager rules 100250 / 100251 / 100252 produce per-query alerts (resolved at level 3, blocked at level 6) using Wazuh's built-in JSON decoder. Configuration in [`wazuh-home/`](./wazuh-home/). |
+| LAN Pi-hole VM | Installed, enrolled, **with custom localfile + sidecar daemon + manager-side rules** | `pihole-ftl-tail.py` daemon polls Pi-hole's FTL SQLite DB and emits structured JSON events to `/var/log/vault-dns/events.log`; agent ships those; manager rules 100250 / 100251 / 100252 / 100253 produce per-query alerts (resolved at level 3, Pi-hole-policy block at level 6, upstream no-answer at level 4) using Wazuh's built-in JSON decoder. Configuration in [`wazuh-home/`](./wazuh-home/). |
 
 The Wazuh apt repo (`packages.wazuh.com`) is configured on each VM so the agent gets pulled in by normal `apt upgrade` cycles, the nightly `system-update.sh` phase on the Vaultwarden VM, and standard unattended-upgrades elsewhere. `packages.wazuh.com` is on the Vaultwarden VM's Squid allowlist (`proxy-home/vault_domains_allow_proxy.txt`) for that reason. Upgrade procedure documented upstream: [Wazuh agent, Linux upgrade guide](https://documentation.wazuh.com/current/upgrade-guide/wazuh-agent/linux.html).
 
@@ -790,7 +791,7 @@ The full Wazuh build-out for Vault-VM-internal logs (log shipping for `bw-logs/`
 
 - **CrowdSec**, tails `vaultwarden.log` + `access.log` + `error.log` + `modsec_audit.log` in real time, parses them, applies bouncer decisions back at BunkerWeb. The parser/scenario/whitelist files in `crowdsec/` are the contract between log format and detection rules.
 - **TrueNAS**, pulls the encrypted backup bundle + the four `/srv/logs/{main,backup,docker,system}/` phase logs via scp using the `fetcher` user (see [Off-site replication](#off-site-replication-truenas-via-cron)).
-- **Wazuh**, agent on the LAN Pi-hole VM ships the FTL-DB-sidecar's `/var/log/vault-dns/events.log` (structured JSON) live; manager rules 100251 / 100252 in [`wazuh-home/`](./wazuh-home/) produce per-query alerts (resolved at level 3, blocked at level 6) for the Vault VM. Agents on the Vaultwarden VM and `proxy-home` VM are enrolled but otherwise at stock defaults (no `vw-logs/` / `bw-logs/` shipping yet, see [ideas.md](ideas.md) #7).
+- **Wazuh**, agent on the LAN Pi-hole VM ships the FTL-DB-sidecar's `/var/log/vault-dns/events.log` (structured JSON) live; manager rules 100251 / 100252 / 100253 in [`wazuh-home/`](./wazuh-home/) produce per-query alerts (resolved at level 3, Pi-hole-policy block at level 6, upstream no-answer at level 4) for the Vault VM. Agents on the Vaultwarden VM and `proxy-home` VM are enrolled but otherwise at stock defaults (no `vw-logs/` / `bw-logs/` shipping yet, see [ideas.md](ideas.md) #7).
 - **Operator**, `tail -f` for live debugging; log files are the source of truth for everything except the BW internal scheduler/UI/Redis logs (those are debug-only).
 
 ---

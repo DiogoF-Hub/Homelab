@@ -161,10 +161,13 @@ hc-ping.com
 # Mailjet: SMTP for Vaultwarden's outbound emails
 # ================================
 # Vaultwarden sends new-device notifications, password-reset links, etc.
-# via Mailjet on TCP/587 (per .env SMTP_HOST + DMZ firewall rule 6).
-# Strictly DNS-only (SMTP doesn't go through Squid; Squid is HTTP/HTTPS),
-# but kept here for symmetry with vault_domains_allow_dns.txt.
-in-v3.mailjet.com
+# via Mailjet on TCP/587 (per .env SMTP_HOST=in-v3.mailjet.com + DMZ
+# firewall rule 6). The SMTP client also resolves adjacent Mailjet hosts
+# (e.g. in.mailjet.com) during connection setup / CNAME chains, so apex
+# match covers all of them. Strictly DNS-only (SMTP doesn't go through
+# Squid; Squid is HTTP/HTTPS), but kept here for symmetry with
+# vault_domains_allow_dns.txt.
+.mailjet.com
 
 # ================================
 # Your services

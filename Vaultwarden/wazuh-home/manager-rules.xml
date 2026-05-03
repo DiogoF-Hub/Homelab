@@ -7,44 +7,62 @@
       sudo systemctl restart wazuh-manager
 
   Goal: surface every Vault VM DNS query as a Wazuh alert with full
-  metadata (qtype, query, status label, blocked-or-not boolean) in a
-  single event. The data source is the structured JSON log emitted by
-  the sidecar at sidecar/pihole-ftl-tail.py, tailed by the Wazuh agent
-  on the Pi-hole VM via pihole-agent.localfile.xml.
+  metadata (qtype, query, status label) in a single event. The data
+  source is the structured JSON log emitted by the sidecar at
+  sidecar/pihole-ftl-tail.py, tailed by the Wazuh agent on the
+  Pi-hole VM via pihole-agent.localfile.xml.
 
-  Three-rule chain:
+  Four-rule chain:
     - 100250 (level 0): catch-all "any vault_dns event from the
       sidecar". Archived only if logall_json is on; never alerts.
-      All other rules in this chain depend on it via if_sid so we
-      don't have to repeat the discriminator field check.
-    - 100251 (level 3): the query was actually resolved (forwarded
-      / cached / etc, blocked=false). Visible in alerts.json + the
-      dashboard, but lower-priority than blocked queries.
-    - 100252 (level 6): the query was blocked (blocked=true), by
-      ANY mechanism (gravity adlist, manual exact-deny, regex,
-      upstream-NULL, externally-blocked NXDOMAIN, etc). The
-      sidecar normalizes all block flavors into the boolean.
+      All other rules chain off this via if_sid so the discriminator
+      field check (event_type=vault_dns) doesn't have to repeat.
+    - 100251 (level 3): query was actually resolved (forwarded /
+      cached / etc, blocked=false in the sidecar's JSON).
+    - 100252 (level 6): Pi-hole's OWN allowlist policy denied the
+      query: gravity (1), regex (4), exact deny (5), CNAME variants
+      (9 / 10 / 11 / 20), special domain (18). This is the real "your
+      allowlist hit something unexpected" signal.
+    - 100253 (level 4): upstream resolver returned a non-answer
+      (NULL / NXDOMAIN / NODATA): codes 6, 7, 8, 15, 16, 17. NOT a
+      Pi-hole policy hit. Most commonly this is upstream filtering
+      (Cloudflare Family flagging a domain) OR a domain that legit-
+      imately has no A record (e.g. cfd-features.argotunnel.com
+      whose payload is in TXT, not A). Flagged at lower priority
+      than 100252 so the dashboard distinguishes "your rules denied
+      something" from "the upstream had no usable answer for
+      whatever reason".
 
-  Why this replaces the old chain (100190 / 100195 / 100200 / 100210):
+  Status code mapping (from the sidecar's STATUS_LABELS):
+      0  unknown                                 → 100251 (blocked=false)
+      1  blocked-gravity                         → 100252
+      2  forwarded                               → 100251
+      3  cached                                  → 100251
+      4  blocked-regex                           → 100252
+      5  blocked-deny-exact                      → 100252
+      6  blocked-upstream-ip                     → 100253
+      7  blocked-upstream-null                   → 100253
+      8  blocked-upstream-nxdomain               → 100253
+      9  blocked-gravity-cname                   → 100252
+      10 blocked-regex-cname                     → 100252
+      11 blocked-deny-cname                      → 100252
+      12 retried                                 → 100251
+      13 retried-ignored                         → 100251
+      14 forwarded-dnssec-bogus                  → 100251
+      15 blocked-external-ip-null                → 100253
+      16 blocked-external-nxdomain               → 100253
+      17 blocked-external-null-reply             → 100253
+      18 blocked-special-domain                  → 100252
+      19 cached-stale                            → 100251
+      20 blocked-deny-exact-cname                → 100252
 
-  The previous approach decoded Pi-hole's dnsmasq text log in two
-  separate decoders, fired four rules, and used a Wazuh correlation
-  rule to tie a "blocked" event back to a Vault VM "query" event by
-  same_field=query within a timeframe. That worked for some block
-  flavors but missed others (Pi-hole emits four-plus different
-  syntactic patterns for different block sources, and we kept finding
-  new ones). The FTL-DB sidecar reads Pi-hole's normalized status
-  column and emits one merged event per query, so the manager-side
-  chain collapses to a single decoder (Wazuh's built-in JSON one) plus
-  these three rules. No correlation needed; the sidecar already merged
-  the data before Wazuh saw it.
-
-  Why no <decoded_as>json</decoded_as> bind in 100250's parents:
-  Wazuh's built-in JSON decoder fires on any line that parses as JSON
-  on a localfile with log_format=json. We don't add a custom decoder
-  here. The discriminator that scopes alerts to "events from the
-  sidecar specifically" is the event_type field embedded in every JSON
-  line by the sidecar.
+  Note on regex matching:
+  Wazuh's <field name="X">value</field> match treats the value as a
+  regex (PCRE2). For status_code (Pi-hole's integer cast to JSON,
+  shows up as a string in Wazuh's data.* fields), the alternation
+  syntax `^(1|4|5|...)$` filters by exact-match across multiple
+  values. The anchors are mandatory; without them, "1" would also
+  match "10", "11", etc.
 
   Replace 192.168.50.3 below with the actual Vault VM IP if it's
   different in your environment. (The sidecar already filters at SQL
@@ -62,8 +80,9 @@
     <description>Vault VM DNS event: $(query) [$(status)]</description>
   </rule>
 
-  <!-- Resolved query: the Vault VM got a real DNS answer.
-       blocked=false in the JSON. Level 3 alert in dashboard. -->
+  <!-- Resolved query: the Vault VM got a real DNS answer
+       (forwarded / cached / etc; status codes 0, 2, 3, 12, 13, 14, 19).
+       blocked=false in the JSON. -->
   <rule id="100251" level="3">
     <if_sid>100250</if_sid>
     <srcip>192.168.50.3</srcip>
@@ -71,15 +90,25 @@
     <description>Vault VM DNS resolved: $(query) [$(status)]</description>
   </rule>
 
-  <!-- Blocked query: the Vault VM's query did NOT resolve to a real
-       answer, regardless of which Pi-hole mechanism blocked it.
-       blocked=true in the JSON. Level 6 alert: higher priority than
-       resolutions but not active-response territory. -->
+  <!-- Pi-hole's own policy denied the query (gravity, regex, exact
+       deny, CNAME-cloak variants, special domain). This is the real
+       "allowlist hit something unexpected" alert. -->
   <rule id="100252" level="6">
     <if_sid>100250</if_sid>
     <srcip>192.168.50.3</srcip>
-    <field name="blocked">true</field>
-    <description>Vault VM DNS BLOCKED: $(query) [$(status)]</description>
+    <field name="status_code" type="pcre2">^(1|4|5|9|10|11|18|20)$</field>
+    <description>Vault VM DNS BLOCKED by Pi-hole policy: $(query) [$(status)]</description>
+  </rule>
+
+  <!-- Upstream resolver returned a non-answer (NULL / NXDOMAIN /
+       NODATA; status codes 6, 7, 8, 15, 16, 17). NOT a Pi-hole
+       policy hit; this is upstream filtering (Cloudflare Family) or
+       a domain that legitimately has no A record. Lower priority. -->
+  <rule id="100253" level="4">
+    <if_sid>100250</if_sid>
+    <srcip>192.168.50.3</srcip>
+    <field name="status_code" type="pcre2">^(6|7|8|15|16|17)$</field>
+    <description>Vault VM DNS no-answer (upstream): $(query) [$(status)]</description>
   </rule>
 
 </group>
