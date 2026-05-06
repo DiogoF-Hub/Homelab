@@ -53,7 +53,7 @@ wazuh-home (manager)
 
 | File | Where it goes | What it does |
 |------|---------------|--------------|
-| `sidecar/pihole-ftl-tail.py` | Install at **Pi-hole VM** `/usr/local/sbin/pihole-ftl-tail.py` | The daemon. Reads Pi-hole's FTL DB, emits structured JSON events. ~200 lines, stdlib only |
+| `sidecar/pihole-ftl-tail.py` | Install at **Pi-hole VM** `/usr/local/sbin/pihole-ftl-tail.py` | The daemon. Reads Pi-hole's FTL DB, emits structured JSON events. ~360 lines, stdlib only |
 | `sidecar/pihole-ftl-tail.service` | Install at **Pi-hole VM** `/etc/systemd/system/pihole-ftl-tail.service` | Systemd unit running the daemon as root with hardening (`ProtectSystem`, `RestrictAddressFamilies=AF_UNIX`, etc.) |
 | `pihole-agent.localfile.xml` | Append to a `<ossec_config>` block in **Pi-hole VM** `/var/ossec/etc/ossec.conf` | Tells the Wazuh agent to tail the sidecar's `/var/log/vault-dns/events.log` (JSON format) |
 | `manager-global.snippet.xml` | One-line addition inside the `<global>` block in **wazuh-home** `/var/ossec/etc/ossec.conf` | Enables `logall_json` so level-0 events (rule 100250 base) land in `archives.json` and are searchable. Pair with `archives.enabled: true` in `/etc/filebeat/filebeat.yml` to also expose them as `wazuh-archives-4.x-*` in the dashboard (see deploy step 5) |

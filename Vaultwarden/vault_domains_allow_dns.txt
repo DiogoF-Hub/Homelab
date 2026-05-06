@@ -138,3 +138,4 @@ test.example.com
 #   (^|\.)mailjet\.com$                  # Mailjet SMTP (in-v3.mailjet.com primary, also in.mailjet.com etc. during connection setup)
 #   (^|\.)in-addr\.arpa$                 # IPv4 reverse DNS (libc rDNS on every connect); broad but rDNS is informational only
 #   (^|\.)ip6\.arpa$                     # IPv6 reverse DNS (same)
+#   (^|\.)vaultwarden-home\.localdomain$ # VM's own hostname; libc bare-name lookups (logging, self-URLs) get .localdomain appended by /etc/resolv.conf's search directive before they hit Pi-hole. Resolves via Pi-hole's conditional forward to OPNsense (DHCP-leases known there).
