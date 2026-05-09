@@ -28,8 +28,9 @@ Homelab/
 │   ├── REBUILD.md
 │   ├── DECRYPT.txt
 │   ├── ideas.md
-│   ├── docker-compose.dns-challenge.yml      # production (Cloudflare Tunnel + ACME DNS-01)
-│   ├── docker-compose.http-challenge.yml     # alternate (direct host ports + ACME HTTP-01)
+│   ├── docker-compose.cf-tunnel.yml          # production (Cloudflare Tunnel + ACME DNS-01)
+│   ├── docker-compose.public-http01.yml      # direct host ports 80+443 + ACME HTTP-01
+│   ├── docker-compose.public-dns01.yml       # direct host port 443 only (no port 80) + ACME DNS-01
 │   ├── poduser_crontab.txt
 │   ├── root_crontab.txt
 │   ├── bunkerweb/                            # mounted into the BunkerWeb container
@@ -105,7 +106,7 @@ Self-hosted password manager running on a **dedicated Debian 13 VM in Proxmox**,
 
   * **Cloudflare Tunnel (`cloudflared`)** as the public-facing edge: no host ports exposed; all inbound traffic arrives via an outbound-initiated tunnel
   * **BunkerWeb** handles ACME (Let's Encrypt DNS-01), TLS termination, security headers, country / user-agent blacklists, rate limiting, ModSecurity / CRS WAF, and the CrowdSec bouncer in one place
-  * Two mutually-exclusive compose flavors: `docker-compose.dns-challenge.yml` (canonical / production, behind Cloudflare Tunnel) and `docker-compose.http-challenge.yml` (alternate, direct host-port exposure with ACME HTTP-01)
+  * Three mutually-exclusive compose flavors: `docker-compose.cf-tunnel.yml` (canonical / production, behind Cloudflare Tunnel + DNS-01), `docker-compose.public-http01.yml` (direct host ports 80+443 + HTTP-01), and `docker-compose.public-dns01.yml` (direct host port 443 only, no port 80 listener at all + DNS-01)
 * **Intrusion prevention**
 
   * **Containerized CrowdSec** with custom Vaultwarden parsers, tightened bruteforce + user-enumeration scenarios, and an admin-diagnostics whitelist

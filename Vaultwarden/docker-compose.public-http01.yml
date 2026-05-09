@@ -1,0 +1,396 @@
+services:
+  bunkerweb:
+    container_name: bunkerweb
+    image: bunkerity/bunkerweb-all-in-one:latest
+    security_opt:
+      - no-new-privileges
+    cap_drop:
+      - ALL
+    cap_add:
+      # Bind to privileged ports (<1024); kept defensively. BunkerWeb's
+      # default LISTEN_HTTP_PORT/LISTEN_HTTPS_PORT are 8080/8443 (>1024),
+      # and the host port mapping below targets those internal ports,
+      # so the cap isn't strictly needed today. Stays granted in case a
+      # future image bump changes the internal listen ports.
+      - NET_BIND_SERVICE
+      # Change file ownership: scheduler writes state files owned by the nginx user.
+      - CHOWN
+      # Bypass file-permission checks: read configs / write logs across uid/gid boundaries.
+      - DAC_OVERRIDE
+      # Change process GID: master forks workers and drops them to the unprivileged group.
+      - SETGID
+      # Change process UID: same as above, drops workers from root to the nginx user.
+      - SETUID
+    # Not read_only: BunkerWeb writes into /etc/nginx (regenerated config),
+    # /var/cache/nginx, /var/log/nginx, and /data. The image isn't designed
+    # for a read-only rootfs. Other hardening (cap_drop ALL, no-new-privileges,
+    # explicit cap_add, resource limits) still applies.
+    tmpfs:
+      - /tmp
+      - /var/run
+    deploy:
+      resources:
+        limits:
+          memory: 384M
+          cpus: "0.75"
+    ports:
+      # 80/tcp:  HTTP. Required for ACME HTTP-01 renewals (Let's Encrypt's
+      #          validator only tries port 80 for this challenge). BunkerWeb
+      #          serves the challenge response here and 301-redirects
+      #          everything else to HTTPS.
+      # 443/tcp: HTTPS (HTTP/1.1 + HTTP/2). The actual vault traffic.
+      # 443/udp: HTTP/3 (QUIC). Optional; clients fall back to HTTP/2 on
+      #          TCP if this is closed. Drop if you want a narrower surface.
+      #
+      # Rootless-podman caveat: the host-side bind to 80/443 requires the
+      # poduser to be allowed to open privileged ports. Lower the kernel
+      # threshold once on the VM:
+      #   sudo sysctl -w net.ipv4.ip_unprivileged_port_start=80
+      #   echo 'net.ipv4.ip_unprivileged_port_start=80' | sudo tee /etc/sysctl.d/99-rootless-podman.conf
+      # (CAP_NET_BIND_SERVICE on the container above only governs the
+      # container's *internal* listener; it doesn't grant the host-side
+      # bind that podman performs as poduser.)
+      - "80:8080/tcp"
+      - "443:8443/tcp"
+      - "443:8443/udp"
+    environment:
+      TZ: "${TZ}"
+      SERVER_NAME: "${SERVER_NAME}"
+      DISABLE_DEFAULT_SERVER: "yes"
+      USE_REVERSE_PROXY: "yes"
+      REVERSE_PROXY_URL: "/"
+      REVERSE_PROXY_HOST: "http://vaultwarden:8080"
+      # Vaultwarden uses websockets for live sync (/notifications/hub).
+      REVERSE_PROXY_WS: "yes"
+
+      # DNS resolvers: podman's aardvark-dns listens on each bridge's gateway.
+      # BunkerWeb defaults to Docker's embedded resolver (127.0.0.11) which
+      # does NOT exist on podman; without this, nginx cannot resolve the
+      # `vaultwarden` / `crowdsec` container names. Subnets are pinned below
+      # so these gateway IPs are contractual.
+      DNS_RESOLVERS: "10.89.1.1 10.89.2.1"
+
+      # Let's Encrypt (HTTP-01 challenge)
+      AUTO_LETS_ENCRYPT: "yes"
+      EMAIL_LETS_ENCRYPT: "${EMAIL_LETS_ENCRYPT}"
+      LETS_ENCRYPT_CHALLENGE: "http"
+
+      # TLS hardening
+      SSL_PROTOCOLS: "TLSv1.3"
+      SSL_CIPHERS_LEVEL: "modern"
+
+      # Security headers are owned entirely by
+      # custom-configs/server-http/headers-passthrough-apply.conf (with an
+      # http-scope map in custom-configs/http/headers-upstream-passthrough.conf
+      # for the XFO/CSP upstream passthrough). BW's env-var headers plugin is
+      # bypassed to insulate us from version-to-version drift in its emission
+      # rules. REMOVE_HEADERS stays here because it's a different mechanism
+      # (suppression of response headers, not injection).
+      REMOVE_HEADERS: "Server Via X-Powered-By X-AspNet-Version X-AspNetMvc-Version"
+
+      # Don't replace upstream 4xx/5xx responses with BunkerWeb's HTML error
+      # pages. Vaultwarden's API needs its own JSON error bodies to pass
+      # through untouched (clients parse them).
+      INTERCEPTED_ERROR_CODES: ""
+
+      # Vaultwarden API uses PUT (cipher edit + soft-delete to trash via
+      # /api/ciphers/<id>/delete), PATCH, DELETE, and OPTIONS (CORS preflight
+      # from web vault + browser extensions). BunkerWeb's default
+      # ALLOWED_METHODS is GET|POST|HEAD, which 405s every vault edit at the
+      # nginx layer before ModSec or Vaultwarden ever sees the request.
+      # Pipe-separated (regex alternation, not commas/spaces).
+      ALLOWED_METHODS: "GET|POST|HEAD|PUT|PATCH|DELETE|OPTIONS"
+
+      # Country blacklist
+      BLACKLIST_COUNTRY: "CN RU KP IR SY CU VE BY"
+
+      # User-agent blacklist (built-in list auto-fetched + custom additions)
+      # BunkerWeb already fetches the nginx-ultimate-bad-bot-blocker list by default
+      # which includes sqlmap, nikto, nmap, zgrab, havij, dirbuster, etc.
+      # We add extra patterns not in the default list:
+      BLACKLIST_USER_AGENT: "python-requests python-urllib python-httpx httpx wget go-http-client libwww-perl masscan"
+
+      # Rate limiting (tuned for ~5 users)
+      USE_LIMIT_REQ: "yes"
+      LIMIT_REQ_RATE: "5r/s"
+      LIMIT_REQ_BURST: "15"
+
+      # DNSBL (check IPs against known spam/abuse lists)
+      USE_DNSBL: "yes"
+      DNSBL_LIST: "bl.blocklist.de dnsbl.dronebl.org"
+
+      # badbehavior: naive per-IP non-200 counter (400/401/403/404/405/429/444,
+      # threshold 10 → 24h ban). Triggers false-positive cascades on Vaultwarden
+      # since admin /diagnostics + normal login flow emits bursts of 401/403/404
+      # that look identical to probing. CrowdSec already gives us scenario-based
+      # bans with proper tuning. Leave this off.
+      USE_BAD_BEHAVIOR: "no"
+
+      # robots.txt and security.txt are served via custom Nginx configs (see custom-configs/)
+
+      # WAF
+      # 1.6.9 dropped MODSECURITY_SEC_AUDIT_LOG (path is fixed internally) and
+      # MODSECURITY_CRS_PARANOIA_LEVEL (paranoia is now tuned via CRS plugin
+      # configs in custom-configs/modsec-crs/).
+      USE_MODSECURITY: "yes"
+      USE_MODSECURITY_CRS: "yes"
+      # Start in DetectionOnly to identify false positives before blocking
+      # Change to "on" once you've reviewed modsec_audit.log and tuned exclusions
+      MODSECURITY_SEC_RULE_ENGINE: "DetectionOnly"
+      MODSECURITY_SEC_AUDIT_ENGINE: "RelevantOnly"
+      # NOTE: audit log format (JSON vs Native) is NOT exposed as a BW env
+      # var; the equivalent libmodsecurity directive `SecAuditLogFormat`
+      # is set via a custom config at
+      # bunkerweb/custom-configs/modsec/audit-log-format.conf instead.
+
+      # CrowdSec bouncer
+      USE_CROWDSEC: "yes"
+      CROWDSEC_API: "http://crowdsec:8080"
+      CROWDSEC_API_KEY: "${CROWDSEC_BOUNCER_KEY}"
+      CROWDSEC_MODE: "stream"
+      CROWDSEC_UPDATE_FREQUENCY: "15"
+    volumes:
+      - bw-data:/data
+      - /srv/bw-logs:/var/log/bunkerweb
+      - ./bunkerweb/security.txt:/etc/bunkerweb/security.txt:ro
+      - ./bunkerweb/robots.txt:/etc/bunkerweb/robots.txt:ro
+      # Custom configs mounted at /data/configs (BW's native ingest path), not
+      # /etc/bunkerweb/configs. The scheduler scans /data/configs/<type>/,
+      # writes into its DB, then renders to /etc/bunkerweb/configs (internal,
+      # writable). Bind-mounting directly over /etc/bunkerweb/configs:ro made
+      # the scheduler's rm-then-rewrite cycle fail with EROFS and return HTTP
+      # 500 on /custom_configs every boot, even though the configs worked.
+      #
+      # Mount is rw (not ro): BW's entrypoint does `mkdir -p /data/configs/<type>`
+      # for http/server-http/modsec/modsec-crs/stream on boot. Our git tree
+      # ships the first four; `stream/` is missing, so :ro makes the mkdir
+      # fail with EROFS and the scheduler FATALs in a restart loop. BW only
+      # creates sibling dirs; it never modifies our tracked config files.
+      - ./bunkerweb/custom-configs:/data/configs
+    # Soft dependency: proxy starts even if CrowdSec is unhealthy/down
+    depends_on:
+      crowdsec:
+        condition: service_started
+    restart: unless-stopped
+    networks: [security, backend]
+
+  crowdsec:
+    container_name: crowdsec
+    image: crowdsecurity/crowdsec:latest
+    security_opt:
+      - no-new-privileges
+    cap_drop:
+      - ALL
+    cap_add:
+      # Bypass file-permission checks: crowdsec reads log files owned by other uids (bunkerweb, vaultwarden).
+      - DAC_OVERRIDE
+      # Change process GID: crowdsec drops privilege to its own group after startup.
+      - SETGID
+      # Change process UID: same as above, drops from root to the crowdsec user.
+      - SETUID
+    # NOTE: no `read_only: true` here. CrowdSec's hub installer writes symlinks
+    # into /etc/crowdsec/{scenarios,parsers,postoverflows}/... when pulling
+    # collections, and chtimes the data dir on boot. The `crowdsec-config` and
+    # `crowdsec-db` named volumes already isolate writable state from the host.
+    tmpfs:
+      - /tmp
+      - /var/run
+    deploy:
+      resources:
+        limits:
+          memory: 192M
+          cpus: "0.5"
+    environment:
+      TZ: "${TZ}"
+      COLLECTIONS: "bunkerity/bunkerweb"
+      # Parser-only install for now. The matching scenario
+      # (crowdsecurity/modsecurity) is intentionally NOT included because
+      # it would self-ban us on legit /admin/config and /api/ciphers
+      # traffic while MODSECURITY_SEC_RULE_ENGINE is DetectionOnly.
+      #
+      # ╔══════════════════════════════════════════════════════════════════╗
+      # ║ TODO when MODSECURITY_SEC_RULE_ENGINE flips DetectionOnly→On:    ║
+      # ║   1. Delete the `PARSERS:` line below.                           ║
+      # ║   2. Change the COLLECTIONS line above to:                       ║
+      # ║      COLLECTIONS: "bunkerity/bunkerweb crowdsecurity/modsecurity"║
+      # ║   3. `podman-compose up -d` to recreate crowdsec.                ║
+      # ║                                                                  ║
+      # ║ This pulls in the parser AND the scenario. Scenario fires on     ║
+      # ║ any CRITICAL-severity (sev 2) modsec rule match; by then the     ║
+      # ║ BW-level exclusions in custom-configs/modsec-crs/ stop those     ║
+      # ║ rules firing on legit traffic, so only real probes get banned.   ║
+      # ╚══════════════════════════════════════════════════════════════════╝
+      # See acquis.d/bunkerweb.yaml for the full reasoning.
+      PARSERS: "crowdsecurity/modsecurity"
+      BOUNCER_KEY_PROXY: "${CROWDSEC_BOUNCER_KEY}"
+      ENROLL_KEY: "${CROWDSEC_ENROLL_KEY}"
+      ENROLL_INSTANCE_NAME: "vaultwarden-prod"
+    volumes:
+      - crowdsec-db:/var/lib/crowdsec/data
+      - crowdsec-config:/etc/crowdsec
+      # acquis.d: per-file mounts so the hub can still write sibling files
+      # (e.g. auto-installed acquisitions) into /etc/crowdsec/acquis.d/.
+      # Overlaying the whole dir :ro would block that.
+      - ./crowdsec/acquis.d/bunkerweb.yaml:/etc/crowdsec/acquis.d/bunkerweb.yaml:ro
+      - ./crowdsec/acquis.d/vaultwarden.yaml:/etc/crowdsec/acquis.d/vaultwarden.yaml:ro
+      - /srv/bw-logs:/var/log/bunkerweb:ro
+      - /srv/vw-logs:/var/log/vaultwarden:ro
+      # Custom parsers + scenarios + whitelists each mount into a
+      # `vaultwarden/` subdir of their respective stage so the hub keeps
+      # ownership of the parent dirs for its own symlinks.
+      - ./crowdsec/parsers:/etc/crowdsec/parsers/s01-parse/vaultwarden:ro
+      - ./crowdsec/scenarios:/etc/crowdsec/scenarios/vaultwarden:ro
+      - ./crowdsec/whitelists:/etc/crowdsec/parsers/s02-enrich/vaultwarden:ro
+    healthcheck:
+      test: ["CMD", "cscli", "lapi", "status"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+    networks: [security]
+
+  vaultwarden:
+    container_name: vaultwarden
+    image: vaultwarden/server:latest
+    security_opt:
+      - no-new-privileges
+    cap_drop:
+      - ALL
+    read_only: true
+    tmpfs:
+      - /tmp
+    deploy:
+      resources:
+        limits:
+          memory: 192M
+          cpus: "0.5"
+    environment:
+      TZ: "${TZ}"
+      DOMAIN: "${DOMAIN}"
+      ADMIN_TOKEN: "${ADMIN_TOKEN}"
+
+      # Rocket HTTP: bind all interfaces so BunkerWeb can reach it over the backend network
+      ROCKET_PORT: "8080"
+      ROCKET_ADDRESS: "0.0.0.0"
+
+      # Access policy
+      SIGNUPS_ALLOWED: "false"
+      INVITATIONS_ALLOWED: "false"
+      SENDS_ALLOWED: "false"
+      # Block "forgot my master password hint" flow. The hint itself leaks
+      # information about master-password patterns to anyone who knows the email.
+      PASSWORD_HINTS_ALLOWED: "false"
+      # First login from a new device fingerprint sends an *informational*
+      # email to the account address (not a code-entry verification, that
+      # would be _enable_email_2fa, opt-in per-user). With this set to true,
+      # the login *fails* if SMTP delivery fails. Useful as an alarm + hard
+      # gate against silent unknown-device logins, at the cost of being
+      # unable to log in from new devices during an SMTP outage. Existing
+      # devices keep working regardless.
+      REQUIRE_DEVICE_EMAIL: "true"
+      # Disable "emergency access" contacts feature. Not used here and the
+      # delayed-takeover flow is an attack path if a contact account is ever
+      # compromised or configured by mistake.
+      EMERGENCY_ACCESS_ALLOWED: "false"
+
+      # Real client IP: direct exposure, BunkerWeb sets X-Forwarded-For upstream
+      CLIENT_IP_HEADER: "X-Forwarded-For"
+
+      # Logging (consumed by CrowdSec via the vaultwarden-logs parser)
+      EXTENDED_LOGGING: "true"
+      LOG_FILE: "/logs/vaultwarden.log"
+      LOG_LEVEL: "error"
+      LOG_TIMESTAMP_FORMAT: "%Y-%m-%d %H:%M:%S.%3f%z"
+
+      # Vaultwarden-side rate limits, complement CrowdSec's longer-window scenarios.
+      # Three independent layers (most-specific first):
+      # - ADMIN_RATELIMIT_*  : /admin/* token bruteforce (10 reqs / 5 min, strict)
+      # - LOGIN_RATELIMIT_*  : master-password attempts (3 reqs / 60s, strict;
+      #                        VW default is 10/60s, tightened so an attacker
+      #                        burns through CrowdSec's bf scenario faster)
+      # - RATELIMIT_*        : general API (100 reqs / 60s, generous, prevents
+      #                        accidental DoS without throttling normal use)
+      ADMIN_RATELIMIT_MAX_BURST: "10"
+      ADMIN_RATELIMIT_SECONDS: "300"
+      LOGIN_RATELIMIT_MAX_BURST: "3"
+      LOGIN_RATELIMIT_SECONDS: "60"
+      RATELIMIT_MAX_BURST: "100"
+      RATELIMIT_SECONDS: "60"
+
+      # Icons: use Bitwarden's central icon service instead of fetching directly
+      # from each saved login's website. Keeps outbound allowlist to a single
+      # known host (icons.bitwarden.net). Clients fetch icons from Bitwarden's
+      # CDN directly. VW never proxies icon traffic.
+      ICON_SERVICE: "bitwarden"
+      # Belt-and-suspenders: kill VW's server-side icon fetcher entirely. Guards
+      # against (a) misbehaving clients hitting /icons/<host>/icon.png, (b) SSRF
+      # attempts where /icons/<attacker-host>/... would otherwise trigger
+      # arbitrary outbound HTTP, (c) accidental future flip back to ICON_SERVICE
+      # internal.
+      DISABLE_ICON_DOWNLOAD: "true"
+      # Disable the negative icon cache. Default 3-day NEGTTL means any failed
+      # icon fetch (transient network blip, DNS hiccup) gets remembered as
+      # "no icon for this domain" for 72h, hiding a perfectly valid icon long
+      # after the cause is fixed. Positive TTL stays at default (30d); favicons
+      # rarely change so 30-day staleness is fine.
+      ICON_CACHE_NEGTTL: "0"
+
+      # Mailjet SMTP
+      SMTP_HOST: "${SMTP_HOST}"
+      SMTP_PORT: "${SMTP_PORT}"
+      SMTP_SECURITY: "${SMTP_SECURITY}"
+      SMTP_USERNAME: "${SMTP_USERNAME}"
+      SMTP_PASSWORD: "${SMTP_PASSWORD}"
+      SMTP_FROM: "${SMTP_FROM}"
+      SMTP_FROM_NAME: "${SMTP_FROM_NAME}"
+      SMTP_TIMEOUT: "${SMTP_TIMEOUT}"
+    expose:
+      - "8080"
+    volumes:
+      - /srv/vw-data:/data
+      - /srv/vw-logs:/logs
+    healthcheck:
+      # Must use curl, NOT wget. The vaultwarden/server image does not
+      # ship wget, so a wget probe fails every interval with
+      # "/bin/sh: 1: wget: not found". Each failed probe also surfaces
+      # as a process exit-1 in the container logs, which lights up SIEM
+      # noise (Wazuh flagged 994 consecutive exit-1 events before this
+      # was caught).
+      test: ["CMD", "curl", "-sf", "http://localhost:8080/alive"]
+      interval: 30s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+    networks: [backend]
+
+volumes:
+  bw-data:
+    name: bw-data
+  crowdsec-db:
+    name: crowdsec-db
+  crowdsec-config:
+    name: crowdsec-config
+
+networks:
+  # Subnets are pinned so the aardvark-dns gateway IPs referenced in
+  # DNS_RESOLVERS above stay contractual across `podman-compose down`/`up`
+  # cycles. If you change a subnet here, update DNS_RESOLVERS to match and
+  # tear the networks down first; podman refuses to mutate IPAM on an
+  # existing network.
+  #
+  # Note: same network names + subnets as docker-compose.cf-tunnel.yml and
+  # docker-compose.public-dns01.yml so a switch between flavors reuses the
+  # existing networks cleanly. Only one of the three compose files should
+  # be running at a time.
+  security:  # proxy <-> crowdsec
+    name: security
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 10.89.1.0/24
+  backend:   # proxy <-> vaultwarden
+    name: backend
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 10.89.2.0/24
