@@ -28,9 +28,9 @@ Homelab/
 │   ├── REBUILD.md
 │   ├── DECRYPT.txt
 │   ├── ideas.md
-│   ├── docker-compose.cf-tunnel.yml          # production (Cloudflare Tunnel + ACME DNS-01)
-│   ├── docker-compose.public-http01.yml      # direct host ports 80+443 + ACME HTTP-01
-│   ├── docker-compose.public-dns01.yml       # direct host port 443 only (no port 80) + ACME DNS-01
+│   ├── docker-compose.public-dns01.yml       # WHAT I RUN: direct host ports 80+443 + ACME DNS-01, paired with the edge VPS in Vaultwarden/vps/ (TCP passthrough + PROXY protocol)
+│   ├── docker-compose.public-http01.yml      # reference only, not running it: direct host ports 80+443 + ACME HTTP-01
+│   ├── docker-compose.cf-tunnel.yml          # reference only, not running it: Cloudflare Tunnel + ACME DNS-01 (CF terminates TLS at edge, sees plaintext password-manager traffic, unacceptable for this threat model)
 │   ├── poduser_crontab.txt
 │   ├── root_crontab.txt
 │   ├── bunkerweb/                            # mounted into the BunkerWeb container
@@ -45,6 +45,10 @@ Homelab/
 │   ├── proxy-home/                           # targets the separate proxy-home VM (Squid HTTP/HTTPS egress only; DNS now via the LAN Pi-hole)
 │   │   ├── squid.conf
 │   │   └── vault_domains_allow_proxy.txt
+│   ├── vps/                                  # targets the public-facing edge VPS (Hetzner CX23 Falkenstein, TCP passthrough back home via WireGuard with PROXY protocol for real-IP preservation, no TLS termination on the VPS)
+│   │   ├── README.md                         # VPS provisioning + ops doc (Hetzner setup, PTR, DNS, UFW, WireGuard, nginx stream + PROXY, OPNsense WG)
+│   │   ├── nginx/                            # nginx stream config (raw TCP passthrough with PROXY protocol)
+│   │   └── wireguard/                        # WG tunnel config template
 │   ├── vault_domains_allow_dns.txt           # Pi-hole allowlist for the vaultwarden-vm group (gravity/ABP-syntax mirror of the Squid allowlist; consumed via Pi-hole's "Add allowlist" URL feature)
 │   ├── wazuh-home/                           # Targets the wazuh-home VM (Wazuh manager) + sidecar daemon for the LAN Pi-hole VM
 │   │   ├── README.md
@@ -104,9 +108,9 @@ Self-hosted password manager running on a **dedicated Debian 13 VM in Proxmox**,
 
 * **Edge & proxy**
 
-  * **Cloudflare Tunnel (`cloudflared`)** as the public-facing edge: no host ports exposed; all inbound traffic arrives via an outbound-initiated tunnel
-  * **BunkerWeb** handles ACME (Let's Encrypt DNS-01), TLS termination, security headers, country / user-agent blacklists, rate limiting, ModSecurity / CRS WAF, and the CrowdSec bouncer in one place
-  * Three mutually-exclusive compose flavors: `docker-compose.cf-tunnel.yml` (canonical / production, behind Cloudflare Tunnel + DNS-01), `docker-compose.public-http01.yml` (direct host ports 80+443 + HTTP-01), and `docker-compose.public-dns01.yml` (direct host port 443 only, no port 80 listener at all + DNS-01)
+  * **Hetzner Cloud VPS (CX23, Falkenstein)** as the public-facing edge today. Runs nginx as a raw TCP **stream proxy** with **PROXY protocol** for ports 80 / 443 and forwards every byte over an encrypted **WireGuard tunnel** back to OPNsense, which routes the inner connection to BunkerWeb on the DMZ VLAN. Crucially, **TLS terminates at home, not at the VPS**, the Let's Encrypt private key never leaves the home BunkerWeb container, so a VPS compromise yields encrypted streams only. PROXY protocol preserves the real client IP through the chain so CrowdSec / rate-limiting / country blacklist all work on real visitors. Full provisioning runbook in [`Vaultwarden/vps/README.md`](Vaultwarden/vps/README.md).
+  * **BunkerWeb** at home handles ACME (Let's Encrypt DNS-01 via Cloudflare API), TLS termination, security headers, country / user-agent blacklists, rate limiting, ModSecurity / CRS WAF, and the CrowdSec bouncer in one place
+  * Three mutually-exclusive compose flavors. **What I run**: `docker-compose.public-dns01.yml` (direct host ports 80+443 + DNS-01, paired with the edge VPS doing TCP passthrough with PROXY protocol). The other two, `docker-compose.cf-tunnel.yml` (Cloudflare Tunnel + DNS-01) and `docker-compose.public-http01.yml` (direct host ports 80+443 + HTTP-01), are kept in the repo as reference for anyone evaluating different deployment options for their own setup, but I'm not running them
 * **Intrusion prevention**
 
   * **Containerized CrowdSec** with custom Vaultwarden parsers, tightened bruteforce + user-enumeration scenarios, and an admin-diagnostics whitelist

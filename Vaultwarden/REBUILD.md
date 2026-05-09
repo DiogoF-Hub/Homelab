@@ -59,9 +59,17 @@ concrete. Adapt freely if your situation differs:
 - **Direct exposure instead of Cloudflare Tunnel** → use either
   `docker-compose.public-http01.yml` (HTTP-01 ACME, ports 80 + 443
   open) or `docker-compose.public-dns01.yml` (DNS-01 ACME via
-  Cloudflare API, port 443 only, no port 80 listener at all). Skip
-  Phase 11 (cloudflared) in both cases. The rest of the runbook is
-  identical.
+  Cloudflare API, ports 80 + 443 open with port 80 only serving
+  the http→https redirect, not ACME). Skip Phase 11 (cloudflared)
+  in both cases. The rest of the runbook is identical.
+- **CGNAT at home / no routable public IPv4** → can't expose ports
+  directly even with the `public-*` flavors. Provision an edge VPS
+  doing TCP passthrough back to the home BunkerWeb VM via a
+  WireGuard tunnel (with PROXY protocol so the real client IP is
+  preserved through the chain); full procedure in
+  [`vps/README.md`](vps/README.md). Use Phase 11 alternate (Edge
+  VPS + WireGuard) instead of Phase 11 (Cloudflare Tunnel). Pair
+  with `docker-compose.public-dns01.yml` for the home side.
 - **Different VLAN / IP / hostname conventions** → search-and-replace
   `192.168.173.9` (proxy-home / Squid), `192.168.173.2` (LAN Pi-hole),
   `192.168.50.3` (Vault VM, used in `wazuh-home/manager-rules.xml`),
@@ -942,20 +950,36 @@ Copy `.env.template` → `.env` and fill in **every** value. The file is
 grouped by purpose (infra / ACME / tunnel / CrowdSec / Vaultwarden /
 SMTP). Do not commit the filled `.env`.
 
-Pick your flavour:
+Pick your flavour. **What's actually running in this deployment**:
+`docker-compose.public-dns01.yml` paired with the edge VPS in
+[`vps/`](vps/) (Phase 11 alternate). The other two are kept in the
+repo as fully-working references; pick whichever fits your situation:
 
-- **Behind Cloudflare Tunnel** (no host ports, `cloudflared` fronts the
-  proxy) → `docker-compose.cf-tunnel.yml`. **Preferred.**
-- **Direct exposure with HTTP-01 ACME** (ports 80 + 443 on the VM,
-  port 80 required for Let's Encrypt validation) →
-  `docker-compose.public-http01.yml`.
-- **Direct exposure with DNS-01 ACME** (port 443 only on the VM; no
-  port 80 listener at all; ACME validation goes via your Cloudflare
-  DNS API token) → `docker-compose.public-dns01.yml`. Narrowest
-  attack surface of the three; the cost is users typing the bare
-  domain without `https://` get a connection refused.
-
-Most operations below assume `cf-tunnel.yml`.
+- **Direct exposure with DNS-01 ACME, paired with edge VPS** (this is
+  what's currently running; ports 80 + 443 on the VM; port 80 used
+  only for the http→https redirect convenience, NOT for ACME; cert
+  validation goes via your Cloudflare DNS API token; the VPS does
+  TCP passthrough with PROXY protocol so the home-side IP-based
+  defenses see real client IPs) → `docker-compose.public-dns01.yml`.
+  Most of this runbook below assumes this combo. To close port 80
+  entirely (narrowest attack surface, but bare-hostname browser
+  visits get connection refused), comment the `80:8080/tcp` line in
+  the compose and remove the matching upstream firewall rule.
+- **Reference: behind Cloudflare Tunnel** (no host ports,
+  `cloudflared` fronts the proxy) → `docker-compose.cf-tunnel.yml`.
+  Genuinely simpler operationally (no VPS, no WG, no inbound pass
+  rules); not used here because Cloudflare's edge TLS terminates the
+  HTTPS connection on Cloudflare's infrastructure, exposing
+  password-manager request bodies in plaintext to a third party. Fine
+  for non-sensitive services. Pair with Phase 11 (Cloudflare Tunnel)
+  if you pick this.
+- **Reference: direct exposure with HTTP-01 ACME** (ports 80 + 443
+  on the VM, port 80 required for Let's Encrypt validation) →
+  `docker-compose.public-http01.yml`. Workable when home has a
+  routable public IP and you'd rather not deal with Cloudflare API
+  tokens for DNS-01. Not used here because home is CGNAT'd; the
+  flavor would need the same VPS-passthrough wiring as `public-dns01`
+  to actually be reachable.
 
 Also place the poduser-side launcher script:
 
@@ -1013,13 +1037,57 @@ the tunnel registers itself, and `https://<subdomain>.<domain>` starts
 serving, no inbound ports opened on the VM, no DNS records to
 manually create.
 
+## Phase 11 alternate, Edge VPS + WireGuard (public-* flavours)
+
+Use this instead of Phase 11 when the home ISP applies CGNAT (no
+routable public IPv4 reaches your home connection) or you don't
+want Cloudflare in the TLS-termination path. The current
+production deployment is on `docker-compose.public-dns01.yml` with
+this topology.
+
+The full provisioning runbook lives in [`vps/README.md`](vps/README.md):
+Hetzner Cloud CX23 in Falkenstein, Debian 13, SSH hardening, UFW,
+WireGuard tunnel back to OPNsense, nginx as a raw TCP **stream
+proxy** with **PROXY protocol** for real-IP preservation (no TLS
+termination on the VPS), OPNsense WireGuard instance + peer +
+interface assignment + firewall pass rules into the DMZ VLAN, plus
+the Hetzner Cloud Console steps for setting the PTR records and
+the DNS records (A + AAAA, grey cloud, NOT proxied) at the
+registrar.
+
+Skip ahead to Phase 12 once the VPS is provisioned, the WG tunnel
+is healthy on both ends (`sudo wg show` shows recent handshakes),
+the OPNsense pass rules are in place, and DNS resolution from
+external returns the VPS's IPs (verify with
+`dig +short vault.example.com @1.1.1.1`).
+
+A small but load-bearing detail in that runbook: the Debian default
+nginx site (`/etc/nginx/sites-enabled/default`) MUST be removed.
+It ships with `listen 80 default_server;` and silently wins the
+port-80 race against the stream block, with the only symptom being
+nginx's default welcome page served on port 80 instead of the
+forwarded traffic. Easy to miss, hard to debug after the fact.
+
+The `vps/README.md` also documents the PROXY protocol setup that
+preserves real client IPs through the full chain (VPS nginx ->
+WG tunnel -> rootlessport SNAT -> BunkerWeb), so CrowdSec,
+rate-limiting, country blacklist, and access-log forensic value
+all operate on real visitor IPs rather than internal tunnel
+addresses. Trade-off accepted: HTTP/3 over UDP/443 isn't exposed
+since PROXY protocol is TCP-only; clients negotiate down to
+HTTP/2 over TCP automatically.
+
 ## Phase 12, First boot of the stack
+
+(Commands below use `docker-compose.public-dns01.yml`, the flavor
+actually running in this deployment. Substitute the filename of
+whichever flavor you picked in Phase 10.)
 
 ```bash
 # As poduser:
 cd ~/vault/bunkerweb
-podman-compose -f docker-compose.cf-tunnel.yml up -d
-podman-compose -f docker-compose.cf-tunnel.yml logs -f bunkerweb
+podman-compose -f docker-compose.public-dns01.yml up -d
+podman-compose -f docker-compose.public-dns01.yml logs -f bunkerweb
 ```
 
 What to watch for on first boot, in order:
@@ -1148,7 +1216,7 @@ This is where you verify the rebuild worked. Not theoretical, do it.
 5. Stop the stack on the VM:
    ```bash
    cd ~/vault/bunkerweb
-   podman-compose -f docker-compose.cf-tunnel.yml down
+   podman-compose -f docker-compose.public-dns01.yml down
    ```
 6. Rsync the restored `vw-data/` into place:
    ```bash
@@ -1159,7 +1227,7 @@ This is where you verify the rebuild worked. Not theoretical, do it.
 7. Bring the stack back up and log in with your real master password.
    Confirm an entry you recognize.
    ```bash
-   podman-compose -f docker-compose.cf-tunnel.yml up -d
+   podman-compose -f docker-compose.public-dns01.yml up -d
    ```
 
 If step 7 fails, your backup is broken. Fix it **before** you trust
@@ -1208,7 +1276,7 @@ Per README §ModSecurity / OWASP CRS:
      response-side rules (95x / 98x)
 3. Restart BunkerWeb after each exclusion:
    ```bash
-   podman-compose -f docker-compose.cf-tunnel.yml restart bunkerweb
+   podman-compose -f docker-compose.public-dns01.yml restart bunkerweb
    ```
 4. Once the audit log is consistently clean, flip
    `MODSECURITY_SEC_RULE_ENGINE` from `DetectionOnly` to `On`.
@@ -1225,6 +1293,16 @@ Tick all of these before declaring the rebuild done:
 
 - [ ] `podman ps` shows 3 (`public-http01` / `public-dns01`) or 4
       (`cf-tunnel`) containers, all healthy.
+- [ ] **If using the Edge VPS topology** (Phase 11 alternate): VPS
+      shows `wg show` recent handshake, `nginx -t` passes, port 443
+      claimed by the stream module (NOT the http default site,
+      which must be removed: `ls /etc/nginx/sites-enabled/` should
+      not contain `default`). OPNsense shows the WG peer connected
+      and the pass rules for `10.10.10.1 → 192.168.50.3:{80,443}`
+      are in place. DNS records (A + AAAA) at the registrar point
+      at the VPS's IPs with Cloudflare proxy DISABLED (grey cloud).
+      PTR records at Hetzner Cloud Console are set to your public
+      hostname for both IPv4 and IPv6.
 - [ ] `https://vault.example.com` loads with a valid Let's Encrypt cert
       (check the issuer, not just the padlock).
 - [ ] Login + vault unlock + view a real entry work end-to-end.

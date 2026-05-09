@@ -43,10 +43,11 @@ services:
       #          TCP if this is closed. Drop if you want a narrower surface.
       #
       # Rootless-podman caveat: the host-side bind to 80/443 requires the
-      # poduser to be allowed to open privileged ports. Lower the kernel
-      # threshold once on the VM:
-      #   sudo sysctl -w net.ipv4.ip_unprivileged_port_start=80
-      #   echo 'net.ipv4.ip_unprivileged_port_start=80' | sudo tee /etc/sysctl.d/99-rootless-podman.conf
+      # poduser to be allowed to open privileged ports. Lower the kernel's
+      # `net.ipv4.ip_unprivileged_port_start` to 80 once on the VM. Full
+      # commands (live + persist-across-reboots) in the README under
+      # § Infrastructure Setup → Host Tuning → "Unprivileged port
+      # binding for rootless Podman".
       # (CAP_NET_BIND_SERVICE on the container above only governs the
       # container's *internal* listener; it doesn't grant the host-side
       # bind that podman performs as poduser.)
@@ -62,6 +63,31 @@ services:
       REVERSE_PROXY_HOST: "http://vaultwarden:8080"
       # Vaultwarden uses websockets for live sync (/notifications/hub).
       REVERSE_PROXY_WS: "yes"
+
+      # PROXY protocol from an upstream sender. KEEP ONLY IF you're running
+      # this flavor behind an edge VPS that does TCP passthrough WITH
+      # `proxy_protocol on;` set on its nginx stream (see
+      # vps/nginx/streams.d/passthrough.conf for the canonical setup the
+      # `public-dns01` flavor uses; the same VPS topology can in principle
+      # front this `public-http01` flavor too, just with HTTP-01 ACME on
+      # the BunkerWeb side instead of DNS-01).
+      #
+      # REMOVE these env vars (or set USE_PROXY_PROTOCOL: "no") if you're
+      # running this flavor with TRUE direct exposure (home connection has
+      # a routable public IPv4, ports 80/443 forwarded straight to the VM,
+      # no upstream proxy). With no PROXY-protocol-sending upstream, the
+      # listener would expect a header that never arrives and reject every
+      # incoming connection as malformed HTTP.
+      #
+      # The four-env-var pattern matches docker-compose.public-dns01.yml;
+      # see that file's commentary for the per-var explanation. Same trust
+      # list for REAL_IP_FROM (rootlessport SNAT subnet 10.89.2.0/24 +
+      # the WG tunnel 10.10.10.0/30); adjust if your tunnel uses a
+      # different subnet.
+      USE_PROXY_PROTOCOL: "yes"
+      USE_REAL_IP: "yes"
+      REAL_IP_HEADER: "proxy_protocol"
+      REAL_IP_FROM: "10.89.2.0/24 10.10.10.0/30"
 
       # DNS resolvers: podman's aardvark-dns listens on each bridge's gateway.
       # BunkerWeb defaults to Docker's embedded resolver (127.0.0.11) which

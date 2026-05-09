@@ -1,0 +1,27 @@
+# Append this block to the BOTTOM of /etc/nginx/nginx.conf on the VPS,
+# OUTSIDE the existing http {} block (siblings, not nested).
+#
+# Why outside http {}: nginx's stream module is a separate top-level
+# context for raw TCP/UDP proxying. It doesn't share scope with http {}
+# and can't be nested inside it.
+#
+# Prerequisite: the libnginx-mod-stream package must be installed
+# (`sudo apt install libnginx-mod-stream`). On Debian, the package
+# auto-loads the module via /etc/nginx/modules-enabled/.
+#
+# Apply changes:
+#   sudo nginx -t && sudo systemctl reload nginx
+#
+# IMPORTANT: also remove /etc/nginx/sites-enabled/default. Debian's
+# default nginx package ships with a default http server block that
+# binds port 80 (`listen 80 default_server;`). If left enabled, the
+# http {} default_server wins the port-80 race and our stream block
+# silently does nothing. The only signal is your TLS-passthrough
+# clients getting nginx's default welcome page on port 80.
+#
+#   sudo rm /etc/nginx/sites-enabled/default
+#   sudo nginx -t && sudo systemctl reload nginx
+
+stream {
+    include /etc/nginx/streams.d/*.conf;
+}
