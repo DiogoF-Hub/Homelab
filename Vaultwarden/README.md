@@ -10,13 +10,13 @@ All container orchestration runs through `podman-compose` under `poduser`; no do
 
 The setup is designed for **secure self-hosted password management**, with:
 
-* **[Cloudflare Tunnel (`cloudflared`)](#-cloudflare-tunnel)** as the public-facing edge, no host ports exposed; all inbound traffic arrives via an outbound-initiated tunnel
+* **Edge VPS doing TCP passthrough back home via WireGuard** as the public-facing edge today (CGNAT at home, plus a hard "no third-party TLS termination for a password manager" stance). A small Hetzner Cloud VPS runs nginx as a raw TCP stream proxy with PROXY protocol, forwarding ports 80/443 through an encrypted WG tunnel to the home BunkerWeb VM. **TLS terminates at home, not on the VPS**, the Let's Encrypt private key never leaves the BunkerWeb container. Full provisioning runbook in [`vps/README.md`](vps/README.md). Two other compose flavors (`cf-tunnel.yml` for Cloudflare Tunnel, `public-http01.yml` for direct exposure with HTTP-01 ACME) are kept in the repo as reference for anyone evaluating different deployment options for their own setup, but I'm not running them.
 * **[BunkerWeb reverse proxy + WAF](#%EF%B8%8F-bunkerweb-reverse-proxy--waf)** for HTTPS, security headers, ACME via DNS-01, CRS-based WAF, country/UA blacklists, rate limits, and the CrowdSec bouncer
 * **[Containerized CrowdSec](#%EF%B8%8F-crowdsec-integration)** with custom Vaultwarden parsers, scenarios, and whitelists; bans enforced inline at BunkerWeb (no separate edge worker)
 * **Outbound HTTP/HTTPS via [Squid on the `proxy-home` VM](#-outbound-httphttps-proxy--squid-on-the-proxy-home-vm)** (domain allowlist–enforced) and **[outbound DNS via the homelab's LAN Pi-hole](#-outbound-dns-via-the-lan-pi-hole--wazuh-visibility)**, with every Vault VM query shipped into Wazuh as a level-3 alert via a custom decoder + rule chain (see `wazuh-home/`)
 * **[Daily automated maintenance](#-automation-scripts)** via `main.sh`: [age](https://github.com/FiloSottile/age)-encrypted backups [minisign](https://jedisct1.github.io/minisign/)-signed for tamper detection, image updates, full system update, and reboot
 * **[Automated off-site replication](#-automation-scripts)** to TrueNAS and Hetzner Storage Box
-* **Strict [Cloudflare](#cloudflare) security policies** for zero trust access
+* **Cloudflare DNS-side hardening** (CAA records, HSTS Preload, DNSSEC). Cloudflare is **DNS-only (grey cloud)** in this deployment, no proxying. The previous edge-side policies (Full SSL, Cloudflare Access on `/admin`, geo-blocking at edge, etc.) are kept in the [Cloudflare section](#cloudflare) for reference but aren't in use today. See that section for the full breakdown of what's currently active vs. reference-only
 * **Full network isolation** by running on a dedicated VLAN with [strict firewall rules in OPNsense](#-dmz-firewall-rules)
 * **Hosted on a dedicated Debian 13 VM in Proxmox** with dedicated NIC binding for VLAN isolation and full system backup capabilities
 * **[Self-contained backup encryption](#-backup-and-redundancy)** using pinned [age](https://github.com/FiloSottile/age) binaries with version-controlled, reproducible, public-key-only encryption, and pinned [minisign](https://jedisct1.github.io/minisign/) binaries for cryptographic signing of every bundle
@@ -35,9 +35,9 @@ vaultwarden/
 ├── README.md                                  # This documentation
 ├── ideas.md                                   # Numbered list of pending hardening / improvement ideas
 │
-├── docker-compose.cf-tunnel.yml               # Production: behind Cloudflare Tunnel, ACME via DNS-01
-├── docker-compose.public-http01.yml           # Direct host-port exposure (80+443), ACME via HTTP-01
-├── docker-compose.public-dns01.yml            # Direct host-port exposure (443 only, no port 80), ACME via DNS-01
+├── docker-compose.public-dns01.yml            # >>> WHAT I RUN TODAY <<< direct host-port exposure (80+443) + ACME via DNS-01, paired with the edge VPS in vps/ doing TCP passthrough + PROXY protocol
+├── docker-compose.public-http01.yml           # Reference only (I do not run this): direct host-port exposure (80+443) + ACME via HTTP-01. Kept in the repo so others evaluating their own setup can see a working HTTP-01 example
+├── docker-compose.cf-tunnel.yml               # Reference only (I do not run this): behind Cloudflare Tunnel + ACME via DNS-01. Kept for others; not used here because Cloudflare's edge TLS termination would see plaintext password-manager traffic, see the Three Compose Flavors table below for the full comparison
 │
 ├── poduser_crontab.txt                        # Crontab entries for poduser (container @reboot startup)
 ├── root_crontab.txt                           # Crontab entries for root automation (nightly main.sh)
@@ -72,6 +72,15 @@ vaultwarden/
 │   ├── squid.conf                             # Squid proxy configuration for domain allowlisting
 │   └── vault_domains_allow_proxy.txt          # List of domains allowed for the Squid proxy
 │
+├── vps/                                       # Targets the public-facing edge VPS (Hetzner CX23, Falkenstein/fsn1) doing TCP passthrough back to the home BunkerWeb VM via WireGuard, with PROXY protocol so the real client IP survives the chain
+│   ├── README.md                              # Full VPS provisioning + operations doc; architecture, hardening, OPNsense WG setup, PROXY-protocol setup
+│   ├── nginx/
+│   │   ├── nginx.conf.snippet                 # The stream {} block to append to the VPS's /etc/nginx/nginx.conf
+│   │   └── streams.d/
+│   │       └── passthrough.conf               # Per-port server blocks (80 + 443 TCP, raw passthrough to 192.168.50.3 with `proxy_protocol on;` for real-IP preservation; HTTP/3 over UDP/443 deliberately not exposed since PROXY protocol is TCP-only)
+│   └── wireguard/
+│       └── wg0.conf.template                  # WG tunnel config template (10.10.10.0/30, point-to-point with OPNsense)
+│
 ├── wazuh-home/                                # Targets the wazuh-home VM (Wazuh manager) + sidecar daemon for the LAN Pi-hole VM
 │   ├── README.md                              # Architecture, apply order, verification, migration notes
 │   ├── pihole-agent.localfile.xml             # <localfile> block for the Pi-hole VM's wazuh-agent (tails the sidecar's vault-dns/events.log)
@@ -105,6 +114,30 @@ vaultwarden/
 
 ## 🖥️ Infrastructure Setup
 
+The stack lives on two machines, in this request-flow order:
+
+1. **Edge VPS** (Hetzner Cloud, Falkenstein): the public-facing entry point doing TCP passthrough back home over WireGuard
+2. **Home BunkerWeb VM** (Proxmox, dedicated NIC bound to VLAN-DMZ): where TLS actually terminates and the Vaultwarden + BunkerWeb + CrowdSec containers run
+
+### **Edge VPS (Hetzner Cloud CX23, Falkenstein)**
+
+The public-facing edge today, sitting between the internet and the home connection (which is CGNAT'd, so home-side direct exposure isn't possible).
+
+#### **VPS Configuration**
+
+* **Provider**: [Hetzner Cloud](https://www.hetzner.com/cloud)
+* **Instance type**: **CX23** (current AMD generation; 2 vCPU, 4 GB RAM, 40 GB NVMe SSD, 20 TB traffic)
+* **Datacenter**: **Falkenstein, Germany (`fsn1`)**, chosen for low latency to the home network in central Europe
+* **OS**: Debian 13 Trixie
+* **Workload**: nginx as a raw TCP **stream proxy** with PROXY protocol; **no TLS termination** (the Let's Encrypt private key never leaves the home BunkerWeb container)
+* **Tunnel back home**: WireGuard, point-to-point `/30` to OPNsense (`10.10.10.0/30`)
+* **DNS**: `A` + `AAAA` records at the registrar (Cloudflare) point at the VPS's IPv4 + IPv6 with the Cloudflare proxy explicitly **OFF (grey cloud)**. Putting CF back in the proxy path would re-introduce TLS termination at a third party, the exact failure mode this whole topology exists to avoid for a password manager
+* **PTR records**: set in the Hetzner Cloud Console for both IPv4 and IPv6 to the public hostname (good hygiene; required for some downstream consumers like SMTP RDNS checks if SMTP egress ever moves through the VPS, currently it doesn't, but the alignment is cheap)
+
+CX23 is the smallest current Hetzner tier that comfortably handles the workload; the actual CPU/memory load on a TCP passthrough proxy serving 5-6 users is essentially zero; the spec's there for headroom and for the inclusive 20 TB traffic allowance, not because the workload demands it.
+
+Full provisioning runbook (SSH hardening, UFW, WireGuard generation, nginx stream config with PROXY protocol, OPNsense WG instance + peer + interface assignment + firewall pass rules into the DMZ VLAN, Cloudflare DNS + Hetzner PTR setup) lives in [`vps/README.md`](vps/README.md). The architecture decisions and security trade-offs (why TLS terminates at home, why Cloudflare is grey-cloud, why HTTP/3 was dropped to enable PROXY protocol uniformly) are also documented there.
+
 ### **Proxmox VM with Dedicated NIC Binding**
 
 The Vaultwarden service has been migrated from a Raspberry Pi to a **dedicated Debian 13 VM running on Proxmox**. This infrastructure change was implemented to enable **full system backups** while maintaining strict network isolation.
@@ -123,7 +156,35 @@ The Vaultwarden service has been migrated from a Raspberry Pi to a **dedicated D
 
 #### **Host Tuning**
 
-The QUIC UDP receive buffer must be increased on the VM for cloudflared tunnel performance. Without this, cloudflared logs a warning about insufficient buffer size and QUIC connections may drop packets under load. See [quic-go UDP Buffer Sizes](https://github.com/quic-go/quic-go/wiki/UDP-Buffer-Sizes) for details.
+##### Unprivileged port binding for rootless Podman (required for `public-*` flavors)
+
+The `public-dns01` and `public-http01` flavors publish ports 80/443 from the BunkerWeb container to the host. Rootless Podman runs as `poduser`, which by default cannot bind to ports below 1024; Linux's `net.ipv4.ip_unprivileged_port_start` defaults to `1024`. Lower the threshold so `poduser` can publish 80 and 443:
+
+```bash
+# Apply now (no reboot needed)
+sudo sysctl -w net.ipv4.ip_unprivileged_port_start=80
+
+# Persist across reboots
+echo 'net.ipv4.ip_unprivileged_port_start=80' | sudo tee /etc/sysctl.d/99-rootless-podman.conf
+```
+
+Verify:
+
+```bash
+cat /proc/sys/net/ipv4/ip_unprivileged_port_start
+# expected: 80
+```
+
+Notes:
+- This is a system-wide setting, not per-user. Any unprivileged process can bind 80 and above. On a single-purpose VM running just the Vaultwarden stack with one human user, this is acceptable.
+- The setting controls both IPv4 and IPv6 binding despite the IPv4 name.
+- The `CAP_NET_BIND_SERVICE` capability granted to the BunkerWeb container in compose only governs the *container's internal* listener; it doesn't grant the host-side port bind that Podman performs as `poduser`.
+- Not needed for the `cf-tunnel` flavor (no host ports are published; everything goes through the cloudflared outbound tunnel).
+- If you set the threshold to `443` instead of `80`, port 443 works but port 80 does not. Fine if you've dropped port 80 from the compose, otherwise use `80`.
+
+##### QUIC UDP receive buffer (only relevant for `cf-tunnel` flavor)
+
+Optional, **only relevant if running the `cf-tunnel` flavor**. The QUIC UDP receive buffer must be increased on the VM for cloudflared tunnel performance, otherwise cloudflared logs a warning about insufficient buffer size and QUIC connections may drop packets under load. See [quic-go UDP Buffer Sizes](https://github.com/quic-go/quic-go/wiki/UDP-Buffer-Sizes) for details. Not needed for the production `public-dns01` flavor: the VPS-side topology only uses TCP (HTTP/3 over UDP/443 is intentionally not exposed since PROXY protocol is TCP-only).
 
 ```bash
 sysctl -w net.core.rmem_max=7500000
@@ -151,8 +212,8 @@ SERVER_NAME=''                 # The hostname/SNI served (e.g. vault.example.com
 
 # --- ACME / Cloudflare ---
 EMAIL_LETS_ENCRYPT=''          # Used as the ACME contact email
-CLOUDFLARE_API_TOKEN=''        # Scoped Cloudflare token for DNS-01 challenges
-CLOUD_TOKEN=''                 # cloudflared tunnel token
+CLOUDFLARE_API_TOKEN=''        # Scoped Cloudflare token for DNS-01 challenges (used by public-dns01 and cf-tunnel; not needed for public-http01)
+CLOUD_TOKEN=''                 # cloudflared tunnel token (cf-tunnel reference flavor only; not used today)
 
 # --- CrowdSec ---
 CROWDSEC_BOUNCER_KEY=''        # API key shared between CrowdSec LAPI and BunkerWeb's bouncer plugin (generate with `openssl rand -base64 48`)
@@ -179,17 +240,23 @@ I personally use [Mailjet](https://www.mailjet.com) for SMTP.
 
 ### **Three Compose Flavors**
 
-Three `docker-compose.*.yml` files are provided. They are **mutually exclusive**, only one runs at a time, all three define the same service / volume / network names so a switchover is non-destructive:
+Three `docker-compose.*.yml` files are provided. They are **mutually exclusive**, only one runs at a time, all three define the same service / volume / network names so a switchover is non-destructive. **I'm only running `public-dns01.yml`** (paired with the edge VPS in `vps/`); the other two are kept in the repo as fully-working references so anyone reading this evaluating their own setup can see what each option looks like.
 
-| File | Public exposure | ACME challenge | Use when |
-|------|-----------------|----------------|----------|
-| **`docker-compose.cf-tunnel.yml`** | Cloudflare Tunnel (no host ports) | DNS-01 via Cloudflare API token | Production today. Outbound-only firewall, hidden origin IP, edge filtering at Cloudflare. **Caveat**: Cloudflare terminates TLS at its edge and sees plaintext request bodies (admin token POSTs, master-password hashes). |
-| **`docker-compose.public-http01.yml`** | Direct host ports 80/443 (TCP+UDP) | HTTP-01 | Direct exposure (no Cloudflare in front). Simplest direct setup; origin IP is public. Port 80 must stay open for ACME renewals. |
-| **`docker-compose.public-dns01.yml`** | Direct host port 443 only (TCP+UDP); **port 80 not exposed** | DNS-01 via Cloudflare API token | Direct exposure with the narrowest surface: no port 80 listener at all, no `/.well-known/` exposed, no http→https redirect. Users typing the bare domain without `https://` get a connection refused. Requires DNS on Cloudflare. |
+| File | What I do with it | Public exposure | ACME challenge | When you'd pick it |
+|------|-------------------|-----------------|----------------|--------------------|
+| **`docker-compose.public-dns01.yml`** | **Running this in production** | Direct host ports 80 + 443 (TCP) | DNS-01 via Cloudflare API token | Used here in combination with an edge VPS doing TCP passthrough + PROXY protocol (see [`vps/README.md`](vps/README.md)) since the home connection is CGNAT'd and Cloudflare-at-edge isn't acceptable for a password manager. Port 80 kept open for the http→https redirect convenience, NOT used for ACME (DNS-01 handles cert validation; no `/.well-known/acme-challenge/` exposed). Comment the `80:8080/tcp` line to close port 80 entirely if you don't want the redirect. UDP/443 (HTTP/3) deliberately not exposed because PROXY protocol is TCP-only. Requires DNS on Cloudflare for the API token. |
+| **`docker-compose.public-http01.yml`** | Reference only (not running it) | Direct host ports 80/443 (TCP+UDP) | HTTP-01 | Direct exposure when home has a routable public IP. Simplest direct setup; origin IP is public. Port 80 MUST stay open for ACME validation. The PROXY-protocol env vars are present in this file too because the same VPS topology could in principle front this flavor; **remove them if you're running with TRUE direct exposure** (no upstream proxy), or BunkerWeb will reject every connection waiting for a PROXY header that never arrives. |
+| **`docker-compose.cf-tunnel.yml`** | Reference only (not running it) | Cloudflare Tunnel (no host ports) | DNS-01 via Cloudflare API token | Outbound-only firewall, hidden origin IP, edge filtering at Cloudflare. **Reason I don't use this here**: Cloudflare terminates TLS at its edge and sees plaintext request bodies (admin token POSTs, master-password hashes), unacceptable for a password manager once you understand the threat model. Genuinely fine for non-sensitive services. Preserved as a working compose flavor; switching to it would be `podman-compose down` of the current flavor + `up -d` of this one (Podman networks + volumes carry state across cleanly). |
 
 All three run the same four services: `bunkerweb` (proxy/WAF), `crowdsec` (LAPI + parsers), `vaultwarden`, and, in the `cf-tunnel` flavor only, `cloudflared` (tunnel client).
 
 The two `public-*` flavors share most of their configuration; the only meaningful differences are the ACME settings and the optional port-80 binding. Both omit the `tunnel` network and the `cloudflared` service.
+
+#### Why we're on `public-dns01` today
+
+The home ISP applies CGNAT, no routable public IPv4 reaches this network directly, so neither `public-*` flavor would work as-is from home. The current production deployment fronts the home BunkerWeb VM with a small Hetzner Cloud VPS (CX23, Falkenstein) running nginx as a raw TCP **stream proxy** with **PROXY protocol**: it receives external traffic on ports 80/443, prepends a PROXY header containing the real client IP+port, and forwards every byte over an encrypted WireGuard tunnel back to OPNsense, which routes the inner connection to BunkerWeb on the DMZ VLAN. **TLS terminates at home, not at the VPS**, the Let's Encrypt private key never leaves the home BunkerWeb container, so a compromise of the VPS yields encrypted streams only, no key material. PROXY protocol preservation means BunkerWeb sees the real visitor IP for every connection, so CrowdSec / rate-limiting / country blacklist all operate correctly.
+
+Full setup (Hetzner provisioning, PTR records, DNS records, UFW + WireGuard + nginx stream config with `proxy_protocol on;`, OPNsense firewall rules, BunkerWeb's matching PROXY-receiver env vars) is documented in [`vps/README.md`](vps/README.md). The DNS records (`A` + `AAAA` for the public hostname) point at the VPS's IPs with Cloudflare proxying explicitly DISABLED (grey cloud); putting CF back in the proxy path would re-introduce the same TLS-termination problem the architecture exists to avoid.
 
 #### **Network segmentation (cf-tunnel flavor)**
 
@@ -283,7 +350,7 @@ Three custom configs in `bunkerweb/custom-configs/` carry the CRS tuning:
     * Response-side rule (rule ID 95x / 98x) → `exclusions-after-crs.conf`
 4. Restart the proxy:
     ```bash
-    podman-compose -f docker-compose.cf-tunnel.yml restart bunkerweb
+    podman-compose -f docker-compose.public-dns01.yml restart bunkerweb
     ```
 5. Repeat the action that triggered the false positive. Confirm the rule no longer fires.
 6. Once `modsec_audit.log` is consistently clean for ≥1 week of normal use, flip `MODSECURITY_SEC_RULE_ENGINE` from `DetectionOnly` to `On` in the compose file. Then bump `blocking_paranoia_level` from PL1 to PL2 in `paranoia.conf`.
@@ -391,18 +458,20 @@ This replaces the previous Cloudflare Workers bouncer (which enforced bans at Cl
 
 ---
 
-## 🌐 Cloudflare Tunnel
+## 🌐 Cloudflare Tunnel (reference only, not what I run)
 
-(Used in the **`cf-tunnel` flavor only**.)
+> **Status**: this section describes the `docker-compose.cf-tunnel.yml` flavor. **I'm not running this**, it's preserved in the repo as a fully-working reference for anyone evaluating their own setup. Production here runs `docker-compose.public-dns01.yml` paired with the edge VPS in `vps/`; see [`vps/README.md`](vps/README.md) for that stack.
+>
+> Why I don't use cf-tunnel here: Cloudflare's TLS termination at edge sees plaintext request bodies (admin token POSTs, master-password hashes, login flow data), which is unacceptable in a password-manager threat model. Documentation kept below so the alternative is fully understood and so the comparison in [`vps/README.md`](vps/README.md) "Why a VPS" has a working baseline to point at.
 
-The `cloudflared` container establishes an outbound-initiated tunnel to Cloudflare's edge, registered with the `CLOUD_TOKEN` from the dashboard. All inbound traffic for the public hostname (`SERVER_NAME`) arrives via this tunnel, there are **no host ports exposed** on the VM.
+When it WAS the active edge, `cloudflared` established an outbound-initiated tunnel to Cloudflare's edge, registered with the `CLOUD_TOKEN` from the dashboard. All inbound traffic for the public hostname (`SERVER_NAME`) arrived via this tunnel, with no host ports exposed on the VM.
 
 * **Hidden origin IP**, the VM's public IP is never advertised in DNS or seen by clients
 * **No inbound firewall rules required**, the tunnel is initiated outbound by `cloudflared`
 * **DDoS absorption at Cloudflare**, attacks hit the edge, not the home network
 * **Real client IP forwarded as `CF-Connecting-IP`**, BunkerWeb's `USE_REAL_IP` + `REAL_IP_HEADER` config trusts this and rewrites nginx's `$remote_addr` so logs and CrowdSec see actual visitor IPs
 
-Limits: cloudflared adds latency (~50–100ms tunnel hop) and an extra failure dependency (Cloudflare service health). For a personal vault accessed by ~5 users, both are acceptable.
+Limits when this was the active flavor: cloudflared added latency (~50–100ms tunnel hop) and an extra failure dependency (Cloudflare service health). For a personal vault accessed by ~5 users, both were acceptable.
 
 ---
 
@@ -475,14 +544,29 @@ The Vaultwarden service is isolated on its **own VLAN (VLAN-DMZ)** behind strict
 | 2 | Pass   | TCP/UDP   | VLAN-DMZ  | 192.168.173.2 (LAN Pi-hole VM)                                                              | 53       | Allow DNS via Pi-hole              | Yes |
 | 3 | Block  | Any       | VLAN-DMZ  | (Any other VLANs)                                                                           | Any      | Block DMZ to other VLANs           | Yes |
 | 4 | Pass   | UDP       | VLAN-DMZ  | This Firewall                                                                              | 123      | Allow NTP                          | Yes |
-| 5 | Pass   | UDP       | VLAN-DMZ  | [Cloudflare_IPs](https://www.cloudflare.com/ips/)                                          | 7844 | Allow QUIC from Cloudflare         | Yes |
+| 5 | Pass   | UDP       | VLAN-DMZ  | [Cloudflare_IPs](https://www.cloudflare.com/ips/)                                          | 7844 | Allow QUIC from Cloudflare (cf-tunnel reference flavor only; not used today) | Yes |
 | 6 | Pass   | TCP       | VLAN-DMZ  | Mailjet_SMTP (`in-v3.mailjet.com`)                                                          | 587      | Allow SMTP                         | Yes |
 
 Rules 1 and 2 are the two outbound chokepoints. Rule 1 points at the `proxy-home` VM (Squid for HTTP/HTTPS); rule 2 points at the homelab's LAN Pi-hole (DNS, with logging shipped into Wazuh, see [Outbound DNS via the LAN Pi-hole + Wazuh visibility](#-outbound-dns-via-the-lan-pi-hole--wazuh-visibility)). Both allows sit **above** the catch-all VLAN block (rule 3), so DMZ → chokepoint traffic is permitted before the catch-all denies everything else cross-VLAN.
 
+Rule 5 (UDP/7844 to Cloudflare IPs) is only meaningful when running the `cf-tunnel` reference flavor: that's how `cloudflared` reaches Cloudflare's edge to establish the outbound tunnel. The current `public-dns01` + edge VPS setup doesn't need this rule, but it's kept in the table since deleting it would only matter on a clean rebuild and removing it doesn't break anything actively running.
+
 📄 **References**:
 - `proxy-home/vault_domains_allow_proxy.txt` contains all domain allowlists configured in the Squid proxy
-- [Cloudflare IP Ranges](https://www.cloudflare.com/ips/) are used to allow QUIC traffic
+- [Cloudflare IP Ranges](https://www.cloudflare.com/ips/) are used to allow QUIC traffic when the `cf-tunnel` reference flavor is in use (rule 5 above)
+
+### **Inbound from the edge VPS via WireGuard**
+
+Public traffic enters the home network through a WireGuard tunnel from the edge VPS (see [`vps/README.md`](vps/README.md)). On the OPNsense **VPS_TUNNEL** interface, the rules below permit only the VPS's tunnel IP to reach the BunkerWeb VM, and only on the application ports we actually serve:
+
+| # | Action | Protocol | Source     | Destination    | Port | Description           | Log |
+|---|--------|----------|------------|----------------|------|-----------------------|-----|
+| 1 | Pass   | TCP      | 10.10.10.1 | 192.168.50.3   | 443  | VPS to Vault on 443   | Yes |
+| 2 | Pass   | TCP      | 10.10.10.1 | 192.168.50.3   | 80   | VPS to Vault on 80    | Yes |
+
+Both rules are TCP-only. HTTP/3 / QUIC over UDP/443 is intentionally NOT exposed in this stack because PROXY protocol (used to preserve real client IPs through the VPS → WG → BunkerWeb chain) is TCP-only; see [`vps/README.md` § "Real client IP preservation"](vps/README.md). Clients negotiate down to HTTP/2 over TCP automatically; the trade-off favours real-IP visibility everywhere over the marginal HTTP/3 latency benefit.
+
+Port 80 exists only for the BunkerWeb-side http→https 301 redirect, not for ACME validation (DNS-01 handles that). Drop rule 2 (and the matching nginx/UFW pieces on the VPS) if you want the narrowest surface; only valid on the `public-dns01` flavor since `public-http01` requires port 80 for ACME challenges.
 
 > **Note on Rule 5 (QUIC):** Cloudflare publishes their IP ranges as a single aggregated list covering all of their services, they do not provide separate ranges per product (e.g., Tunnels, CDN, Workers). Because of this, the firewall rule must allow the entire [Cloudflare IP list](https://www.cloudflare.com/ips/) on UDP port 7844 so the `cloudflared` tunnel can be established. While this is broader than ideal, the rule is scoped to a single port (QUIC 7844) and only permits outbound UDP from the DMZ, limiting the effective exposure.
 
@@ -661,7 +745,7 @@ So Pi-hole's strict allowlist for the Vault VM doesn't cover everything. It cove
 | Egress path | DNS gate | Connection gate |
 |---|---|---|
 | HTTP/HTTPS via `http_proxy` (apt, app SDKs, etc.) | proxy-home's resolver, NOT Pi-hole-filtered for Vault VM | **Squid** allowlist |
-| Direct UDP/QUIC (e.g. `cloudflared` to Cloudflare edge) | **Pi-hole** (Vault-VM group) | OPNsense rule 5 (UDP/7844 to Cloudflare IPs only) |
+| Direct UDP/QUIC (e.g. `cloudflared` to Cloudflare edge, `cf-tunnel` reference flavor only; not used today) | **Pi-hole** (Vault-VM group) | OPNsense rule 5 (UDP/7844 to Cloudflare IPs only) |
 | Direct TCP outside Squid (e.g. SMTP to Mailjet `:587`) | **Pi-hole** (Vault-VM group) | OPNsense (specific allows; default-deny otherwise) |
 | DNS itself (potential exfiltration channel) | **Pi-hole** (Vault-VM group) | n/a |
 | Reverse DNS (`*.in-addr.arpa`, `*.ip6.arpa`) | **Pi-hole** (Vault-VM group) | n/a |
@@ -699,7 +783,7 @@ How to wire it in Pi-hole's web UI:
 5. **Domain Management → Domains**: for each line in the **APEX section** at the bottom of `vault_domains_allow_dns.txt`, add an Allow Regex entry, scoped to `vaultwarden-vm` group only. There are 8 of them at time of writing (Let's Encrypt OCSP, Cloudflare R2, BunkerWeb apex, etc.), one-time setup.
 6. **Domain Management → Domains**: add **one** Deny Regex entry, value `.*`, scoped to `vaultwarden-vm` group only. This is the default-deny that catches everything not allowed by steps 4 + 5. Pi-hole evaluates Allow before Deny, so `.*` only applies to lookups that didn't match.
 
-Net effect: full resolution for allowlisted domains via Pi-hole's DoH upstream; every other domain returns `0.0.0.0` at DNS time. Each blocked attempt becomes a level-6 Wazuh alert (rule 100252, `status=blocked-regex`) so misconfigurations and unknown unknowns are immediately visible. Upstream-driven non-answers (Cloudflare Family filtering, domains with no A record, etc.) fire rule 100253 at level 4 instead — visible but distinct from "your allowlist policy hit."
+Net effect: full resolution for allowlisted domains via Pi-hole's DoH upstream; every other domain returns `0.0.0.0` at DNS time. Each blocked attempt becomes a level-6 Wazuh alert (rule 100252, `status=blocked-regex`) so misconfigurations and unknown unknowns are immediately visible. Upstream-driven non-answers (Cloudflare Family filtering, domains with no A record, etc.) fire rule 100253 at level 4 instead, visible but distinct from "your allowlist policy hit."
 
 #### Updating the allowlist later
 
@@ -911,7 +995,7 @@ Sourcing this system-wide means any user managing Podman containers can call `pc
 * **Resource limits** on every container (memory + CPU caps via `deploy.resources.limits`)
 * **Capability dropping**: every container starts with `cap_drop: ALL` and explicitly adds back only what it needs (typically `NET_BIND_SERVICE`, `CHOWN`, `DAC_OVERRIDE`, `SETGID`, `SETUID` for nginx; just `DAC_OVERRIDE` + `SETGID` + `SETUID` for CrowdSec)
 * **`security_opt: no-new-privileges`** on every container, child processes can never gain privileges via setuid binaries
-* **Read-only rootfs** on `cloudflared` and `vaultwarden` (BunkerWeb and CrowdSec need writable rootfs for their internal ops; named volumes still isolate writable state)
+* **Read-only rootfs** on `vaultwarden` (and on `cloudflared` when running the `cf-tunnel` reference flavor). BunkerWeb and CrowdSec need writable rootfs for their internal ops; named volumes still isolate writable state
 * **Backup signing** via [minisign](https://jedisct1.github.io/minisign/), every backup bundle is cryptographically signed; restore-time verification detects tampering at the storage layer
 
 ---
@@ -1035,22 +1119,31 @@ Password managers are high-value targets. These headers provide defense-in-depth
 
 ### **Cloudflare**
 
-* TLS **1.3 enforced** as the minimum version
-* **Automatic HTTP → HTTPS redirection**
-* **HSTS enabled** (max-age 12 months, include subdomains, preload)
-* **Certificate Transparency Monitoring** to receive alerts on new certificate issuance
-* **Full (strict) SSL/TLS** for end-to-end encryption with Let's Encrypt ([Cloudflare docs](https://developers.cloudflare.com/ssl/origin-configuration/ssl-modes/full-strict/))
-* **Opportunistic Encryption disabled** to avoid unintended HTTP requests
-* **Geo-blocking** for specific countries (but `robots.txt` remains globally accessible)
-* **RUM script disabled** to prevent Cloudflare analytics injection ([Cloudflare docs](https://developers.cloudflare.com/speed/speed-test/rum-beacon/))
-* **Zero-trust admin access**:
+> **Status today**: Cloudflare is used as **DNS only (grey cloud, NOT proxied)**. The A and AAAA records for the public hostname point directly at the edge VPS's IPs (see [`vps/README.md`](vps/README.md)); Cloudflare's edge does not see HTTPS traffic. The Cloudflare API token is also used by BunkerWeb for **DNS-01 ACME challenges** (LE cert issuance / renewal via the Cloudflare DNS API). Everything else CF-side is configured to be a no-op since the orange-cloud is off.
+>
+> Two sub-lists below: the first is what's actually active today; the second is reference-only configuration that was in use when the deployment ran the `cf-tunnel` flavor (Cloudflare as the active edge). Kept in the doc so anyone replicating that flavor has the full edge-side checklist.
 
-  * Accessing `/admin` triggers a Cloudflare Access login page
-  * Only my GitHub account is allowed, adding another layer of protection before the Vaultwarden password prompt
+#### Active today (DNS-side, works regardless of proxy mode)
+
 * **DNS CAA records enforced** to restrict certificate issuance to only trusted Certificate Authorities, preventing unauthorized SSL/TLS certificates for the domain
-* **HSTS Preload enabled**: Submitted the domain to [hstspreload.org](https://hstspreload.org/) to ensure browsers enforce HSTS by default, providing stronger protection against downgrade attacks
-* **DNSSEC enabled**: The domain uses DNSSEC (Domain Name System Security Extensions) to cryptographically sign DNS records, protecting against DNS spoofing and ensuring the authenticity of DNS responses
-* **Cloudflare Tunnel (`cloudflared`)** carries all inbound traffic to BunkerWeb, no host port is ever opened on the VM in the `cf-tunnel` flavor
+* **HSTS Preload enabled**: submitted the domain to [hstspreload.org](https://hstspreload.org/) so browsers enforce HSTS-by-default on first visit. The HSTS response header itself is now set by **BunkerWeb at home** (see `bunkerweb/custom-configs/server-http/headers-passthrough-apply.conf`); Cloudflare doesn't add it any more since it's grey-cloud
+* **DNSSEC enabled**: the domain uses DNSSEC (Domain Name System Security Extensions) to cryptographically sign DNS records, protecting against DNS spoofing and ensuring the authenticity of DNS responses
+* **Certificate Transparency Monitoring** at Cloudflare to receive alerts on new certificate issuance for the zone (works regardless of proxy mode)
+* **Cloudflare API token (DNS-01 ACME)**: scoped token with `Zone:Read` + `DNS:Edit` permissions on the zone, consumed by BunkerWeb for Let's Encrypt cert issuance/renewal via DNS-01
+
+#### Reference only (was active when running the `cf-tunnel` flavor; not in use today)
+
+These are CF dashboard settings that only have an effect when Cloudflare is the active edge (orange cloud / Cloudflare Tunnel). Documented here so the [`docker-compose.cf-tunnel.yml`](#-three-compose-flavors) reference flavor in the repo has a complete edge-side companion. Skip this whole sub-list unless you're running cf-tunnel:
+
+* TLS **1.3 enforced** as the minimum version (CF edge setting; today TLS 1.3 is enforced by BunkerWeb's `SSL_PROTOCOLS: TLSv1.3` at home instead)
+* **Automatic HTTP → HTTPS redirection** (CF edge; today the redirect is served by BunkerWeb at home, see the `public-dns01` flavor's port-80 mapping)
+* **HSTS at CF edge** (max-age 12 months, include subdomains, preload). Today HSTS is set by BunkerWeb instead (same effective header reaching the browser)
+* **Full (strict) SSL/TLS** for CF-to-origin connection ([Cloudflare docs](https://developers.cloudflare.com/ssl/origin-configuration/ssl-modes/full-strict/)). Irrelevant when CF is grey-cloud since CF doesn't make an origin connection
+* **Opportunistic Encryption disabled** to avoid unintended HTTP requests via the CF edge
+* **Geo-blocking** for specific countries at CF (but `robots.txt` remained globally accessible). Today the country blacklist is enforced by BunkerWeb at home (`BLACKLIST_COUNTRY` env var), which works on the real client IP via PROXY protocol
+* **RUM script disabled** to prevent Cloudflare analytics injection ([Cloudflare docs](https://developers.cloudflare.com/speed/speed-test/rum-beacon/)). N/A when CF isn't injecting anything (grey cloud)
+* **Zero-trust admin access via Cloudflare Access** on `/admin/*`: required GitHub-account auth before any request reached BunkerWeb. Only relevant when CF was the edge. Today, when running cf-tunnel was on the table, this gated the admin panel; on the current VPS topology there's no equivalent because the request never traverses CF
+* **Cloudflare Tunnel (`cloudflared`)** carrying all inbound traffic to BunkerWeb with no host ports opened on the VM. The defining feature of the cf-tunnel flavor
 
 ---
 
