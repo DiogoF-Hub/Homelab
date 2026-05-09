@@ -1,3 +1,32 @@
+# Flavor: direct host-port exposure + ACME DNS-01 via Cloudflare API.
+# Port 80 is NOT exposed. This is the whole point of this flavor.
+#
+# Use this when:
+#   - You have a public IP (not behind a Cloudflare Tunnel)
+#   - You want only port 443 open: no port 80 listener at all,
+#     no /.well-known/acme-challenge/ surface, no http://-typing
+#     redirect (users who omit "https://" get a connection refused;
+#     acceptable trade-off for the smaller attack surface)
+#   - Your DNS is already on Cloudflare and you have an API token
+#     with Zone:Read + DNS:Edit scoped to the relevant zone(s) so
+#     ACME can validate via DNS-01
+#
+# Compared to docker-compose.public-http01.yml:
+#   - ACME challenge swapped from HTTP-01 to DNS-01 (BunkerWeb hits the
+#     Cloudflare API to put a TXT record, instead of serving a file on
+#     port 80)
+#   - Port 80 is GONE entirely (in public-http01 it's required for
+#     HTTP-01 renewals). Narrower attack surface; the cost is users
+#     typing the bare domain without "https://" can't be redirected.
+#
+# Compared to docker-compose.cf-tunnel.yml:
+#   - No cloudflared / tunnel network: traffic comes in directly on
+#     the host's 443 (TCP+UDP)
+#   - Real client IP comes from BunkerWeb's X-Forwarded-For (no
+#     CF-Connecting-IP header to trust, since CF isn't in the path)
+#   - Country/UA blacklists, DNSBL, ModSecurity, CrowdSec become
+#     load-bearing (CF was filtering noise upstream; now your stack
+#     sees the raw firehose)
 services:
   bunkerweb:
     container_name: bunkerweb
@@ -34,15 +63,16 @@ services:
           memory: 384M
           cpus: "0.75"
     ports:
-      # 80/tcp:  HTTP. Required for ACME HTTP-01 renewals (Let's Encrypt's
-      #          validator only tries port 80 for this challenge). BunkerWeb
-      #          serves the challenge response here and 301-redirects
-      #          everything else to HTTPS.
+      # Port 80 is deliberately NOT mapped. ACME validation goes via DNS-01
+      # against the Cloudflare API, so no http:// listener is needed. Users
+      # typing the bare domain without "https://" will get a connection
+      # refused; that's the trade-off for a narrower attack surface.
+      #
       # 443/tcp: HTTPS (HTTP/1.1 + HTTP/2). The actual vault traffic.
       # 443/udp: HTTP/3 (QUIC). Optional; clients fall back to HTTP/2 on
-      #          TCP if this is closed. Drop if you want a narrower surface.
+      #          TCP if this is closed. Drop if you want an even narrower surface.
       #
-      # Rootless-podman caveat: the host-side bind to 80/443 requires the
+      # Rootless-podman caveat: the host-side bind to 443 requires the
       # poduser to be allowed to open privileged ports. Lower the kernel
       # threshold once on the VM:
       #   sudo sysctl -w net.ipv4.ip_unprivileged_port_start=80
@@ -50,7 +80,6 @@ services:
       # (CAP_NET_BIND_SERVICE on the container above only governs the
       # container's *internal* listener; it doesn't grant the host-side
       # bind that podman performs as poduser.)
-      - "80:8080/tcp"
       - "443:8443/tcp"
       - "443:8443/udp"
     environment:
@@ -70,10 +99,16 @@ services:
       # so these gateway IPs are contractual.
       DNS_RESOLVERS: "10.89.1.1 10.89.2.1"
 
-      # Let's Encrypt (HTTP-01 challenge)
+      # Let's Encrypt (DNS-01 challenge via Cloudflare API)
+      # Same setup as docker-compose.cf-tunnel.yml: even though there's no
+      # CF Tunnel in the request path here, your DNS is still hosted on
+      # Cloudflare, so the same API token works. Token needs Zone:Read +
+      # DNS:Edit on the zone(s) covering SERVER_NAME.
       AUTO_LETS_ENCRYPT: "yes"
       EMAIL_LETS_ENCRYPT: "${EMAIL_LETS_ENCRYPT}"
-      LETS_ENCRYPT_CHALLENGE: "http"
+      LETS_ENCRYPT_CHALLENGE: "dns"
+      LETS_ENCRYPT_DNS_PROVIDER: "cloudflare"
+      LETS_ENCRYPT_DNS_CREDENTIAL_ITEM: "api_token ${CLOUDFLARE_API_TOKEN}"
 
       # TLS hardening
       SSL_PROTOCOLS: "TLSv1.3"
@@ -378,9 +413,10 @@ networks:
   # tear the networks down first; podman refuses to mutate IPAM on an
   # existing network.
   #
-  # Note: same network names + subnets as docker-compose.dns-challenge.yml
-  # so a switch between flavors reuses the existing networks cleanly. Only
-  # one of the two compose files should be running at a time.
+  # Note: same network names + subnets as docker-compose.cf-tunnel.yml and
+  # docker-compose.public-http01.yml so a switch between flavors reuses the
+  # existing networks cleanly. Only one of the three compose files should
+  # be running at a time.
   security:  # proxy <-> crowdsec
     name: security
     driver: bridge

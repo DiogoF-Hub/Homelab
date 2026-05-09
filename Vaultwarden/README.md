@@ -35,8 +35,9 @@ vaultwarden/
 ├── README.md                                  # This documentation
 ├── ideas.md                                   # Numbered list of pending hardening / improvement ideas
 │
-├── docker-compose.dns-challenge.yml           # Production: behind Cloudflare Tunnel, ACME via DNS-01
-├── docker-compose.http-challenge.yml          # Alternate: direct host-port exposure, ACME via HTTP-01
+├── docker-compose.cf-tunnel.yml               # Production: behind Cloudflare Tunnel, ACME via DNS-01
+├── docker-compose.public-http01.yml           # Direct host-port exposure (80+443), ACME via HTTP-01
+├── docker-compose.public-dns01.yml            # Direct host-port exposure (443 only, no port 80), ACME via DNS-01
 │
 ├── poduser_crontab.txt                        # Crontab entries for poduser (container @reboot startup)
 ├── root_crontab.txt                           # Crontab entries for root automation (nightly main.sh)
@@ -176,20 +177,23 @@ I personally use [Mailjet](https://www.mailjet.com) for SMTP.
 
 ---
 
-### **Two Compose Flavors**
+### **Three Compose Flavors**
 
-Two `docker-compose.*.yml` files are provided. They are **mutually exclusive**, only one runs at a time, both define the same service / volume / network names so a switchover is non-destructive:
+Three `docker-compose.*.yml` files are provided. They are **mutually exclusive**, only one runs at a time, all three define the same service / volume / network names so a switchover is non-destructive:
 
 | File | Public exposure | ACME challenge | Use when |
 |------|-----------------|----------------|----------|
-| **`docker-compose.dns-challenge.yml`** | Cloudflare Tunnel (no host ports) | DNS-01 via Cloudflare API token | Production. Outbound-only firewall, hidden origin IP, edge filtering at Cloudflare. |
-| **`docker-compose.http-challenge.yml`** | Direct host ports 80/443 (TCP+UDP) | HTTP-01 | Direct exposure (no Cloudflare in front). Simpler setup; origin IP is public. |
+| **`docker-compose.cf-tunnel.yml`** | Cloudflare Tunnel (no host ports) | DNS-01 via Cloudflare API token | Production today. Outbound-only firewall, hidden origin IP, edge filtering at Cloudflare. **Caveat**: Cloudflare terminates TLS at its edge and sees plaintext request bodies (admin token POSTs, master-password hashes). |
+| **`docker-compose.public-http01.yml`** | Direct host ports 80/443 (TCP+UDP) | HTTP-01 | Direct exposure (no Cloudflare in front). Simplest direct setup; origin IP is public. Port 80 must stay open for ACME renewals. |
+| **`docker-compose.public-dns01.yml`** | Direct host port 443 only (TCP+UDP); **port 80 not exposed** | DNS-01 via Cloudflare API token | Direct exposure with the narrowest surface: no port 80 listener at all, no `/.well-known/` exposed, no http→https redirect. Users typing the bare domain without `https://` get a connection refused. Requires DNS on Cloudflare. |
 
-Both flavors run the same four services: `bunkerweb` (proxy/WAF), `crowdsec` (LAPI + parsers), `vaultwarden`, and, in the dns-challenge flavor only, `cloudflared` (tunnel client).
+All three run the same four services: `bunkerweb` (proxy/WAF), `crowdsec` (LAPI + parsers), `vaultwarden`, and, in the `cf-tunnel` flavor only, `cloudflared` (tunnel client).
 
-#### **Network segmentation (dns-challenge flavor)**
+The two `public-*` flavors share most of their configuration; the only meaningful differences are the ACME settings and the optional port-80 binding. Both omit the `tunnel` network and the `cloudflared` service.
 
-The dns-challenge flavor splits services across three Podman bridge networks with pinned subnets:
+#### **Network segmentation (cf-tunnel flavor)**
+
+The `cf-tunnel` flavor splits services across three Podman bridge networks with pinned subnets:
 
 | Network | Subnet | Members | Purpose |
 |---------|--------|---------|---------|
@@ -198,6 +202,8 @@ The dns-challenge flavor splits services across three Podman bridge networks wit
 | `backend` | `10.89.2.0/24` | `bunkerweb` ↔ `vaultwarden` | Reverse-proxy upstream |
 
 `cloudflared` cannot reach `vaultwarden` directly; `crowdsec` cannot reach `vaultwarden`; `vaultwarden` cannot reach `cloudflared` or `crowdsec`. Defense in depth, a compromise of any single container has limited blast radius.
+
+The two `public-*` flavors omit the `tunnel` network (no `cloudflared` to wire) but keep `security` and `backend` identical, so switching from `cf-tunnel` to either public flavor reuses the existing Podman networks cleanly.
 
 Subnets are pinned in the compose file so the aardvark-dns gateway IPs (`10.89.0.1`, `10.89.1.1`, `10.89.2.1`) referenced in `DNS_RESOLVERS` stay contractual across `down`/`up` cycles.
 
@@ -223,10 +229,10 @@ The image used in both compose flavors is the **`bunkerity/bunkerweb-all-in-one`
 
 | Feature | Configuration | What it does |
 |---------|---------------|--------------|
-| **ACME** | `AUTO_LETS_ENCRYPT: yes`, `LETS_ENCRYPT_CHALLENGE: dns` (or `http`), `LETS_ENCRYPT_DNS_PROVIDER: cloudflare` | Issues + renews Let's Encrypt certs. DNS-01 in the dns-challenge flavor; HTTP-01 in the http-challenge flavor. |
+| **ACME** | `AUTO_LETS_ENCRYPT: yes`, `LETS_ENCRYPT_CHALLENGE: dns` (or `http`), `LETS_ENCRYPT_DNS_PROVIDER: cloudflare` | Issues + renews Let's Encrypt certs. DNS-01 in `cf-tunnel` and `public-dns01`; HTTP-01 in `public-http01`. |
 | **Reverse proxy** | `USE_REVERSE_PROXY: yes`, `REVERSE_PROXY_HOST: http://vaultwarden:8080`, `REVERSE_PROXY_WS: yes` | Proxies all traffic to Vaultwarden. WS support is required for `/notifications/hub`. |
 | **TLS hardening** | `SSL_PROTOCOLS: TLSv1.3`, `SSL_CIPHERS_LEVEL: modern` | TLS 1.3 only; modern cipher suite. |
-| **Real client IP** | `USE_REAL_IP: yes`, `REAL_IP_HEADER: CF-Connecting-IP`, `REAL_IP_FROM: 172.16.0.0/12 10.0.0.0/8 192.168.0.0/16` | dns-challenge: trusts Cloudflare's `CF-Connecting-IP` from the `cloudflared` hop. |
+| **Real client IP** | `USE_REAL_IP: yes`, `REAL_IP_HEADER: CF-Connecting-IP`, `REAL_IP_FROM: 172.16.0.0/12 10.0.0.0/8 192.168.0.0/16` | `cf-tunnel` only: trusts Cloudflare's `CF-Connecting-IP` from the `cloudflared` hop. The two `public-*` flavors don't set this; BunkerWeb sees the real socket IP and forwards as `X-Forwarded-For`. |
 | **Country blacklist** | `BLACKLIST_COUNTRY: CN RU KP IR SY CU VE BY` | Geo-blocks at the proxy. |
 | **UA blacklist** | `BLACKLIST_USER_AGENT: python-requests python-urllib python-httpx httpx wget go-http-client libwww-perl masscan` (plus BW's own auto-fetched list) | Blocks scripted clients and known bad UAs. |
 | **DNSBL** | `USE_DNSBL: yes`, `DNSBL_LIST: bl.blocklist.de dnsbl.dronebl.org` | Checks source IPs against public abuse lists. |
@@ -277,7 +283,7 @@ Three custom configs in `bunkerweb/custom-configs/` carry the CRS tuning:
     * Response-side rule (rule ID 95x / 98x) → `exclusions-after-crs.conf`
 4. Restart the proxy:
     ```bash
-    podman-compose -f docker-compose.dns-challenge.yml restart bunkerweb
+    podman-compose -f docker-compose.cf-tunnel.yml restart bunkerweb
     ```
 5. Repeat the action that triggered the false positive. Confirm the rule no longer fires.
 6. Once `modsec_audit.log` is consistently clean for ≥1 week of normal use, flip `MODSECURITY_SEC_RULE_ENGINE` from `DetectionOnly` to `On` in the compose file. Then bump `blocking_paranoia_level` from PL1 to PL2 in `paranoia.conf`.
@@ -387,7 +393,7 @@ This replaces the previous Cloudflare Workers bouncer (which enforced bans at Cl
 
 ## 🌐 Cloudflare Tunnel
 
-(Used in the **dns-challenge flavor only**.)
+(Used in the **`cf-tunnel` flavor only**.)
 
 The `cloudflared` container establishes an outbound-initiated tunnel to Cloudflare's edge, registered with the `CLOUD_TOKEN` from the dashboard. All inbound traffic for the public hostname (`SERVER_NAME`) arrives via this tunnel, there are **no host ports exposed** on the VM.
 
@@ -1044,7 +1050,7 @@ Password managers are high-value targets. These headers provide defense-in-depth
 * **DNS CAA records enforced** to restrict certificate issuance to only trusted Certificate Authorities, preventing unauthorized SSL/TLS certificates for the domain
 * **HSTS Preload enabled**: Submitted the domain to [hstspreload.org](https://hstspreload.org/) to ensure browsers enforce HSTS by default, providing stronger protection against downgrade attacks
 * **DNSSEC enabled**: The domain uses DNSSEC (Domain Name System Security Extensions) to cryptographically sign DNS records, protecting against DNS spoofing and ensuring the authenticity of DNS responses
-* **Cloudflare Tunnel (`cloudflared`)** carries all inbound traffic to BunkerWeb, no host port is ever opened on the VM in the dns-challenge flavor
+* **Cloudflare Tunnel (`cloudflared`)** carries all inbound traffic to BunkerWeb, no host port is ever opened on the VM in the `cf-tunnel` flavor
 
 ---
 
@@ -1077,12 +1083,12 @@ Trade-off: with `ICON_SERVICE: bitwarden`, Bitwarden Inc. sees the domains your 
 
 #### **Real client IP**
 
-| Variable | Value (dns-challenge) | Value (http-challenge) |
-|----------|-----------------------|------------------------|
+| Variable | Value (`cf-tunnel`) | Value (`public-http01` / `public-dns01`) |
+|----------|---------------------|------------------------------------------|
 | `CLIENT_IP_HEADER` | `CF-Connecting-IP` | `X-Forwarded-For` |
 
-dns-challenge: BunkerWeb's `USE_REAL_IP` rewrites `$remote_addr` from `CF-Connecting-IP` (set by Cloudflare's edge, forwarded by `cloudflared`); Vaultwarden then reads it from the same header.
-http-challenge: BunkerWeb sees the real socket IP directly and forwards it as `X-Forwarded-For` upstream.
+`cf-tunnel`: BunkerWeb's `USE_REAL_IP` rewrites `$remote_addr` from `CF-Connecting-IP` (set by Cloudflare's edge, forwarded by `cloudflared`); Vaultwarden then reads it from the same header.
+`public-*` flavors: BunkerWeb sees the real socket IP directly and forwards it as `X-Forwarded-For` upstream.
 
 Either way, Vaultwarden logs the actual visitor IP, which is what the CrowdSec parser needs for ban decisions.
 

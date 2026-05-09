@@ -56,9 +56,12 @@ concrete. Adapt freely if your situation differs:
   skip it cleanly if you don't have a `wazuh-home` (or equivalent)
   manager to enrol against. Drop the matching checklist item in
   Phase 18 too.
-- **Direct exposure instead of Cloudflare Tunnel** → use
-  `docker-compose.http-challenge.yml` and skip Phase 11. The rest of
-  the runbook is identical.
+- **Direct exposure instead of Cloudflare Tunnel** → use either
+  `docker-compose.public-http01.yml` (HTTP-01 ACME, ports 80 + 443
+  open) or `docker-compose.public-dns01.yml` (DNS-01 ACME via
+  Cloudflare API, port 443 only, no port 80 listener at all). Skip
+  Phase 11 (cloudflared) in both cases. The rest of the runbook is
+  identical.
 - **Different VLAN / IP / hostname conventions** → search-and-replace
   `192.168.173.9` (proxy-home / Squid), `192.168.173.2` (LAN Pi-hole),
   `192.168.50.3` (Vault VM, used in `wazuh-home/manager-rules.xml`),
@@ -149,8 +152,9 @@ logic.
   to agree on the tag.
 - Domain with DNS hosted on Cloudflare.
 - A Cloudflare account with an **API token** scoped to `Zone:DNS:Edit`
-  for your domain (used for the DNS-01 ACME challenge or, in the
-  dns-challenge flavour, the Cloudflare Tunnel).
+  for your domain (used for the DNS-01 ACME challenge in the `cf-tunnel`
+  and `public-dns01` flavours, plus the Cloudflare Tunnel itself in
+  `cf-tunnel`). Not required for `public-http01`.
 - TrueNAS (or equivalent) for first-tier backup storage. Hetzner Storage
   Box (or equivalent) for second-tier off-site replication.
 - A **separate `proxy-home` VM** already running Squid (Phase 3
@@ -941,11 +945,17 @@ SMTP). Do not commit the filled `.env`.
 Pick your flavour:
 
 - **Behind Cloudflare Tunnel** (no host ports, `cloudflared` fronts the
-  proxy) → `docker-compose.dns-challenge.yml`. **Preferred.**
-- **Direct exposure** (ports 80/443 reachable on the VM) →
-  `docker-compose.http-challenge.yml`.
+  proxy) → `docker-compose.cf-tunnel.yml`. **Preferred.**
+- **Direct exposure with HTTP-01 ACME** (ports 80 + 443 on the VM,
+  port 80 required for Let's Encrypt validation) →
+  `docker-compose.public-http01.yml`.
+- **Direct exposure with DNS-01 ACME** (port 443 only on the VM; no
+  port 80 listener at all; ACME validation goes via your Cloudflare
+  DNS API token) → `docker-compose.public-dns01.yml`. Narrowest
+  attack surface of the three; the cost is users typing the bare
+  domain without `https://` get a connection refused.
 
-Most operations below assume `dns-challenge.yml`.
+Most operations below assume `cf-tunnel.yml`.
 
 Also place the poduser-side launcher script:
 
@@ -958,14 +968,14 @@ chmod 700 /home/poduser/vault/start-containers.sh
 (The script `cd`s into `/home/poduser/vault/` hardcoded, that's why the
 repo checkout has to be at exactly that path.)
 
-## Phase 11, Cloudflare Tunnel (dns-challenge flavour only)
+## Phase 11, Cloudflare Tunnel (cf-tunnel flavour only)
 
 The whole tunnel setup is **dashboard-driven**, you do not need to
 install `cloudflared` locally, run `cloudflared tunnel login`, or use
 any CLI flow. Cloudflare's "remote-managed" tunnels are configured
 entirely from the web UI; the only artifact that crosses over to the
 VM is a single token string that goes into `.env` as `CLOUD_TOKEN`.
-The `cloudflared` container in `docker-compose.dns-challenge.yml`
+The `cloudflared` container in `docker-compose.cf-tunnel.yml`
 consumes that token and creates the outbound tunnel automatically.
 
 Steps in your browser:
@@ -1008,8 +1018,8 @@ manually create.
 ```bash
 # As poduser:
 cd ~/vault/bunkerweb
-podman-compose -f docker-compose.dns-challenge.yml up -d
-podman-compose -f docker-compose.dns-challenge.yml logs -f bunkerweb
+podman-compose -f docker-compose.cf-tunnel.yml up -d
+podman-compose -f docker-compose.cf-tunnel.yml logs -f bunkerweb
 ```
 
 What to watch for on first boot, in order:
@@ -1030,7 +1040,7 @@ What to watch for on first boot, in order:
    inside the container) goes green within ~30s.
 
 `podman ps` should show `bunkerweb`, `crowdsec`, `vaultwarden`, and (for
-dns-challenge) `cloudflared` all healthy.
+`cf-tunnel` only) `cloudflared` all healthy.
 
 Test the vault loads over HTTPS from your workstation. ModSecurity is
 in `DetectionOnly` mode by default (see README §ModSecurity / OWASP CRS),
@@ -1138,7 +1148,7 @@ This is where you verify the rebuild worked. Not theoretical, do it.
 5. Stop the stack on the VM:
    ```bash
    cd ~/vault/bunkerweb
-   podman-compose -f docker-compose.dns-challenge.yml down
+   podman-compose -f docker-compose.cf-tunnel.yml down
    ```
 6. Rsync the restored `vw-data/` into place:
    ```bash
@@ -1149,7 +1159,7 @@ This is where you verify the rebuild worked. Not theoretical, do it.
 7. Bring the stack back up and log in with your real master password.
    Confirm an entry you recognize.
    ```bash
-   podman-compose -f docker-compose.dns-challenge.yml up -d
+   podman-compose -f docker-compose.cf-tunnel.yml up -d
    ```
 
 If step 7 fails, your backup is broken. Fix it **before** you trust
@@ -1198,7 +1208,7 @@ Per README §ModSecurity / OWASP CRS:
      response-side rules (95x / 98x)
 3. Restart BunkerWeb after each exclusion:
    ```bash
-   podman-compose -f docker-compose.dns-challenge.yml restart bunkerweb
+   podman-compose -f docker-compose.cf-tunnel.yml restart bunkerweb
    ```
 4. Once the audit log is consistently clean, flip
    `MODSECURITY_SEC_RULE_ENGINE` from `DetectionOnly` to `On`.
@@ -1213,8 +1223,8 @@ you discover false positives.
 
 Tick all of these before declaring the rebuild done:
 
-- [ ] `podman ps` shows 3 (http-challenge) or 4 (dns-challenge)
-      containers, all healthy.
+- [ ] `podman ps` shows 3 (`public-http01` / `public-dns01`) or 4
+      (`cf-tunnel`) containers, all healthy.
 - [ ] `https://vault.example.com` loads with a valid Let's Encrypt cert
       (check the issuer, not just the padlock).
 - [ ] Login + vault unlock + view a real entry work end-to-end.
