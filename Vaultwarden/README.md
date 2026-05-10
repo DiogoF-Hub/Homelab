@@ -258,6 +258,32 @@ The home ISP applies CGNAT, no routable public IPv4 reaches this network directl
 
 Full setup (Hetzner provisioning, PTR records, DNS records, UFW + WireGuard + nginx stream config with `proxy_protocol on;`, OPNsense firewall rules, BunkerWeb's matching PROXY-receiver env vars) is documented in [`vps/README.md`](vps/README.md). The DNS records (`A` + `AAAA` for the public hostname) point at the VPS's IPs with Cloudflare proxying explicitly DISABLED (grey cloud); putting CF back in the proxy path would re-introduce the same TLS-termination problem the architecture exists to avoid.
 
+The connection layering, in one diagram (helps if you want to picture what's actually happening per request):
+
+```
+              TCP conn #1                         TCP conn #2
+              (over the public internet)          (over the WG tunnel)
+
+  client  <─────────────────────>   VPS   <─────────────────────>   BunkerWeb (home)
+                                     |
+                                     |  acts as a TCP byte forwarder:
+                                     |  copies bytes between conn #1 and conn #2.
+                                     |  adds a PROXY protocol header at the very
+                                     |  start of conn #2 so BunkerWeb learns the
+                                     |  original client IP.
+
+  ─────────────────────────────────────────────────────────────────────────────
+                         ↑  ONE TLS session end-to-end  ↑
+             The TLS handshake (and all encrypted application data after it)
+             is negotiated directly between the client and BunkerWeb. The VPS
+             never holds the session keys, so it can't decrypt request /
+             response bodies, HTTP headers, etc. It just shovels opaque
+             encrypted bytes back and forth.
+  ─────────────────────────────────────────────────────────────────────────────
+```
+
+Per request: **2 TCP connections, 1 end-to-end TLS session**. The VPS is TCP-aware (knows the client's real IP, can add a PROXY header) but TLS-blind (no session keys, no plaintext visibility). That's the property that makes it safe to put VPS infrastructure in the path of a password-manager service: even a compromised VPS can't read the actual HTTP payloads.
+
 #### **Network segmentation (cf-tunnel flavor)**
 
 The `cf-tunnel` flavor splits services across three Podman bridge networks with pinned subnets:
