@@ -486,6 +486,39 @@ recent BunkerWeb access-log entries; it should show real public IPs
 rather than internal addresses. Same goes for `cscli alerts list`
 on CrowdSec.
 
+### How TCP, PROXY, and TLS layer together in the path
+
+A useful mental model for what's happening on each request:
+
+```
+              TCP conn #1                         TCP conn #2
+              (over the public internet)          (over the WG tunnel)
+
+  client  <─────────────────────>   VPS   <─────────────────────>   BunkerWeb (home)
+                                     |
+                                     |  acts as a TCP byte forwarder:
+                                     |  copies bytes between conn #1 and conn #2.
+                                     |  adds a PROXY protocol header at the very
+                                     |  start of conn #2 so BunkerWeb learns the
+                                     |  original client IP.
+
+  ─────────────────────────────────────────────────────────────────────────────
+                         ↑  ONE TLS session end-to-end  ↑
+             The TLS handshake (and all encrypted application data after it)
+             is negotiated directly between the client and BunkerWeb. The VPS
+             never holds the session keys, so it can't decrypt request /
+             response bodies, HTTP headers, etc. It just shovels opaque
+             encrypted bytes back and forth.
+  ─────────────────────────────────────────────────────────────────────────────
+```
+
+So per request: **2 TCP connections, 1 end-to-end TLS session**. The VPS is
+TCP-aware (knows the client's real IP, can add a PROXY header) but TLS-blind
+(no session keys, no plaintext visibility). The PROXY header itself is in
+plaintext on conn #2 because it sits BEFORE the TLS handshake starts, but
+conn #2 travels through the encrypted WG tunnel so the header is effectively
+encrypted on the public-internet portion of its path anyway.
+
 ---
 
 ## Operational notes

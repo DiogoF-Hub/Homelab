@@ -1111,3 +1111,151 @@ This stub is kept so cross-references to "idea #9" still resolve to a
 forwarding pointer rather than a dead link. Don't expand back into a
 parallel idea, edit it in place under #7.
 
+---
+
+## 10. Edge VPS as a CrowdSec bouncer (block at the edge, not just at home)
+
+### What
+
+Add a second CrowdSec bouncer on the edge VPS so banned IPs get
+dropped at the VPS layer (via nftables) before traffic ever crosses
+the WireGuard tunnel into the home network. Same home CrowdSec engine
+keeps making the decisions; just a second consumer of those
+decisions on the edge.
+
+Today the architecture is one engine + one bouncer:
+- Engine: home CrowdSec container (decides who to ban)
+- Bouncer: BunkerWeb's CrowdSec plugin (enforces 403s inline at nginx
+  on the home side)
+
+This idea adds:
+- Bouncer: `crowdsec-firewall-bouncer-nftables` on the VPS, polling
+  the same home CrowdSec API via the WG tunnel and programming
+  nftables drop rules for any IP in the current decision list.
+
+### Why
+
+- **Banned IPs never enter the WG tunnel.** Saves bandwidth on both
+  the Hetzner side and the home upstream when a noisy scanner is
+  hammering. With PROXY-protocol-preserved real IPs, CrowdSec is
+  already producing genuinely-actionable bans (real client IPs, not
+  internal tunnel addresses); they just only get enforced at home
+  today.
+- **Defense in depth.** Two enforcement layers; if BunkerWeb's plugin
+  ever has a bug, restarts mid-attack, or the home stack is briefly
+  recreated, the VPS layer is still up and dropping.
+- **Faster reaction at the network edge.** Once the bouncer's poll
+  cycle catches a new ban (default 10s), the source IP is dead at
+  the VPS for any further connection attempts; no per-request
+  processing on the home side.
+- **Cleaner volume separation in logs.** VPS-blocked IPs show up in
+  nftables counters; only "real" traffic that wasn't already on the
+  banlist reaches BunkerWeb. Makes home-side log analysis less
+  noisy.
+- **Scales to other services.** If the VPS ever fronts more services
+  beyond Vaultwarden via additional `streams.d/*.conf` blocks, all
+  of them benefit from the same VPS-level CrowdSec layer without
+  each needing their own bouncer plugin.
+
+### How
+
+Setup is short; ~15 minutes of work end-to-end.
+
+1. **Expose CrowdSec's LAPI** on the home BunkerWeb VM. In
+   `docker-compose.public-dns01.yml`, add an explicit port binding to
+   the `crowdsec` service, scoped to the DMZ-facing IP only:
+   ```yaml
+   crowdsec:
+     ...
+     ports:
+       - "192.168.50.3:8080:8080/tcp"
+   ```
+   The explicit interface bind (rather than implicit `0.0.0.0`) is
+   defense in depth: even if OPNsense rules drift, the API isn't
+   exposed on every interface of the VM.
+
+2. **Register a bouncer key** on home CrowdSec:
+   ```bash
+   podman exec crowdsec cscli bouncers add vps-fw-bouncer
+   # copy the printed API key
+   ```
+
+3. **OPNsense pass rule** on the `VPS_TUNNEL` interface, matching the
+   shape of the existing 80/443 rules:
+
+   | Action | Protocol | Source     | Destination    | Port | Description                     |
+   |--------|----------|------------|----------------|------|---------------------------------|
+   | Pass   | TCP      | 10.10.10.1 | 192.168.50.3   | 8080 | VPS bouncer to CrowdSec LAPI    |
+
+   This is the only allowed path to `192.168.50.3:8080` from outside
+   the Vault VM.
+
+4. **Install + configure the bouncer on the VPS**:
+   ```bash
+   sudo apt install crowdsec-firewall-bouncer-nftables -y
+   sudo nano /etc/crowdsec/bouncers/crowdsec-firewall-bouncer.yaml
+   ```
+   Set:
+   ```yaml
+   mode: nftables
+   update_frequency: 10s
+   api_url: http://192.168.50.3:8080/
+   api_key: <key_from_step_2>
+   log_level: info
+   ```
+   Then start it:
+   ```bash
+   sudo systemctl enable --now crowdsec-firewall-bouncer
+   ```
+
+5. **Verify**:
+   ```bash
+   # On the VPS: nftables should have a CrowdSec-managed set populated
+   sudo nft list ruleset | grep -A1 crowdsec | head -20
+
+   # On home: confirm the new bouncer registered
+   podman exec crowdsec cscli bouncers list
+   # vps-fw-bouncer should show "yes" for connected
+   ```
+
+6. **Update the docs**: brief note in `vps/README.md` adding the
+   bouncer to the architecture diagram + the OPNsense firewall table;
+   matching note in `Vaultwarden/README.md`'s firewall table for the
+   new VPS_TUNNEL rule.
+
+### Optional refinements
+
+- **Bind to the WG-side IP instead of the LAN IP** if you want even
+  tighter scoping. The CrowdSec LAPI would then only be reachable via
+  the WG tunnel itself, not via any LAN client. Trade-off: the home
+  BunkerWeb container also needs to reach the LAPI, which it does
+  internally over the Podman `security` network already, so this
+  works.
+- **nginx-side bouncer instead of nftables** (`crowdsec-nginx-bouncer`,
+  Lua-based). Gives HTTP-level block logs, but more expensive than
+  nftables drops and overkill for raw TCP passthrough where the VPS
+  isn't doing HTTP processing anyway. Stick with the firewall bouncer.
+- **CrowdSec multi-engine setup**: run a separate CrowdSec engine on
+  the VPS too, with both engines federating decisions via the central
+  API (CAPI). More autonomy on both sides, but more complex; the
+  single-engine + dual-bouncer model above is simpler and sufficient
+  here.
+
+### What this does NOT fix
+
+- **Failure mode when WG is down.** The VPS bouncer can't poll home
+  CrowdSec while the tunnel is broken. Default is fail-open (cached
+  decisions keep being enforced for a while, then expire). Brief
+  outages don't lose protection at all; long outages eventually
+  degrade to "no banned-IP enforcement at the VPS" until WG recovers.
+  Acceptable for this threat model.
+- **Doesn't replace the BunkerWeb plugin**, intentionally. Both
+  bouncers stay; the VPS one is the "stop scanners at the edge"
+  layer, the BunkerWeb one is the failsafe that also produces
+  per-request 403 logs for forensic value. Two layers is the point.
+- **First-strike attacks still get one request through.** Until
+  CrowdSec sees enough activity from a new attacker IP to ban it,
+  initial probes reach the home stack. This is true with or without
+  the VPS bouncer; the bouncer accelerates everything AFTER the ban
+  decision but doesn't pre-empt unknown attackers.
+
