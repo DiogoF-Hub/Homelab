@@ -12,7 +12,7 @@ The setup is designed for **secure self-hosted password management**, with:
 
 * **Edge VPS doing TCP passthrough back home via WireGuard** as the public-facing edge today (CGNAT at home, plus a hard "no third-party TLS termination for a password manager" stance). A small Hetzner Cloud VPS runs nginx as a raw TCP stream proxy with PROXY protocol, forwarding ports 80/443 through an encrypted WG tunnel to the home BunkerWeb VM. **TLS terminates at home, not on the VPS**, the Let's Encrypt private key never leaves the BunkerWeb container. Full provisioning runbook in [`vps/README.md`](vps/README.md). Two other compose flavors (`cf-tunnel.yml` for Cloudflare Tunnel, `public-http01.yml` for direct exposure with HTTP-01 ACME) are kept in the repo as reference for anyone evaluating different deployment options for their own setup, but I'm not running them.
 * **[BunkerWeb reverse proxy + WAF](#%EF%B8%8F-bunkerweb-reverse-proxy--waf)** for HTTPS, security headers, ACME via DNS-01, CRS-based WAF, country/UA blacklists, rate limits, and the CrowdSec bouncer
-* **[Containerized CrowdSec](#%EF%B8%8F-crowdsec-integration)** with custom Vaultwarden parsers, scenarios, and whitelists; bans enforced inline at BunkerWeb (no separate edge worker)
+* **[Containerized CrowdSec](#%EF%B8%8F-crowdsec-integration)** with custom Vaultwarden parsers, scenarios, and whitelists; bans enforced at **two layers**, inline at BunkerWeb (HTTP 403) and at the edge VPS via `crowdsec-firewall-bouncer-nftables` (TCP drop), both pulling from the same home LAPI
 * **Outbound HTTP/HTTPS via [Squid on the `proxy-home` VM](#-outbound-httphttps-proxy--squid-on-the-proxy-home-vm)** (domain allowlist–enforced) and **[outbound DNS via the homelab's LAN Pi-hole](#-outbound-dns-via-the-lan-pi-hole--wazuh-visibility)**, with every Vault VM query shipped into Wazuh as a level-3 alert via a custom decoder + rule chain (see `wazuh-home/`)
 * **[Daily automated maintenance](#-automation-scripts)** via `main.sh`: [age](https://github.com/FiloSottile/age)-encrypted backups [minisign](https://jedisct1.github.io/minisign/)-signed for tamper detection, image updates, full system update, and reboot
 * **[Automated off-site replication](#-automation-scripts)** to TrueNAS and Hetzner Storage Box
@@ -476,11 +476,17 @@ Legit user impact: 1–2 typos drains within minutes; never trips a ban.
 
 Drops Vaultwarden's intentional `/admin/diagnostics/*` and `/admin/does-not-exist` 4xx probes before the `crowdsecurity/http-admin-interface-probing` scenario sees them. Without this, opening the admin diagnostics page once self-locks you with a 4h ban.
 
-### **Bouncer**
+### **Bouncers**
 
-CrowdSec bans are enforced at the **BunkerWeb proxy** via its built-in CrowdSec plugin (`USE_CROWDSEC: yes`, `CROWDSEC_API: http://crowdsec:8080`, `CROWDSEC_MODE: stream`, `CROWDSEC_UPDATE_FREQUENCY: 15`). The plugin polls CrowdSec's LAPI every 15 seconds for the active decisions list and returns `403 Forbidden` to any matching IP at the nginx level, before the request reaches Vaultwarden.
+CrowdSec bans are enforced at **two layers**, both consuming the same decision stream from the single home CrowdSec engine:
 
-This replaces the previous Cloudflare Workers bouncer (which enforced bans at Cloudflare's edge). The trade-off: bans now happen one hop later (at the proxy, not at the edge), but the architecture works identically with or without Cloudflare in front, and there's no extra Worker to maintain or pay for.
+1. **In-stack at BunkerWeb** (always on): the built-in CrowdSec plugin (`USE_CROWDSEC: yes`, `CROWDSEC_API: http://crowdsec:8080`, `CROWDSEC_MODE: stream`, `CROWDSEC_UPDATE_FREQUENCY: 15`) polls LAPI every 15s and returns `403 Forbidden` at the nginx level for any matching IP, before the request reaches Vaultwarden. This is the inline / application-layer bouncer.
+
+2. **At the edge VPS** (when the `public-dns01` + VPS topology is in use): `crowdsec-firewall-bouncer-nftables` on the VPS polls the same LAPI over the WG tunnel every 10s (auto-registered as `VPS_FW_BOUNCER` via the `BOUNCER_KEY_VPS_FW_BOUNCER` env var on the home crowdsec service in [`docker-compose.public-dns01.yml`](docker-compose.public-dns01.yml), keyed off `CROWDSEC_VPS_BOUNCER_KEY` in `.env`). It programs nftables drop rules on the VPS, so banned IPs get dropped at the network edge before crossing the WG tunnel into home at all. Configured with `set-only: false` so the drop applies on every destination port, not just 80/443. Full install + config: [`vps/README.md` § "CrowdSec bouncer (block banned IPs at the VPS edge)"](vps/README.md).
+
+The VPS layer is purely additive defense-in-depth on top of BunkerWeb's plugin: same engine making the decisions, two enforcement layers consuming them. If the VPS bouncer is ever down or absent, BunkerWeb still 403s; if BunkerWeb glitches mid-request, the VPS edge has already dropped most known-bad IPs. Both layers also activate within ~10–15s of any new decision.
+
+This whole stack replaces the previous Cloudflare Workers bouncer (which enforced bans at Cloudflare's edge). The trade-off: bans now happen one hop later than the CF edge would, but the architecture works identically with or without Cloudflare in front, the engine + bouncers are operator-controlled, and there's no extra Worker to maintain or pay for.
 
 ---
 
@@ -583,16 +589,19 @@ Rule 5 (UDP/7844 to Cloudflare IPs) is only meaningful when running the `cf-tunn
 
 ### **Inbound from the edge VPS via WireGuard**
 
-Public traffic enters the home network through a WireGuard tunnel from the edge VPS (see [`vps/README.md`](vps/README.md)). On the OPNsense **VPS_TUNNEL** interface, the rules below permit only the VPS's tunnel IP to reach the BunkerWeb VM, and only on the application ports we actually serve:
+Public traffic enters the home network through a WireGuard tunnel from the edge VPS (see [`vps/README.md`](vps/README.md)). On the OPNsense **VPS_TUNNEL** interface, the rules below permit only the VPS's tunnel IP to reach the BunkerWeb VM, and only on the application ports we actually serve plus the CrowdSec LAPI:
 
-| # | Action | Protocol | Source     | Destination    | Port | Description           | Log |
-|---|--------|----------|------------|----------------|------|-----------------------|-----|
-| 1 | Pass   | TCP      | 10.10.10.1 | 192.168.50.3   | 443  | VPS to Vault on 443   | Yes |
-| 2 | Pass   | TCP      | 10.10.10.1 | 192.168.50.3   | 80   | VPS to Vault on 80    | Yes |
+| # | Action | Protocol | Source     | Destination    | Port | Description                  | Log |
+|---|--------|----------|------------|----------------|------|------------------------------|-----|
+| 1 | Pass   | TCP      | 10.10.10.1 | 192.168.50.3   | 443  | VPS to Vault on 443          | Yes |
+| 2 | Pass   | TCP      | 10.10.10.1 | 192.168.50.3   | 80   | VPS to Vault on 80           | Yes |
+| 3 | Pass   | TCP      | 10.10.10.1 | 192.168.50.3   | 8080 | VPS bouncer to CrowdSec LAPI | Yes |
 
-Both rules are TCP-only. HTTP/3 / QUIC over UDP/443 is intentionally NOT exposed in this stack because PROXY protocol (used to preserve real client IPs through the VPS → WG → BunkerWeb chain) is TCP-only; see [`vps/README.md` § "Real client IP preservation"](vps/README.md). Clients negotiate down to HTTP/2 over TCP automatically; the trade-off favours real-IP visibility everywhere over the marginal HTTP/3 latency benefit.
+All three rules are TCP-only. HTTP/3 / QUIC over UDP/443 is intentionally NOT exposed in this stack because PROXY protocol (used to preserve real client IPs through the VPS → WG → BunkerWeb chain) is TCP-only; see [`vps/README.md` § "Real client IP preservation"](vps/README.md). Clients negotiate down to HTTP/2 over TCP automatically; the trade-off favours real-IP visibility everywhere over the marginal HTTP/3 latency benefit.
 
 Port 80 exists only for the BunkerWeb-side http→https 301 redirect, not for ACME validation (DNS-01 handles that). Drop rule 2 (and the matching nginx/UFW pieces on the VPS) if you want the narrowest surface; only valid on the `public-dns01` flavor since `public-http01` requires port 80 for ACME challenges.
+
+Rule 3 carries CrowdSec ban-decision pulls from the VPS-side bouncer to the home LAPI. The VPS runs `crowdsec-firewall-bouncer-nftables`, which polls every 10s and programs nftables drop rules for any IP banned by the home engine (BunkerWeb bruteforce scenarios, community blocklists, CTI, manual `cscli decisions add`). Result: known-bad IPs get dropped at the VPS edge before crossing the WG tunnel, in addition to BunkerWeb's in-stack bouncer plugin still 403-ing inline at home (two enforcement layers, same engine making the decisions). See [`vps/README.md` § "CrowdSec bouncer (block banned IPs at the VPS edge)"](vps/README.md) for install and config. Omit rule 3 if you're not running the VPS-side bouncer.
 
 > **Note on Rule 5 (QUIC):** Cloudflare publishes their IP ranges as a single aggregated list covering all of their services, they do not provide separate ranges per product (e.g., Tunnels, CDN, Workers). Because of this, the firewall rule must allow the entire [Cloudflare IP list](https://www.cloudflare.com/ips/) on UDP port 7844 so the `cloudflared` tunnel can be established. While this is broader than ideal, the rule is scoped to a single port (QUIC 7844) and only permits outbound UDP from the DMZ, limiting the effective exposure.
 
@@ -1037,6 +1046,7 @@ Periodically auditing the VM with [Lynis](https://cisofy.com/lynis/) and trackin
 * `/etc/sudoers.d` permissions tightened to mode 750
 * Docker daemon removed entirely (was leftover from earlier debugging; on Debian 13's podman 5.x, `podman-compose config --services` produces clean output so docker is no longer needed for compose parsing)
 * SSH already hardened in `sshd_config`: `AllowUsers` restriction, tightened `MaxAuthTries`, `ClientAliveInterval` / `ClientAliveCountMax` for stale-session timeout, `LoginGraceTime`, `PermitRootLogin`, `X11Forwarding off`, etc. Lynis flags only one remaining tweak (`PrintLastLog yes`, SSH-7408), tracked under "next pass" below.
+* **fail2ban** for SSH bruteforce protection (`/etc/fail2ban/jail.local` enables the `sshd` jail with `maxretry=3 / findtime=10m / bantime=1h`, reading `/var/log/auth.log`). Belt-and-suspenders on top of the key-only auth + `AllowUsers` posture above. Requires `rsyslog` to populate `/var/log/auth.log` (Debian 13 is journald-only by default; `sudo apt install rsyslog -y` ships the package config that splits authpriv events into that file). The same fail2ban + rsyslog setup runs on the edge VPS; see [`vps/README.md` § "fail2ban for SSH"](vps/README.md). Separate from CrowdSec, which handles application-layer scenarios (Vaultwarden bruteforce, community blocklists, etc.) at BunkerWeb + the VPS firewall bouncer.
 * `libpam-tmpdir` for per-session `$TMPDIR` isolation (mitigates `/tmp` symlink and info-leak attacks)
 * `apt-listbugs` installed to warn on critical/grave bugs in packages before each apt install
 * `debsums` installed (the tool only; run on demand with `sudo debsums -c` to verify installed package files against their recorded checksums). The weekly automated run + matching ignore file are pending, see the next-pass list and the dedicated note below.
@@ -1303,7 +1313,7 @@ The age key pair must be generated on a **separate machine** (not the Vaultwarde
 
 5. Transfer `age-recipient.txt` to the Vaultwarden VM, into `${ROOT_VAULT_DIR}` (which is `/root/vault/`):
    ```
-   scp -P 2222 age-recipient.txt user@vm-host:/tmp/
+   scp -P <ssh_port> age-recipient.txt user@vm-host:/tmp/
    # then on the VM:
    sudo install -m 600 -o root -g root /tmp/age-recipient.txt /root/vault/age-recipient.txt
    ```

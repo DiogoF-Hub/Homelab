@@ -226,6 +226,17 @@ services:
         limits:
           memory: 192M
           cpus: "0.5"
+    ports:
+      # Expose CrowdSec's LAPI on the host so an external bouncer (e.g. the
+      # VPS-side crowdsec-firewall-bouncer-nftables, see ideas.md #10) can
+      # poll for decisions. Binds to 0.0.0.0:8080 by omitting the IP prefix;
+      # the upstream firewall is the load-bearing source-IP gate.
+      # If you're running this flavor with TRUE direct exposure (no upstream
+      # VPS bouncer), this port mapping is pointless and you can comment it
+      # out. BunkerWeb's bouncer plugin reaches CrowdSec via the internal
+      # Podman `security` network as `http://crowdsec:8080` regardless of
+      # this host mapping.
+      - "8080:8080/tcp"
     environment:
       TZ: "${TZ}"
       COLLECTIONS: "bunkerity/bunkerweb"
@@ -248,7 +259,16 @@ services:
       # ╚══════════════════════════════════════════════════════════════════╝
       # See acquis.d/bunkerweb.yaml for the full reasoning.
       PARSERS: "crowdsecurity/modsecurity"
+      # BOUNCER_KEY_<NAME> auto-registers a bouncer named <NAME> with the
+      # given API key on container start. Idempotent across container
+      # recreates and volume rebuilds. Cleaner than manually running
+      # `cscli bouncers add` and tracking the generated key.
       BOUNCER_KEY_PROXY: "${CROWDSEC_BOUNCER_KEY}"
+      # Pre-registers the VPS-side firewall bouncer (see ideas.md #10).
+      # Only meaningful if this flavor is fronted by the VPS topology;
+      # remove if running with TRUE direct exposure (no VPS bouncer
+      # to register a key for).
+      BOUNCER_KEY_VPS_FW_BOUNCER: "${CROWDSEC_VPS_BOUNCER_KEY}"
       ENROLL_KEY: "${CROWDSEC_ENROLL_KEY}"
       ENROLL_INSTANCE_NAME: "vaultwarden-prod"
     volumes:
