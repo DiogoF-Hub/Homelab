@@ -281,9 +281,44 @@ From a fresh SSH session as `vwadmin`:
 ```bash
 sudo apt update && sudo apt full-upgrade -y
 sudo apt install -y sudo curl ca-certificates unattended-upgrades \
-    apt-listchanges fail2ban
+    apt-listchanges fail2ban rsyslog
 sudo dpkg-reconfigure -plow unattended-upgrades
 ```
+
+`rsyslog` is listed alongside `fail2ban` deliberately: Debian 13
+ships with journald-only logging by default, and the fail2ban
+config below points at `/var/log/auth.log`. Without rsyslog, that
+file doesn't exist and the sshd jail fails to start. rsyslog's
+package config splits authpriv events into auth.log automatically.
+
+Configure fail2ban with an `sshd` jail at
+`/etc/fail2ban/jail.local`:
+
+```ini
+[sshd]
+enabled = true
+backend = auto
+port = ssh
+filter = sshd
+logpath = /var/log/auth.log
+maxretry = 3
+findtime = 10m
+bantime = 1h
+```
+
+Three failed SSH auth attempts within 10 minutes earn a 1-hour ban.
+`backend = auto` + explicit `logpath` forces file-poll mode against
+auth.log (which is why rsyslog matters; the alternative is
+`backend = systemd` reading journald directly, not the path
+deployed here). Enable + start:
+
+```bash
+sudo systemctl enable --now fail2ban
+sudo fail2ban-client status sshd
+```
+
+The status command should print the jail's current state (banned
+IPs + total bans) and confirms the sshd jail is loaded.
 
 The reference setup edits the **main** `/etc/ssh/sshd_config` file
 directly (the `Include /etc/ssh/sshd_config.d/*.conf` line at the top
@@ -294,10 +329,12 @@ either matches the OpenSSH default or is an intentional hardening
 choice):
 
 ```
-# Non-default SSH port. Matches truenas-script.sh's VM_PORT=2222 and
-# the -P 2222 in Phase 9's fetcher smoke test. If you change this,
-# change it in both places too.
-Port 2222
+# Non-default SSH port (any port that is NOT 22). The exact value is
+# noise reduction against drive-by scanners, not a security control;
+# whichever port you pick has to match truenas-script.sh's VM_PORT
+# and the `-p <port>` / `-P <port>` flags in Phase 9's fetcher smoke
+# test, the UFW allow rule, and any OPNsense pass rules upstream.
+Port <ssh_port>
 
 # Only these two accounts can SSH in. vwadmin = management; fetcher =
 # TrueNAS-side scp puller (Phase 9). poduser is intentionally absent,
@@ -386,7 +423,7 @@ sudo systemctl restart ssh
 ```
 
 Verify you can still log in from a **second terminal** (using
-`ssh -p 2222 vwadmin@<vm-ip>`) **before** closing the first one. If
+`ssh -p <ssh_port> vwadmin@<vm-ip>`) **before** closing the first one. If
 you can't, first terminal's still open, fix the config, restart sshd,
 try the second terminal again.
 
@@ -925,8 +962,8 @@ fine as long as the resulting access pattern matches:
 Smoke test from TrueNAS once the keypair is in place:
 
 ```bash
-ssh -i /root/.ssh/fetcher_automation_rsa -p 2222 fetcher@<vm-ip> exit   # expect: 0
-scp -i /root/.ssh/fetcher_automation_rsa -P 2222 \
+ssh -i /root/.ssh/fetcher_automation_rsa -p <ssh_port> fetcher@<vm-ip> exit   # expect: 0
+scp -i /root/.ssh/fetcher_automation_rsa -P <ssh_port> \
     fetcher@<vm-ip>:/srv/backups/                                          \
     /tmp/test-pull/                                                        # expect: lists files OK
 ```
@@ -1076,6 +1113,24 @@ all operate on real visitor IPs rather than internal tunnel
 addresses. Trade-off accepted: HTTP/3 over UDP/443 isn't exposed
 since PROXY protocol is TCP-only; clients negotiate down to
 HTTP/2 over TCP automatically.
+
+The VPS also runs `crowdsec-firewall-bouncer-nftables` as a
+**second** CrowdSec bouncer (alongside BunkerWeb's in-stack plugin
+at home), pulling the same ban-decision stream from the home LAPI
+over the WG tunnel and dropping banned IPs in nftables at the VPS
+edge before they cross into home. The bouncer is pre-registered
+on first home-side container boot via the
+`BOUNCER_KEY_VPS_FW_BOUNCER` env var (keyed off
+`CROWDSEC_VPS_BOUNCER_KEY` in `.env`), so the VPS side is just an
+apt install + a config-file edit (api_url, api_key). Full procedure
+in [`vps/README.md`](vps/README.md) § "CrowdSec bouncer (block
+banned IPs at the VPS edge)"; the template config lives at
+[`vps/crowdsec/crowdsec-firewall-bouncer.yaml`](vps/crowdsec/crowdsec-firewall-bouncer.yaml).
+The matching OPNsense pass rule on the `VPS_TUNNEL` interface
+(`10.10.10.1 -> 192.168.50.3:8080`) is in the firewall table in
+the [VPS README](vps/README.md) and in the main
+[Vaultwarden README](README.md) § "Inbound from the edge VPS via
+WireGuard".
 
 ## Phase 12, First boot of the stack
 
@@ -1298,11 +1353,21 @@ Tick all of these before declaring the rebuild done:
       claimed by the stream module (NOT the http default site,
       which must be removed: `ls /etc/nginx/sites-enabled/` should
       not contain `default`). OPNsense shows the WG peer connected
-      and the pass rules for `10.10.10.1 → 192.168.50.3:{80,443}`
-      are in place. DNS records (A + AAAA) at the registrar point
-      at the VPS's IPs with Cloudflare proxy DISABLED (grey cloud).
-      PTR records at Hetzner Cloud Console are set to your public
-      hostname for both IPv4 and IPv6.
+      and the pass rules for `10.10.10.1 → 192.168.50.3:{80,443,8080}`
+      are in place (8080 = VPS bouncer to home CrowdSec LAPI). DNS
+      records (A + AAAA) at the registrar point at the VPS's IPs
+      with Cloudflare proxy DISABLED (grey cloud). PTR records at
+      Hetzner Cloud Console are set to your public hostname for
+      both IPv4 and IPv6.
+- [ ] **If running the VPS-side CrowdSec bouncer**:
+      `sudo systemctl status crowdsec-firewall-bouncer --no-pager`
+      on the VPS shows `active (running)` with no LAPI connection
+      errors. `sudo nft list table ip crowdsec` shows the
+      `crowdsec-chain-input` + `crowdsec-chain-forward` chains
+      hooked at priority -10 (and the `crowdsec-blacklists` set if
+      LAPI has at least one ban). On the home VM:
+      `podman exec crowdsec cscli bouncers list` shows
+      `VPS_FW_BOUNCER` with a recent "Last API pull" timestamp.
 - [ ] `https://vault.example.com` loads with a valid Let's Encrypt cert
       (check the issuer, not just the padlock).
 - [ ] Login + vault unlock + view a real entry work end-to-end.

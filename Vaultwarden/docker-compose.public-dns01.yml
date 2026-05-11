@@ -281,6 +281,20 @@ services:
         limits:
           memory: 192M
           cpus: "0.5"
+    ports:
+      # Expose CrowdSec's LAPI on the host so an external bouncer (the VPS-side
+      # crowdsec-firewall-bouncer-nftables; see ideas.md #10) can poll for
+      # decisions. Binds to 0.0.0.0:8080 by omitting the IP prefix; the
+      # OPNsense firewall is the load-bearing source-IP gate, only the VPS WG
+      # IP (10.10.10.1) is permitted to reach 192.168.50.3:8080. If you ever
+      # want defense-in-depth at the interface level too, change to
+      # "192.168.50.3:8080:8080/tcp" so the listener only binds on the
+      # DMZ-facing interface.
+      # BunkerWeb's bouncer plugin reaches CrowdSec via the internal Podman
+      # `security` network as `http://crowdsec:8080`, completely independent
+      # of this host port mapping; commenting this line out wouldn't affect
+      # the home-side bouncer, only the VPS one.
+      - "8080:8080/tcp"
     environment:
       TZ: "${TZ}"
       COLLECTIONS: "bunkerity/bunkerweb"
@@ -303,7 +317,18 @@ services:
       # ╚══════════════════════════════════════════════════════════════════╝
       # See acquis.d/bunkerweb.yaml for the full reasoning.
       PARSERS: "crowdsecurity/modsecurity"
+      # BOUNCER_KEY_<NAME> auto-registers a bouncer named <NAME> with the
+      # given API key on container start. Idempotent (re-creating the
+      # container or rebuilding the crowdsec-db volume restores the same
+      # bouncer with the same key from .env). Cleaner than manually
+      # running `cscli bouncers add` and tracking the generated key.
       BOUNCER_KEY_PROXY: "${CROWDSEC_BOUNCER_KEY}"
+      # Pre-registers the VPS-side firewall bouncer (see ideas.md #10).
+      # Harmless to keep even if no VPS bouncer is actually deployed yet;
+      # CrowdSec just has an unused bouncer entry in its DB until the
+      # VPS-side install actually starts polling. Remove if you're
+      # certain you'll never set up the VPS bouncer.
+      BOUNCER_KEY_VPS_FW_BOUNCER: "${CROWDSEC_VPS_BOUNCER_KEY}"
       ENROLL_KEY: "${CROWDSEC_ENROLL_KEY}"
       ENROLL_INSTANCE_NAME: "vaultwarden-prod"
     volumes:

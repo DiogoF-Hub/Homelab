@@ -1,0 +1,109 @@
+# CrowdSec firewall bouncer config for the edge VPS.
+#
+# Deploy to: /etc/crowdsec/bouncers/crowdsec-firewall-bouncer.yaml on the VPS.
+# Installed by the .deb package (`crowdsec-firewall-bouncer-nftables`)
+# as a default; this file is that default with the three deltas needed
+# for the edge-VPS-as-bouncer topology. See ../README.md § "CrowdSec
+# bouncer (block banned IPs at the VPS edge)" for the full procedure.
+#
+# Deltas from the package default:
+# 1. api_url points at the home CrowdSec LAPI over the WG tunnel
+#    (192.168.50.3:8080), not 127.0.0.1. The home VM publishes the
+#    LAPI on host port 8080 via the crowdsec service's ports map in
+#    docker-compose.public-dns01.yml; OPNsense gates source-IP access
+#    to 10.10.10.1 (the VPS's WG end) only.
+# 2. api_key is the pre-registered VPS_FW_BOUNCER key. Auto-created
+#    on home container start via the BOUNCER_KEY_VPS_FW_BOUNCER env
+#    var on the crowdsec service, which reads CROWDSEC_VPS_BOUNCER_KEY
+#    from .env. Paste the same string here.
+# 3. set-only stays at the package default `false` for both ipv4 and
+#    ipv6, so the bouncer creates BOTH the IP set AND the drop chain.
+#    With nftables_hooks: [input, forward] further below, banned IPs
+#    are dropped on EVERY destination port at the VPS, not just
+#    80/443. Includes SSH and WireGuard. This is the stricter posture:
+#    an attacker whose IP earned a ban can't fall back to probing SSH
+#    from the same address. Trade-off accepted because the rescue
+#    path is always available:
+#
+#    Rescue path: if you ban your own client IP by accident, SSH into
+#    the home Vault VM (192.168.50.3) from any LAN client, then run
+#      podman exec crowdsec cscli decisions delete --ip <your_ip>
+#    on the home VM. Within ~10s the VPS bouncer pulls the deletion
+#    and the IP is unblocked. CrowdSec's default whitelists parser
+#    also auto-whitelists RFC1918 + WG private addresses, so the WG
+#    tunnel itself can never get banned.
+#
+# After editing api_url + api_key:
+#   sudo systemctl daemon-reload
+#   sudo systemctl restart crowdsec-firewall-bouncer
+#   sudo systemctl status crowdsec-firewall-bouncer --no-pager
+#
+# Verify on the home VM (vaultwarden):
+#   podman exec crowdsec cscli bouncers list
+# Expect a row for VPS_FW_BOUNCER with a recent "Last API pull"
+# timestamp; the IP shown is a Podman-bridge artifact, not the WG IP
+# (rootless Podman SNATs inbound connections), purely informational.
+
+mode: nftables
+update_frequency: 10s
+log_mode: file
+log_dir: /var/log/
+log_level: info
+log_compression: true
+log_max_size: 100
+log_max_backups: 3
+log_max_age: 30
+api_url: http://192.168.50.3:8080/
+api_key: "<paste_your_CROWDSEC_VPS_BOUNCER_KEY_here>"
+## TLS Authentication
+# cert_path: /etc/crowdsec/tls/cert.pem
+# key_path: /etc/crowdsec/tls/key.pem
+# ca_cert_path: /etc/crowdsec/tls/ca.crt
+insecure_skip_verify: false
+disable_ipv6: false
+deny_action: DROP
+deny_log: false
+supported_decisions_types:
+  - ban
+#to change log prefix
+#deny_log_prefix: "crowdsec: "
+#to change the blacklists name
+blacklists_ipv4: crowdsec-blacklists
+blacklists_ipv6: crowdsec6-blacklists
+#type of ipset to use
+ipset_type: nethash
+#if present, insert rule in those chains
+iptables_chains:
+  - INPUT
+#  - FORWARD
+#  - DOCKER-USER
+iptables_add_rule_comments: true
+
+## nftables
+nftables:
+  ipv4:
+    enabled: true
+    set-only: false
+    table: crowdsec
+    chain: crowdsec-chain
+    priority: -10
+  ipv6:
+    enabled: true
+    set-only: false
+    table: crowdsec6
+    chain: crowdsec6-chain
+    priority: -10
+
+nftables_hooks:
+  - input
+  - forward
+
+# packet filter
+pf:
+  # an empty string disables the anchor
+  anchor_name: ""
+
+prometheus:
+  enabled: false
+  listen_addr: 127.0.0.1
+  listen_port: 60601

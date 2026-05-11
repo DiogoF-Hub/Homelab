@@ -81,14 +81,16 @@ External client (browser / Bitwarden client / scanner)
   Public IPv4 + IPv6 (PTR set to vault.example.com)
   Debian 13 Trixie
   nginx stream { } - raw TCP passthrough with PROXY protocol, NO TLS termination
+  crowdsec-firewall-bouncer-nftables - pulls bans from home LAPI, drops at the edge
    |
    |  WireGuard tunnel (UDP 51820, encrypted, point-to-point /30)
    |  VPS: 10.10.10.1   <->   OPNsense: 10.10.10.2
    v
 [OPNsense]
   WireGuard endpoint
-  Pass rules: 10.10.10.1 -> 192.168.50.3 on tcp/80 + tcp/443 (TCP only;
-  UDP/443 deliberately not exposed since PROXY protocol is TCP-only)
+  Pass rules: 10.10.10.1 -> 192.168.50.3 on tcp/80 + tcp/443 (passthrough),
+  plus tcp/8080 (VPS bouncer to home CrowdSec LAPI). All TCP only;
+  UDP/443 deliberately not exposed since PROXY protocol is TCP-only.
   Routes traffic into the DMZ VLAN (vlan050, 192.168.50.0/24)
    |
    v
@@ -188,6 +190,68 @@ under `/etc/ssh/sshd_config.d/`).
 The exact port number doesn't matter much (it's not a security control,
 just noise reduction against drive-by scanners), but it does need to
 match the UFW allow rule below.
+
+### fail2ban for SSH
+
+Belt-and-suspenders on top of key-only auth: ban any IP that fails
+SSH auth too many times in a row, even though password auth is off
+and `MaxAuthTries` is tight. The CrowdSec firewall bouncer further
+below covers application-layer scanners (Vaultwarden bruteforce,
+community blocklists, etc.); fail2ban specifically catches noisy
+SSH scanners earlier and independently. On the VPS this is a
+"second opinion" layer; the home VM runs the same setup.
+
+**Prerequisite, rsyslog.** Debian 13 ships with journald-only
+logging by default; `/var/log/auth.log` doesn't exist out of the
+box. The jail config below points fail2ban at that file, so we
+need rsyslog to populate it:
+
+```bash
+sudo apt install rsyslog -y
+```
+
+Once installed, sshd auth events start landing in `/var/log/auth.log`
+(rsyslog's package default ships a rule that splits authpriv there).
+
+**Install + configure fail2ban:**
+
+```bash
+sudo apt install fail2ban -y
+sudo nano /etc/fail2ban/jail.local
+```
+
+Contents of `/etc/fail2ban/jail.local`:
+
+```ini
+[sshd]
+enabled = true
+backend = auto
+port = ssh
+filter = sshd
+logpath = /var/log/auth.log
+maxretry = 3
+findtime = 10m
+bantime = 1h
+```
+
+Three failed SSH auth attempts within 10 minutes earn a 1-hour ban.
+`backend = auto` paired with an explicit `logpath` forces fail2ban
+to file-poll `/var/log/auth.log` (which is why rsyslog matters; the
+alternative `backend = systemd` reads journald directly and skips
+the auth.log dependency, but the file-poll path is what's deployed
+here).
+
+Enable + start:
+
+```bash
+sudo systemctl enable --now fail2ban
+sudo systemctl status fail2ban --no-pager
+sudo fail2ban-client status sshd
+```
+
+The last command should print the jail's current state (currently
+banned IPs, total bans since fail2ban started, etc.) and confirms
+the sshd jail is loaded.
 
 ### UFW firewall
 
@@ -367,15 +431,22 @@ device is named) to a friendly name like `VPS_TUNNEL`.
 
 **Firewall -> Rules -> VPS_TUNNEL -> Add**, one rule per port we
 expose at the VPS. All have the same source (the VPS's WG IP) and
-destination (the BunkerWeb VM). Both rules are TCP-only because
+destination (the BunkerWeb VM). All three are TCP-only because
 HTTP/3 / QUIC over UDP/443 is intentionally not exposed (PROXY
 protocol is TCP-only and we need PROXY protocol for real-IP
 preservation; see "Real client IP preservation" section below):
 
-| # | Action | Protocol | Source     | Destination    | Port | Description           | Log |
-|---|--------|----------|------------|----------------|------|-----------------------|-----|
-| 1 | Pass   | TCP      | 10.10.10.1 | 192.168.50.3   | 443  | VPS to Vault on 443   | Yes |
-| 2 | Pass   | TCP      | 10.10.10.1 | 192.168.50.3   | 80   | VPS to Vault on 80    | Yes |
+| # | Action | Protocol | Source     | Destination    | Port | Description                  | Log |
+|---|--------|----------|------------|----------------|------|------------------------------|-----|
+| 1 | Pass   | TCP      | 10.10.10.1 | 192.168.50.3   | 443  | VPS to Vault on 443          | Yes |
+| 2 | Pass   | TCP      | 10.10.10.1 | 192.168.50.3   | 80   | VPS to Vault on 80           | Yes |
+| 3 | Pass   | TCP      | 10.10.10.1 | 192.168.50.3   | 8080 | VPS bouncer to CrowdSec LAPI | Yes |
+
+Rule #3 is for the VPS-side CrowdSec firewall bouncer to pull ban
+decisions from the home LAPI; see "CrowdSec bouncer (block banned
+IPs at the VPS edge)" section below. Omit it if you're not running
+that bouncer (the home BunkerWeb plugin still enforces bans inline
+at home, just not at the VPS edge).
 
 If you've dropped port 80 (only an option on `public-dns01`, see UFW
 section above), omit rule #2 along with the matching UFW + nginx
@@ -521,6 +592,143 @@ encrypted on the public-internet portion of its path anyway.
 
 ---
 
+## CrowdSec bouncer (block banned IPs at the VPS edge)
+
+The VPS also runs a CrowdSec firewall bouncer
+(`crowdsec-firewall-bouncer-nftables`) that pulls ban decisions from
+the home CrowdSec LAPI every 10s over the WG tunnel and programs
+nftables drop rules. Result: any IP that the home engine has banned
+(BunkerWeb bruteforce scenarios, community blocklists, CrowdSec CTI,
+manual `cscli decisions add`) gets dropped at the VPS network edge,
+before the SYN ever crosses the WG tunnel or reaches BunkerWeb.
+
+This is the second of two enforcement layers (the first is BunkerWeb's
+in-stack CrowdSec plugin still 403-ing inline at home). Same engine
+makes the decisions; both bouncers consume them. The VPS layer is
+purely additive: if it ever stops working, BunkerWeb at home still
+enforces; if BunkerWeb glitches mid-request, the VPS layer has
+already dropped most known-bad IPs upstream.
+
+### Why edge-drop on top of the in-stack bouncer
+
+- **Banned IPs never enter the WG tunnel.** Saves bandwidth on both
+  ends when a noisy scanner is hammering. With PROXY-protocol-preserved
+  real IPs from the previous section, CrowdSec is already producing
+  genuinely-actionable bans on real client IPs; they just only got
+  enforced at home until this layer existed.
+- **Defense in depth.** Two enforcement layers. If BunkerWeb's plugin
+  ever has a bug, restarts mid-attack, or the home stack is briefly
+  recreated, the VPS layer is still up and dropping.
+- **Faster reaction at the edge.** Once the bouncer's 10s poll catches
+  a new ban, the source IP is dead at the VPS for any further
+  connection attempts; no per-request processing on the home side.
+- **Scales to additional services.** If the VPS ever fronts more
+  services beyond Vaultwarden via additional `streams.d/*.conf`
+  blocks, all of them benefit from the same VPS-level CrowdSec layer
+  without each needing its own in-stack bouncer.
+
+### Install
+
+The bouncer package isn't in default Debian repos. Add CrowdSec's
+apt repo first:
+
+```bash
+curl -s https://install.crowdsec.net | sudo sh
+sudo apt update
+sudo apt install crowdsec-firewall-bouncer-nftables -y
+```
+
+That installs the bouncer (NOT the CrowdSec engine, which stays at
+home; the VPS is a bouncer-only deployment). The package creates a
+systemd unit `crowdsec-firewall-bouncer.service` enabled by default,
+and a default config at
+`/etc/crowdsec/bouncers/crowdsec-firewall-bouncer.yaml` that points
+at a non-existent local LAPI; that has to be edited to point at home.
+
+### Configure
+
+Replace the package's default config with the template in
+[`crowdsec/crowdsec-firewall-bouncer.yaml`](crowdsec/crowdsec-firewall-bouncer.yaml),
+or apply the three deltas inline:
+
+1. `api_url: http://192.168.50.3:8080/` (was `http://127.0.0.1:8080/`)
+2. `api_key:` paste the value of `CROWDSEC_VPS_BOUNCER_KEY` from the
+   home VM's `.env`. The home CrowdSec container auto-registers a
+   bouncer named `VPS_FW_BOUNCER` with this key on first start, via
+   the `BOUNCER_KEY_VPS_FW_BOUNCER` env var on the crowdsec service
+   in [`../docker-compose.public-dns01.yml`](../docker-compose.public-dns01.yml).
+   No manual `cscli bouncers add` step needed.
+3. Leave `set-only: false` (the package default) in both the ipv4 and
+   ipv6 `nftables` blocks. With `nftables_hooks: [input, forward]`
+   further down, banned IPs are then dropped on EVERY destination
+   port at the VPS, not just 80/443. Includes SSH and WireGuard.
+   This is the stricter posture (an attacker whose IP earned a ban
+   can't fall back to probing SSH from the same address); see the
+   "If you ban your own IP" subsection under Operational notes for
+   the rescue path.
+
+Reload and start:
+
+```bash
+sudo systemctl daemon-reload
+sudo systemctl restart crowdsec-firewall-bouncer
+sudo systemctl status crowdsec-firewall-bouncer --no-pager
+```
+
+Want `active (running)` and no errors about connecting to the LAPI.
+
+### Verify
+
+On the VPS, the bouncer creates two nftables tables on startup:
+
+```bash
+sudo nft list table ip crowdsec
+sudo nft list table ip6 crowdsec6
+```
+
+Both should exist with at minimum an `input` and a `forward` chain
+hooked at priority `-10` with a packet counter. If the LAPI has
+non-zero ban decisions, you'll also see a `crowdsec-blacklists` set
+populated with IPs and a `ip saddr @crowdsec-blacklists drop` rule in
+each chain. If there are zero bans, the set isn't created yet,
+that's normal; the bouncer materializes it on first decision.
+
+On the home VM (vaultwarden):
+
+```bash
+podman exec crowdsec cscli bouncers list
+```
+
+Expect a row for `VPS_FW_BOUNCER` with a recent "Last API pull"
+timestamp. The IP column shows a Podman-bridge address (10.89.x.x),
+not the WG tunnel IP, because rootless Podman SNATs inbound
+connections to its bridge gateway. The API key auth still works
+fine; the IP shown is purely informational.
+
+### End-to-end test
+
+From the home VM, push a fake ban:
+
+```bash
+podman exec crowdsec cscli decisions add --ip 1.2.3.4 --duration 10m --type ban
+```
+
+Wait ~10s, then on the VPS:
+
+```bash
+sudo nft list table ip crowdsec | grep 1.2.3.4
+```
+
+The IP should appear in the `crowdsec-blacklists` set. Clean up:
+
+```bash
+podman exec crowdsec cscli decisions delete --ip 1.2.3.4
+```
+
+Within 10s the VPS bouncer pulls the deletion and the set empties.
+
+---
+
 ## Operational notes
 
 ### When the VPS reboots
@@ -547,6 +755,46 @@ RST after a brief connect timeout (nginx has nothing to forward to;
 the upstream is unreachable). This is expected and correct
 behavior; they retry, they get connected once home is back.
 
+The CrowdSec firewall bouncer on the VPS side can't poll the home
+LAPI during the outage. Default behavior is fail-open on stale
+cache: previously-pulled decisions keep being enforced until they
+expire, after which the VPS edge stops dropping banned IPs until
+home is back. Acceptable trade-off, the BunkerWeb in-stack bouncer
+is dead too during a home outage by definition, so "no enforcement"
+during a home outage is consistent across both layers.
+
+### If you ban your own IP
+
+The VPS bouncer drops banned IPs on ALL destination ports (`set-only:
+false` + `nftables_hooks: [input, forward]`), so a self-inflicted ban
+locks you out of SSH at the VPS public IP too, not just HTTPS to
+Vaultwarden. The rescue path works regardless:
+
+1. SSH into the home Vault VM (`192.168.50.3`) from any LAN client.
+   The home VM is on a private LAN; it doesn't go through the VPS,
+   so the VPS bouncer can't see or affect that connection.
+2. Delete the decision on the home LAPI:
+   ```bash
+   podman exec crowdsec cscli decisions delete --ip <your_banned_ip>
+   ```
+3. Within ~10s the VPS bouncer pulls the deletion and your IP comes
+   back out of the nftables set. SSH from the previously-banned IP
+   now works again.
+
+If you don't have LAN access (e.g., you're traveling and the VPN IP
+you usually use got banned), Hetzner's rescue console at
+[robot.hetzner.com](https://robot.hetzner.com) is the fallback:
+attach a rescue system, mount the disk, and either edit the bouncer
+config to disable it temporarily or `systemctl mask
+crowdsec-firewall-bouncer` from inside the chroot. More involved,
+but always available.
+
+CrowdSec's default `crowdsecurity/whitelists` parser auto-whitelists
+RFC1918 + WG private addresses at the engine layer, so the WG tunnel
+itself (`10.10.10.0/30`) can never get banned regardless of what
+scenarios fire. Internal infrastructure traffic is safe from any
+ban path, manual or scenario-driven.
+
 ### When the VPS is replaced (re-provisioned)
 
 If you spin up a new VPS instance (e.g., to rotate the IP after
@@ -555,6 +803,14 @@ runbook. The home OPNsense side stays put; only the VPS public
 key, IPs, and PTR records change. Update the AAAA + A records in
 DNS, update the OPNsense WG peer's "Public key" + "Endpoint
 address" fields, and the tunnel re-establishes.
+
+The CrowdSec bouncer needs to be re-installed too (it's a stateless
+puller, so nothing precious lives on the old VPS): run the install
++ configure steps under "CrowdSec bouncer (block banned IPs at the
+VPS edge)" again. The pre-registered `VPS_FW_BOUNCER` entry on the
+home LAPI is keyed by the API key value, not by VPS identity, so
+the same key keeps working on the new VPS, no `cscli` cleanup
+needed on the home side.
 
 ### Updating nginx stream config
 
@@ -582,7 +838,12 @@ config-management push.
   folder
 - [`../docker-compose.public-dns01.yml`](../docker-compose.public-dns01.yml):
   the home-side compose flavor that pairs with this VPS topology
-  (port 80 + 443 exposure, DNS-01 ACME via Cloudflare API)
+  (port 80 + 443 exposure, DNS-01 ACME via Cloudflare API). Also
+  defines the `BOUNCER_KEY_VPS_FW_BOUNCER` env var on the crowdsec
+  service that pre-registers the VPS bouncer on container start
+- [`crowdsec/crowdsec-firewall-bouncer.yaml`](crowdsec/crowdsec-firewall-bouncer.yaml):
+  bouncer config to deploy at `/etc/crowdsec/bouncers/crowdsec-firewall-bouncer.yaml`
+  on the VPS (only `api_url` + `api_key` need editing from this template)
 - [`../proxy-home/`](../proxy-home/): for comparison, an
   outbound-side proxy in the same stack (Squid for Vault VM
   egress); same operational pattern (per-VM folder, configs +
