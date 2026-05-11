@@ -1,33 +1,51 @@
 #!/bin/bash
 
-# This script is used to automate the backup and logs files retrieval from the VM to the TrueNAS server and sending it to a Hetzner Storage Box in the cloud.
-# IPs and user are changed from the original script
+# This script automates retrieval of backup + log files from the Vault VM AND
+# the edge VPS to this TrueNAS server, then uploads the Vault VM's encrypted
+# backup bundle to a Hetzner Storage Box in the cloud.
+# IPs and user are changed from the original script.
 
-# === CONFIGURATION ===
+# === CONFIGURATION (Vault VM) ===
 VM_USER="fetcher"
-VM_HOST="192.168.123.4"
+VM_HOST="192.168.50.3"
 VM_PORT=2222
-SSH_KEY="/root/.ssh/fetcher_automation_rsa"
+VM_SSH_KEY="/root/.ssh/fetcher_automation_rsa"
+
+# === CONFIGURATION (Edge VPS) ===
+# VPS hosts the public-facing edge. Fetch the daily auto-update log only
+# (no backup bundle, no docker log, no main log: the VPS has no Vaultwarden
+# data and is a single-script maintenance flow).
+VPS_USER="fetcher"
+VPS_HOST="<vps_public_ip_or_hostname>"
+VPS_PORT=<vps_ssh_port>
+VPS_SSH_KEY="/root/.ssh/fetcher_automation_rsa_vps"
 
 RETENTION_DAYS=90
 TODAY=$(date +"%Y-%m-%d")
 
-# Remote paths on the VM
+# === Remote paths ===
 REMOTE_BASE_LOG="/srv/logs"
 REMOTE_BASE_BACKUP="/srv/backups"
+# Vault VM
 REMOTE_BACKUP_LOG="${REMOTE_BASE_LOG}/backup/vault-backup-${TODAY}.log"
 REMOTE_DOCKER_LOG="${REMOTE_BASE_LOG}/docker/update-${TODAY}.log"
 REMOTE_SYSTEM_LOG="${REMOTE_BASE_LOG}/system/system-autoupdate-${TODAY}.log"
 REMOTE_MAIN_LOG="${REMOTE_BASE_LOG}/main/main-${TODAY}.log"
 REMOTE_BACKUP_FILE="${REMOTE_BASE_BACKUP}/vaultwarden-backup-bundle-${TODAY}.tar.gz"
+# VPS (same layout, just the system log)
+REMOTE_VPS_SYSTEM_LOG="${REMOTE_BASE_LOG}/system/system-autoupdate-${TODAY}.log"
 
-# Destination paths on TrueNAS
+# === Destination paths on TrueNAS ===
 DEST_MAIN="/mnt/Main"
+# Vault VM logs and backup
 DEST_BACKUP_FILE="${DEST_MAIN}/Backups/vaultwarden"
 DEST_DOCKER_LOG="${DEST_MAIN}/Logs/vaultwarden/docker"
 DEST_BACKUP_LOG="${DEST_MAIN}/Logs/vaultwarden/backup"
 DEST_SYSTEM_LOG="${DEST_MAIN}/Logs/vaultwarden/system"
 DEST_MAIN_LOG="${DEST_MAIN}/Logs/vaultwarden/main"
+# VPS log (own top-level dir; the VPS is its own machine even though it
+# fronts the Vaultwarden stack)
+DEST_VPS_SYSTEM_LOG="${DEST_MAIN}/Logs/vps/system"
 
 DEST_HETZNER_LOG_DIR="${DEST_MAIN}/Logs/vaultwarden/Hetzner"
 LOG_FILE="${DEST_HETZNER_LOG_DIR}/hetzner-upload-${TODAY}.log"
@@ -65,39 +83,52 @@ mkdir -p "$DEST_HETZNER_LOG_DIR"
         fi
     }
 
+    # copy_file: pull a single remote file over scp into a local dest dir,
+    # then fix permissions on it. Takes the ssh-side identity as args so
+    # the same function works for both the Vault VM and the VPS.
+    #
+    # Usage: copy_file USER HOST PORT KEY REMOTE_PATH DEST_DIR
     copy_file() {
-        local remote_path="$1"
-        local dest_dir="$2"
+        local ssh_user="$1"
+        local ssh_host="$2"
+        local ssh_port="$3"
+        local ssh_key="$4"
+        local remote_path="$5"
+        local dest_dir="$6"
         local filename
         filename=$(basename "$remote_path")
 
         mkdir -p "$dest_dir"
-        scp -i "$SSH_KEY" -P "$VM_PORT" "${VM_USER}@${VM_HOST}:${remote_path}" "$dest_dir/"
+        scp -i "$ssh_key" -P "$ssh_port" "${ssh_user}@${ssh_host}:${remote_path}" "$dest_dir/"
         if [[ $? -eq 0 ]]; then
-            echo -e "\n[OK] Fetched $filename to $dest_dir"
+            echo -e "\n[OK] Fetched $filename from ${ssh_host} to $dest_dir"
             fix_permissions "$dest_dir" "$filename"
         else
-            echo -e "\n[SKIP] File not found on VM: $filename"
+            echo -e "\n[SKIP] File not found on ${ssh_host}: $filename"
         fi
     }
 
     cleanup_old_files() {
         echo -e "\n[→] Cleaning up old local log & backup files..."
-        find "$DEST_BACKUP_LOG" -type f -name "*.log" -mtime +$RETENTION_DAYS -exec rm -f {} \;
-        find "$DEST_BACKUP_FILE" -type f -name "*.tar.gz" -mtime +$RETENTION_DAYS -exec rm -f {} \;
-        find "$DEST_DOCKER_LOG" -type f -name "*.log" -mtime +$RETENTION_DAYS -exec rm -f {} \;
-        find "$DEST_SYSTEM_LOG" -type f -name "*.log" -mtime +$RETENTION_DAYS -exec rm -f {} \;
-        find "$DEST_MAIN_LOG" -type f -name "*.log" -mtime +$RETENTION_DAYS -exec rm -f {} \;
+        find "$DEST_BACKUP_LOG"     -type f -name "*.log"    -mtime +$RETENTION_DAYS -exec rm -f {} \;
+        find "$DEST_BACKUP_FILE"    -type f -name "*.tar.gz" -mtime +$RETENTION_DAYS -exec rm -f {} \;
+        find "$DEST_DOCKER_LOG"     -type f -name "*.log"    -mtime +$RETENTION_DAYS -exec rm -f {} \;
+        find "$DEST_SYSTEM_LOG"     -type f -name "*.log"    -mtime +$RETENTION_DAYS -exec rm -f {} \;
+        find "$DEST_MAIN_LOG"       -type f -name "*.log"    -mtime +$RETENTION_DAYS -exec rm -f {} \;
+        find "$DEST_VPS_SYSTEM_LOG" -type f -name "*.log"    -mtime +$RETENTION_DAYS -exec rm -f {} \;
 
         find "$DEST_HETZNER_LOG_DIR" -type f -name "*.log" -mtime +$RETENTION_DAYS -exec rm -f {} \;
     }
 
-    echo -e "\n[→] Fetching backup and log files..."
-    copy_file "$REMOTE_BACKUP_LOG" "$DEST_BACKUP_LOG"
-    copy_file "$REMOTE_BACKUP_FILE" "$DEST_BACKUP_FILE"
-    copy_file "$REMOTE_DOCKER_LOG" "$DEST_DOCKER_LOG"
-    copy_file "$REMOTE_SYSTEM_LOG" "$DEST_SYSTEM_LOG"
-    copy_file "$REMOTE_MAIN_LOG" "$DEST_MAIN_LOG"
+    echo -e "\n[→] Fetching Vault VM backup + log files..."
+    copy_file "$VM_USER" "$VM_HOST" "$VM_PORT" "$VM_SSH_KEY" "$REMOTE_BACKUP_LOG"  "$DEST_BACKUP_LOG"
+    copy_file "$VM_USER" "$VM_HOST" "$VM_PORT" "$VM_SSH_KEY" "$REMOTE_BACKUP_FILE" "$DEST_BACKUP_FILE"
+    copy_file "$VM_USER" "$VM_HOST" "$VM_PORT" "$VM_SSH_KEY" "$REMOTE_DOCKER_LOG"  "$DEST_DOCKER_LOG"
+    copy_file "$VM_USER" "$VM_HOST" "$VM_PORT" "$VM_SSH_KEY" "$REMOTE_SYSTEM_LOG"  "$DEST_SYSTEM_LOG"
+    copy_file "$VM_USER" "$VM_HOST" "$VM_PORT" "$VM_SSH_KEY" "$REMOTE_MAIN_LOG"    "$DEST_MAIN_LOG"
+
+    echo -e "\n[→] Fetching VPS log files..."
+    copy_file "$VPS_USER" "$VPS_HOST" "$VPS_PORT" "$VPS_SSH_KEY" "$REMOTE_VPS_SYSTEM_LOG" "$DEST_VPS_SYSTEM_LOG"
 
     local_file_path="${DEST_BACKUP_FILE}/vaultwarden-backup-bundle-${TODAY}.tar.gz"
 

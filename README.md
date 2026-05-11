@@ -49,6 +49,7 @@ Homelab/
 │   │   ├── README.md                         # VPS provisioning + ops doc (Hetzner setup, PTR, DNS, UFW, WireGuard, nginx stream + PROXY, OPNsense WG, CrowdSec firewall bouncer)
 │   │   ├── crowdsec/                         # CrowdSec firewall bouncer config (nftables, pulls bans from home LAPI over the WG tunnel, drops banned IPs at the VPS edge)
 │   │   ├── nginx/                            # nginx stream config (raw TCP passthrough with PROXY protocol)
+│   │   ├── scripts/                          # nightly maintenance: auto-update.sh (apt + unconditional reboot) + root_crontab.txt
 │   │   └── wireguard/                        # WG tunnel config template
 │   ├── vault_domains_allow_dns.txt           # Pi-hole allowlist for the vaultwarden-vm group (gravity/ABP-syntax mirror of the Squid allowlist; consumed via Pi-hole's "Add allowlist" URL feature)
 │   ├── wazuh-home/                           # Targets the wazuh-home VM (Wazuh manager) + sidecar daemon for the LAN Pi-hole VM

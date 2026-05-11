@@ -1,0 +1,16 @@
+# Root crontab on the edge VPS.
+#
+# Install with: sudo crontab -e (as root) and paste the line below.
+# Verify with:  sudo crontab -l
+#
+# Single nightly entry: apt update / upgrade / dist-upgrade /
+# autoremove + reboot. See ./auto-update.sh for the full flow.
+#
+# Timing: 5:00 AM, scheduled 35 min before the Vault VM's main.sh run
+# at 5:35 AM. The VPS is the lighter cycle (apt + reboot, ~2-3 min);
+# running it first means the home stack still finds a healthy VPS
+# bouncer endpoint when it cycles. If the VPS update fails, there's
+# a 30 min window to notice before the home cycle compounds.
+#
+# Format: minute hour day-of-month month day-of-week command
+0 5 * * * /bin/bash -lc '/root/vps/auto-update.sh' > /dev/null 2>&1
