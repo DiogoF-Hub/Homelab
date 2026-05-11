@@ -49,6 +49,25 @@ log "apt-get update"
 apt-get update -y >> "$PHASE_LOG" 2>&1 \
     || fail "apt-get update failed" 31
 
+# --- openssh-server special case (DO THIS FIRST) --------------------------
+# Upgrade openssh-server while keeping the existing hardened sshd_config.
+# UCF_FORCE_CONFFOLD=1: if the maintainer's new default conflicts with our
+# local hardened config, KEEP the local copy. Losing our sshd_config on an
+# unattended run would lock us out of the VM.
+#
+# Deliberately runs BEFORE the unattended-upgrades enable below: the
+# `systemctl enable --now apt-daily-upgrade.timer` line can trigger an
+# immediate catch-up run via Persistent=true if the timer missed a
+# scheduled fire while disabled, which could quietly pick up the
+# openssh-server upgrade before our explicit flagged line. Doing the
+# explicit upgrade first guarantees UCF_FORCE_CONFFOLD=1 covers this
+# package regardless of any background apt activity that might follow.
+
+log "upgrading openssh-server (keeping existing config)"
+UCF_FORCE_CONFFOLD=1 apt-get install --only-upgrade openssh-server -y \
+    >> "$PHASE_LOG" 2>&1 \
+    || warn "openssh-server upgrade had issues, review log"
+
 # --- unattended-upgrades --------------------------------------------------
 
 log "ensuring unattended-upgrades is installed + enabled"
@@ -59,17 +78,6 @@ fi
 dpkg-reconfigure -f noninteractive unattended-upgrades >> "$PHASE_LOG" 2>&1 || true
 systemctl enable --now unattended-upgrades.service apt-daily.timer apt-daily-upgrade.timer \
     >> "$PHASE_LOG" 2>&1 || true
-
-# --- openssh-server special case ------------------------------------------
-# Upgrade openssh-server while keeping existing sshd_config.
-# UCF_FORCE_CONFFOLD=1: if the maintainer's new default conflicts with our
-# local hardened config, KEEP the local copy. Losing our sshd_config on an
-# unattended run would lock us out of the VM.
-
-log "upgrading openssh-server (keeping existing config)"
-UCF_FORCE_CONFFOLD=1 apt-get install --only-upgrade openssh-server -y \
-    >> "$PHASE_LOG" 2>&1 \
-    || warn "openssh-server upgrade had issues, review log"
 
 # --- main upgrades --------------------------------------------------------
 

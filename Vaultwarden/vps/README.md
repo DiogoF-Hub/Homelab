@@ -729,6 +729,145 @@ Within 10s the VPS bouncer pulls the deletion and the set empties.
 
 ---
 
+## Automated maintenance + log fetcher
+
+Nightly cycle on the VPS: `apt update / upgrade / dist-upgrade /
+autoremove`, then an unconditional reboot. Logs land in a
+world-readable directory so an unprivileged `fetcher` account can SCP
+them off to the home TrueNAS daily (same pattern as the Vault VM's
+[`fetcher` setup](../REBUILD.md), but minus the backup-bundle pull,
+the VPS has no Vaultwarden data to ship).
+
+Single script, no orchestrator. The VPS has no containers and no
+data to coordinate, so the multi-phase pattern from
+[`scripts/root_scripts/`](../scripts/root_scripts/) on the Vault VM
+doesn't earn its keep. needrestart is deliberately NOT installed:
+its job is "avoid full reboots by restarting only what needs it",
+which is the opposite of the policy here.
+
+### Deploying the script
+
+```bash
+sudo mkdir -p /root/vps
+sudo cp /path/to/repo/Vaultwarden/vps/scripts/auto-update.sh /root/vps/auto-update.sh
+sudo chmod 755 /root/vps/auto-update.sh
+```
+
+Sanity check it runs (it WILL reboot at the end, so do this once you
+are ready for a reboot):
+
+```bash
+sudo /root/vps/auto-update.sh
+```
+
+The script is self-contained: env vars, paths, helpers, lock, apt
+flow, retention, reboot, all in one file. See header comment in
+[`scripts/auto-update.sh`](scripts/auto-update.sh) for the full
+phase list and policy notes.
+
+### Cron entry
+
+Install in root's crontab (`sudo crontab -e`), pasting the line from
+[`scripts/root_crontab.txt`](scripts/root_crontab.txt):
+
+```
+0 5 * * * /bin/bash -lc '/root/vps/auto-update.sh' > /dev/null 2>&1
+```
+
+Time choice: 5:00 AM, 35 min before the Vault VM's nightly run at
+5:35 AM. VPS is the lighter cycle (apt + reboot, ~2-3 min), it
+finishes well before the home stack starts its longer cycle. If the
+VPS run fails for any reason there's a 30 min window to notice
+before the home cycle compounds.
+
+Verify with:
+
+```bash
+sudo crontab -l
+```
+
+### The `fetcher` user
+
+A second unprivileged account, mirroring the Vault VM's `fetcher`
+pattern (no sudo, SSH-key auth only, read-only on logs). Used by
+TrueNAS to SCP the daily auto-update log home.
+
+```bash
+# Create the account
+sudo useradd -m -s /bin/bash fetcher
+
+# Set a password. Required because of an interaction between
+# /etc/shadow and PAM: an account with no password set (`!` in shadow)
+# can be rejected by some PAM stacks even when sshd PasswordAuthentication
+# is `no`. The actual value of the password is irrelevant for SSH (we
+# never accept it on the wire); pick anything random, write it down
+# offline if you care. Same caveat applies on the Vault VM.
+sudo passwd fetcher
+
+# Set up the SSH dir + the public key TrueNAS will authenticate with.
+# Paste the corresponding PUBLIC key (matches the private key on
+# TrueNAS); if reusing the existing fetcher_automation_rsa keypair
+# from the Vault VM setup, it's the contents of
+# /root/.ssh/fetcher_automation_rsa.pub on the TrueNAS box.
+sudo install -d -m 700 -o fetcher -g fetcher /home/fetcher/.ssh
+sudo nano /home/fetcher/.ssh/authorized_keys
+sudo chmod 600 /home/fetcher/.ssh/authorized_keys
+sudo chown fetcher:fetcher /home/fetcher/.ssh/authorized_keys
+```
+
+Update `/etc/ssh/sshd_config` to allow `fetcher` to log in (the
+hardened config from the "SSH hardening" section above starts with
+`AllowUsers admin` only, fetcher has to be added explicitly):
+
+```
+AllowUsers admin fetcher
+```
+
+Apply:
+
+```bash
+sudo sshd -t                              # syntax check before restart
+sudo systemctl restart ssh
+```
+
+### Log permissions
+
+`/srv/logs/system/` is created by `auto-update.sh` on first run via
+`mkdir -p`. Default umask (022) makes it world-readable, which is
+fine on the VPS, the only real users are `admin` and `fetcher` and
+the log contents are non-secret apt output. The fetcher account can
+read it as-is, no group-membership tricks needed.
+
+If the directory does not exist yet (you haven't run the script
+manually before the first cron firing), the cron run will create it
+on its first invocation. Until then, `scp` from TrueNAS just gets
+"no such file or directory", harmless.
+
+### Verifying
+
+After the first scheduled (or manual) run:
+
+```bash
+ls -la /srv/logs/system/                              # daily file present?
+sudo tail -50 /srv/logs/system/system-autoupdate-*.log
+```
+
+And from the TrueNAS side, dry-run the pull as the user that owns
+the SSH key:
+
+```bash
+ssh -i /root/.ssh/fetcher_automation_rsa -p <ssh_port> fetcher@<vps_ip> exit   # expect: 0
+scp -i /root/.ssh/fetcher_automation_rsa -P <ssh_port> \
+    fetcher@<vps_ip>:/srv/logs/system/system-autoupdate-*.log \
+    /tmp/test-pull/                                                            # expect: file lists OK
+```
+
+If both succeed, wire the actual pull into the TrueNAS-side script
+that already pulls from the Vault VM (or stand up a sibling script
+pointing at the VPS).
+
+---
+
 ## Operational notes
 
 ### When the VPS reboots
@@ -844,6 +983,10 @@ config-management push.
 - [`crowdsec/crowdsec-firewall-bouncer.yaml`](crowdsec/crowdsec-firewall-bouncer.yaml):
   bouncer config to deploy at `/etc/crowdsec/bouncers/crowdsec-firewall-bouncer.yaml`
   on the VPS (only `api_url` + `api_key` need editing from this template)
+- [`scripts/auto-update.sh`](scripts/auto-update.sh) +
+  [`scripts/root_crontab.txt`](scripts/root_crontab.txt): nightly
+  apt cycle + unconditional reboot, see "Automated maintenance + log
+  fetcher" above for deploy procedure + the `fetcher` user setup
 - [`../proxy-home/`](../proxy-home/): for comparison, an
   outbound-side proxy in the same stack (Squid for Vault VM
   egress); same operational pattern (per-VM folder, configs +
