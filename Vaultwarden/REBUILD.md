@@ -281,9 +281,17 @@ From a fresh SSH session as `vwadmin`:
 ```bash
 sudo apt update && sudo apt full-upgrade -y
 sudo apt install -y sudo curl ca-certificates unattended-upgrades \
-    apt-listchanges fail2ban rsyslog
+    apt-listchanges fail2ban rsyslog python3-yaml
 sudo dpkg-reconfigure -plow unattended-upgrades
 ```
+
+`python3-yaml` is needed by `docker-update.sh`, which parses
+`podman-compose config` output via Python's yaml module to resolve
+the image name per service. Earlier versions used awk and silently
+returned the wrong image when one service's name appeared inside
+another service's `depends_on` block (awk has no concept of YAML
+nesting; the yaml parser does). python3 itself is in Debian's base
+install, but PyYAML isn't.
 
 `rsyslog` is listed alongside `fail2ban` deliberately: Debian 13
 ships with journald-only logging by default, and the fail2ban
