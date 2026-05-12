@@ -62,6 +62,7 @@ security.debian.org
 metadata.ftp-master.debian.org
 debian.map.fastlydns.net
 bugs.debian.org
+security-tracker.debian.org
 
 # === Let's Encrypt (ACME endpoints; OCSP / issuer chain is in apex section) ===
 acme-v02.api.letsencrypt.org

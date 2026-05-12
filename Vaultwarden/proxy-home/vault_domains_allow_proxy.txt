@@ -13,6 +13,13 @@ debian.map.fastlydns.net
 # lookup is denied and apt-listbugs silently skips, so any critical/grave
 # bug warnings never surface. Squid logs it as TCP_DENIED 403 to /var/log/squid/access.log.
 bugs.debian.org
+# security-tracker.debian.org is queried by debsecan to check installed
+# packages against the authoritative Debian Security Tracker. Acts as a
+# real-source-of-truth alternative to Wazuh vulnerability-detection,
+# which compares upstream version strings and false-positives heavily
+# on Debian's backported security patches. Run on demand with
+# `sudo debsecan --suite trixie --format report --only-fixed`.
+security-tracker.debian.org
 
 # ================================
 # Let's Encrypt (ACME + OCSP + issuer certs)
