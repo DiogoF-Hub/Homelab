@@ -66,8 +66,25 @@ else
     for service in $SERVICES; do
         log "[$service] checking for newer image"
 
+        # Resolve the image name for this service from the rendered compose
+        # config. Earlier versions of this loop used awk to grep for the
+        # service header `^service:` and then the next `image:` line, but
+        # awk has no concept of YAML nesting: when bunkerweb has a
+        # `depends_on: { crowdsec: { condition: service_started } }` block
+        # AND `podman-compose config` sorts keys alphabetically (so
+        # `depends_on` lands before `image` under bunkerweb), the awk for
+        # service=crowdsec would hit the inner `crowdsec:` line first,
+        # flip in_service=1, then return bunkerweb's `image:` instead of
+        # crowdsec's. We were quietly comparing the crowdsec service's
+        # current image ID against the BUNKERWEB image on every run.
+        # Python's yaml parser walks the tree properly, no false matches
+        # regardless of key order or nesting depth.
         IMAGE=$(sudo -u "$USER_POD" podman-compose config 2>/dev/null \
-            | awk -v svc="$service" '$1 == svc ":" {in_service=1} in_service && $1 == "image:" {print $2; exit}')
+            | python3 -c "
+import sys, yaml
+config = yaml.safe_load(sys.stdin)
+print(config.get('services', {}).get('$service', {}).get('image', ''))
+")
 
         if [[ -z "$IMAGE" ]]; then
             warn "[$service] could not resolve image name, skipping"

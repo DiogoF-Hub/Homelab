@@ -43,9 +43,9 @@ DEST_DOCKER_LOG="${DEST_MAIN}/Logs/vaultwarden/docker"
 DEST_BACKUP_LOG="${DEST_MAIN}/Logs/vaultwarden/backup"
 DEST_SYSTEM_LOG="${DEST_MAIN}/Logs/vaultwarden/system"
 DEST_MAIN_LOG="${DEST_MAIN}/Logs/vaultwarden/main"
-# VPS log (own top-level dir; the VPS is its own machine even though it
-# fronts the Vaultwarden stack)
-DEST_VPS_SYSTEM_LOG="${DEST_MAIN}/Logs/vps/system"
+# VPS log, nested under the same vaultwarden tree as the Vault VM logs
+# so everything related to the password-manager stack lives together
+DEST_VPS_SYSTEM_LOG="${DEST_MAIN}/Logs/vaultwarden/vps/system"
 
 DEST_HETZNER_LOG_DIR="${DEST_MAIN}/Logs/vaultwarden/Hetzner"
 LOG_FILE="${DEST_HETZNER_LOG_DIR}/hetzner-upload-${TODAY}.log"
