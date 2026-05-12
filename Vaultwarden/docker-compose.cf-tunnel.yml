@@ -124,10 +124,33 @@ services:
       # We add extra patterns not in the default list:
       BLACKLIST_USER_AGENT: "python-requests python-urllib python-httpx httpx wget go-http-client libwww-perl masscan"
 
-      # Rate limiting (tuned for ~5 users)
+      # rDNS blacklist: deny IPs whose PTR matches these patterns.
+      # Three buckets, all worth blocking on a password manager:
+      #   (a) Continuous-scan / banner-grab platforms (shodan, censys,
+      #       binaryedge, rapid7, leakix, onyphe, stretchoid). These will
+      #       fingerprint exposed services and surface them in public
+      #       search; primary motivation for this list.
+      #   (b) Search engine crawlers (google, googlebot, yandex, bing,
+      #       baidu, yahoo). They typically don't crawl API-only / unlinked
+      #       endpoints, but if the URL ever leaks into a public page or
+      #       Google Doc, the crawler tries it. No reason a search engine
+      #       should ever index a password manager.
+      #   (c) Link / preview fetchers (linkedin, twitter, discord). If the
+      #       vault URL is pasted in a chat, these fetch it to render a
+      #       preview card. Mild op-sec win to deny that.
+      # BunkerWeb caches the rDNS lookup so per-connection overhead is
+      # negligible; entries that never match just sit unused.
+      # In this cf-tunnel flavor the rDNS lookup happens on the real client
+      # IP (CF-Connecting-IP picked up by USE_REAL_IP), not on Cloudflare's
+      # peer address, so the check still resolves to the scanner's network.
+      BLACKLIST_RDNS: ".shodan.io .censys.io .censys-scanner.com .binaryedge.ninja .rapid7.com .leakix.net .onyphe.io .stretchoid.com .google.com .googlebot.com .yandex.ru .yandex.net .yandex.com .search.msn.com .baidu.com .baidu.jp .crawl.yahoo.net .fwd.linkedin.com .twitter.com .twttr.com .discord.com"
+
+      # Rate limiting (tuned for ~5 users). BunkerWeb 1.6.x dropped the
+      # standalone LIMIT_REQ_BURST setting; whatever default burst the
+      # limit plugin applies internally is fine for current traffic
+      # shape, no sync issues observed without an explicit burst.
       USE_LIMIT_REQ: "yes"
       LIMIT_REQ_RATE: "5r/s"
-      LIMIT_REQ_BURST: "15"
 
       # DNSBL (check IPs against known spam/abuse lists)
       USE_DNSBL: "yes"
