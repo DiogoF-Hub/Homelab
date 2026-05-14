@@ -1,0 +1,1 @@
+0 */6 * * * /bin/bash -lc '/home/main/server/backup.sh' > /dev/null 2>&1

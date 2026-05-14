@@ -1,0 +1,96 @@
+services:
+  # VPS-facing Velocity: accepts PROXY-protocol traffic from the VPS nginx,
+  # which is how it learns each player's real public IP. Used by anything
+  # reaching us via the public mc.<domain>:25565 endpoint.
+  velocity:
+    image: itzg/mc-proxy:latest
+    container_name: velocity
+    restart: unless-stopped
+    environment:
+      TYPE: "VELOCITY"
+      MEMORY: "256M"
+      TZ: "Europe/Luxembourg"
+    ports:
+      - "25565:25577"
+    volumes:
+      - ./velocity:/server
+    depends_on:
+      - minecraft
+    networks:
+      - mcnet
+
+  # LAN-facing Velocity: same image, same modern-forwarding handshake to the
+  # backend, but accepts plain TCP (haproxy-protocol = false in its config),
+  # so vanilla MC clients on the home LAN can connect directly without going
+  # through the VPS. Mojang auth + whitelist still enforced identically to
+  # the VPS path. Listens on host port 25566.
+  velocity-lan:
+    image: itzg/mc-proxy:latest
+    container_name: velocity-lan
+    restart: unless-stopped
+    environment:
+      TYPE: "VELOCITY"
+      MEMORY: "256M"
+      TZ: "Europe/Luxembourg"
+    ports:
+      - "25566:25577"
+    volumes:
+      - ./velocity-lan:/server
+    depends_on:
+      - minecraft
+    networks:
+      - mcnet
+
+  minecraft:
+    image: itzg/minecraft-server:latest
+    container_name: minecraft
+    restart: unless-stopped
+    # no ports: section — backend reachable only via mcnet
+    environment:
+      EULA: "TRUE"
+      TYPE: "FABRIC"
+      # Example versions: change to whatever matches your modpack. Pinning is
+      # a coordinated change with every player's launcher (CurseForge / Prism
+      # / Modrinth / MultiMC) since clients have to match exactly.
+      VERSION: "26.1.2"
+      FABRIC_LOADER_VERSION: "0.19.2"
+      MEMORY: "6G"
+      USE_AIKAR_FLAGS: "true"
+      DIFFICULTY: "normal"
+      MODE: "survival"
+      VIEW_DISTANCE: "16"
+      SIMULATION_DISTANCE: "16"
+      MAX_PLAYERS: "5"
+      SEED: "123456"
+      WHITELIST: "Player1,Player2"
+      ENFORCE_WHITELIST: "true"
+      OPS: "Player1,Player2"
+      # Velocity does Mojang auth; FabricProxy-Lite forwards the real UUID + IP
+      # to the backend over an authenticated handshake. Backend must be offline
+      # so it doesn't try its own (now-impossible) Mojang handshake, but it
+      # effectively operates online via the forwarded identity.
+      ONLINE_MODE: "false"
+      ENABLE_RCON: "true"
+      RCON_PASSWORD: ${RCON_PASSWORD}
+      LOG_TIMESTAMP: "true"
+      STOP_SERVER_ANNOUNCE_DELAY: "10"
+      MAX_TICK_TIME: "-1"
+      ALLOW_FLIGHT: "true"
+      TZ: "Europe/Luxembourg"
+      OVERRIDE_SERVER_PROPERTIES: "true"
+      MOTD: "Minecraft Server"
+      # Auto-install the Velocity-side bridge mod on the Fabric backend.
+      MODRINTH_PROJECTS: "fabricproxy-lite"
+      MODRINTH_DOWNLOAD_DEPENDENCIES: "required"
+    volumes:
+      - ./data:/data
+      # Drop .jar mods into ~/server/mods/ on the host — itzg copies them into
+      # /data/mods on each (re)start. Read-only so the container can't mutate
+      # the source of truth.
+      - ./mods:/mods:ro
+    networks:
+      - mcnet
+
+networks:
+  mcnet:
+    driver: bridge

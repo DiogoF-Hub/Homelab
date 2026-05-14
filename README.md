@@ -1,6 +1,6 @@
 # Homelab
 
-This repository contains my personal **homelab configurations and scripts** for services like **Vaultwarden**, **Pi-hole**, and **custom HTTPS certificate generation**. It includes everything from Docker / Podman Compose files to automation scripts that make deploying, updating, and maintaining these services much easier.
+This repository contains my personal **homelab configurations and scripts** for services like **Vaultwarden**, **Pi-hole**, a **Minecraft server**, and **custom HTTPS certificate generation**. It includes everything from Docker / Podman Compose files to automation scripts that make deploying, updating, and maintaining these services much easier.
 
 The goal is to **share my setup publicly** so others can learn, adapt, or get inspiration for their own homelab environments. The only thing I kindly ask is that if you find something that could improve security or make the setup better, please let me know so I can learn and improve as well.
 
@@ -76,6 +76,21 @@ Homelab/
 │       └── truenas_scripts/
 │           └── truenas-script.sh
 │
+├── Minecraft-Server/
+│   ├── README.md
+│   ├── .env.template
+│   ├── docker-compose.yml                    # velocity + velocity-lan + minecraft (Fabric)
+│   ├── vps-nginx-snippet.conf                # VPS-side nginx stream block (PROXY protocol on)
+│   ├── FabricProxy-Lite.toml.example         # backend mod config; deploy to data/config/FabricProxy-Lite.toml
+│   ├── backup.sh                             # RCON-warned tar of data/
+│   ├── crontab.txt                           # reference root crontab entry for backup.sh
+│   ├── velocity/                             # VPS-facing Velocity (PROXY-protocol input, modern forwarding out)
+│   │   ├── velocity.toml
+│   │   └── forwarding.secret.example
+│   └── velocity-lan/                         # LAN-facing Velocity (plain TCP input, modern forwarding out)
+│       ├── velocity.toml
+│       └── forwarding.secret.example
+│
 ├── HTTPS Generator/
 │   ├── README.md
 │   └── generate_cert.sh
@@ -135,6 +150,22 @@ Self-hosted password manager running on a **dedicated Debian 13 VM in Proxmox**,
   * `scripts/truenas_scripts/truenas-script.sh` runs on the TrueNAS host to pull backups + logs and push them to Hetzner
 
 See [`Vaultwarden/README.md`](./Vaultwarden/README.md) for the full deployment, log-pipeline, and firewall documentation, [`Vaultwarden/REBUILD.md`](./Vaultwarden/REBUILD.md) for the VM rebuild procedure, and [`Vaultwarden/DECRYPT.txt`](./Vaultwarden/DECRYPT.txt) for backup-restore instructions.
+
+---
+
+### **Minecraft**
+
+Fabric-based Minecraft server with a **Velocity** proxy in front for proper Mojang auth and real-IP forwarding. Same edge pattern as Vaultwarden: TCP passthrough from the public VPS over a WireGuard tunnel, no TLS termination on the edge.
+
+* **Architecture**
+
+  * VPS nginx (stream `proxy_pass` with `proxy_protocol on`) → WireGuard tunnel → `velocity` at home (decodes PROXY header, does the Mojang session check, forwards via Velocity's "modern" handshake) → Fabric backend with **FabricProxy-Lite** (trusts the forwarded online UUID + real client IP). The backend is in `online-mode=false` but operates effectively online via the verified handshake.
+  * A second proxy instance, `velocity-lan`, listens on port 25566 for plain TCP so LAN players can connect directly without round-tripping through the VPS. Both proxies converge on the same backend with the same modern-forwarding secret.
+* **Auth + whitelist**: pirate / cracked clients are rejected at Velocity (Mojang session check). The backend whitelist gates by real online UUIDs because the modern-forwarding handshake hands those over from Velocity, so `ENFORCE_WHITELIST=true` behaves exactly as on a vanilla `online-mode=true` server.
+* **Mods**: not a published CurseForge / Modrinth modpack. Jars drop into `mods/` on the VM, and `itzg/minecraft-server` stages them into `/data/mods` on each boot. FabricProxy-Lite (+ its Fabric API dependency) is auto-installed from Modrinth via the `MODRINTH_PROJECTS` env var, matched to whatever MC + Fabric Loader versions you pinned in compose (the file ships with example values, change to suit your modpack).
+* **Backups**: `backup.sh` warns players via RCON, stops the stack, tars `data/` into `backups/`, restarts, and prunes old logs. Cron-driven.
+
+See [`Minecraft-Server/README.md`](./Minecraft-Server/README.md) for the full deployment runbook (VM, VPS, OPNsense), mod-add workflow, the CurseForge `AUTO_CURSEFORGE` alternative, and secret rotation.
 
 ---
 
