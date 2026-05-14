@@ -1,0 +1,40 @@
+config-version = "2.7"
+
+bind = "0.0.0.0:25577"
+motd = "Minecraft Server (LAN)"
+show-max-players = 5
+
+online-mode = true
+force-key-authentication = true
+prevent-client-proxy-connections = false
+
+# Same modern-forwarding handshake as the VPS-facing Velocity, so the Fabric
+# backend treats players who come in via this listener identically. The
+# shared secret in ./forwarding.secret MUST match the secret in
+# ../velocity/forwarding.secret and in ../data/config/FabricProxy-Lite.toml.
+player-info-forwarding-mode = "modern"
+
+announce-forge = true
+kick-existing-players = false
+ping-passthrough = "disabled"
+enable-player-address-logging = true
+
+[servers]
+minecraft = "minecraft:25565"
+try = ["minecraft"]
+
+[forced-hosts]
+
+[advanced]
+compression-threshold = 256
+compression-level = -1
+login-ratelimit = 3000
+connection-timeout = 5000
+read-timeout = 30000
+# LAN clients connect with vanilla TCP, no PROXY header. The cost is Velocity
+# sees the docker bridge IP as $remote_addr instead of the real LAN IP, but
+# Mojang auth + modern-forwarded UUID to the backend are unaffected.
+haproxy-protocol = false
+
+[query]
+enabled = false

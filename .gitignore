@@ -4,3 +4,14 @@ CLAUDE.md
 generator.conf
 .DS_Store
 *.local.md
+
+# Minecraft: secrets stay local, only the .example templates get committed
+Minecraft-Server/.env
+Minecraft-Server/velocity/forwarding.secret
+Minecraft-Server/velocity-lan/forwarding.secret
+
+# Minecraft: runtime data (world, libraries, mods, backups, logs)
+Minecraft-Server/data/
+Minecraft-Server/mods/
+Minecraft-Server/backups/
+Minecraft-Server/logs/
