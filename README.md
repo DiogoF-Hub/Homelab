@@ -121,7 +121,7 @@ Homelab/
 
 ### **Vaultwarden**
 
-Self-hosted password manager running on a **dedicated Debian 13 VM in Proxmox**, with a dedicated NIC bound to **VLAN-DMZ**. Containers run under **rootless Podman** as a non-privileged `poduser`. The reverse-proxy / WAF / bouncer layer was migrated from **Caddy + Certbot + a Cloudflare Workers bouncer (host-installed CrowdSec)** to a single **BunkerWeb** all-in-one container, with CrowdSec also moved into a container.
+Self-hosted password manager running on a **dedicated Debian 13 VM in Proxmox**, tagged onto **VLAN-DMZ** via a VLAN-aware Proxmox bridge. Containers run under **rootless Podman** as a non-privileged `poduser`. The reverse-proxy / WAF / bouncer layer was migrated from **Caddy + Certbot + a Cloudflare Workers bouncer (host-installed CrowdSec)** to a single **BunkerWeb** all-in-one container, with CrowdSec also moved into a container.
 
 * **Edge & proxy**
 
