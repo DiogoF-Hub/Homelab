@@ -18,7 +18,7 @@ The setup is designed for **secure self-hosted password management**, with:
 * **[Automated off-site replication](#-automation-scripts)** to TrueNAS and Hetzner Storage Box
 * **Cloudflare DNS-side hardening** (CAA records, HSTS Preload, DNSSEC). Cloudflare is **DNS-only (grey cloud)** in this deployment, no proxying. The previous edge-side policies (Full SSL, Cloudflare Access on `/admin`, geo-blocking at edge, etc.) are kept in the [Cloudflare section](#cloudflare) for reference but aren't in use today. See that section for the full breakdown of what's currently active vs. reference-only
 * **Full network isolation** by running on a dedicated VLAN with [strict firewall rules in OPNsense](#-dmz-firewall-rules)
-* **Hosted on a dedicated Debian 13 VM in Proxmox** with dedicated NIC binding for VLAN isolation and full system backup capabilities
+* **Hosted on a dedicated Debian 13 VM in Proxmox**, tagged onto the DMZ VLAN via a VLAN-aware Proxmox bridge, with full system backup capabilities
 * **[Self-contained backup encryption](#-backup-and-redundancy)** using pinned [age](https://github.com/FiloSottile/age) binaries with version-controlled, reproducible, public-key-only encryption, and pinned [minisign](https://jedisct1.github.io/minisign/) binaries for cryptographic signing of every bundle
 
 
@@ -117,7 +117,7 @@ vaultwarden/
 The stack lives on two machines, in this request-flow order:
 
 1. **Edge VPS** (Hetzner Cloud, Falkenstein): the public-facing entry point doing TCP passthrough back home over WireGuard
-2. **Home BunkerWeb VM** (Proxmox, dedicated NIC bound to VLAN-DMZ): where TLS actually terminates and the Vaultwarden + BunkerWeb + CrowdSec containers run
+2. **Home BunkerWeb VM** (Proxmox, VLAN-tagged onto VLAN-DMZ): where TLS actually terminates and the Vaultwarden + BunkerWeb + CrowdSec containers run
 
 ### **Edge VPS (Hetzner Cloud CX23, Falkenstein)**
 
@@ -138,21 +138,20 @@ CX23 is the smallest current Hetzner tier that comfortably handles the workload;
 
 Full provisioning runbook (SSH hardening, UFW, WireGuard generation, nginx stream config with PROXY protocol, OPNsense WG instance + peer + interface assignment + firewall pass rules into the DMZ VLAN, Cloudflare DNS + Hetzner PTR setup) lives in [`vps/README.md`](vps/README.md). The architecture decisions and security trade-offs (why TLS terminates at home, why Cloudflare is grey-cloud, why HTTP/3 was dropped to enable PROXY protocol uniformly) are also documented there.
 
-### **Proxmox VM with Dedicated NIC Binding**
+### **Proxmox VM on VLAN-DMZ**
 
 The Vaultwarden service has been migrated from a Raspberry Pi to a **dedicated Debian 13 VM running on Proxmox**. This infrastructure change was implemented to enable **full system backups** while maintaining strict network isolation.
 
 #### **VM Configuration**
 * Runs a clean **Debian 13** installation
-* Assigned to a **dedicated physical NIC** on the Proxmox host (one of two available NICs)
-* The physical network cable for this NIC is connected to a switch port assigned to the **VLAN-DMZ** VLAN group
-* This setup preserves the original VLAN isolation baseline while providing VM stability and backup capabilities
+* The Proxmox bridge is **VLAN-aware**, and the VM's virtual NIC carries a **VLAN tag of 50** set in the VM's network-device settings. Proxmox tags every frame leaving this VM with VLAN 50 (VLAN-DMZ) before it goes out on the host's trunked uplink, so the VM lands on the DMZ VLAN without a physical NIC dedicated to it.
+* This replaces the earlier arrangement, which dedicated a separate physical NIC on the Proxmox host (cabled to a DMZ-access switch port) to this VM. The VLAN-aware bridge plus a per-VM VLAN tag is the standard Proxmox approach and gives the same isolation with one trunked uplink instead of a NIC per VLAN.
 
 #### **Benefits of This Migration**
 * **Full system backups**: The VM-based approach enables complete system snapshots, ensuring full recovery capability beyond just data backups
 * **Hardware independence**: Decouples Vaultwarden from bare-metal hardware constraints and provides more flexibility for maintenance and scaling
 * **Proxmox integration**: Leverages Proxmox's management tools, monitoring, and resource controls
-* **Network isolation preserved**: Despite the migration, the dedicated NIC binding ensures the VM remains isolated on VLAN-DMZ with the same strict firewall rules applied
+* **Network isolation preserved**: the VM sits on VLAN-DMZ (VLAN 50) through the VLAN tag on its virtual NIC, with the same strict OPNsense firewall rules applied. Isolation is enforced by the VLAN assignment plus the OPNsense rules, not by which physical NIC carries the traffic.
 
 #### **Host Tuning**
 
@@ -305,6 +304,7 @@ Subnets are pinned in the compose file so the aardvark-dns gateway IPs (`10.89.0
 ### **Container runtime**
 
 * **Podman** runs all containers, rootless, under the dedicated `poduser` account.
+* **crun** is the OCI runtime Podman delegates to, the default on Debian with nothing configured to select it. It is the low-level C program that actually creates the namespaces and cgroups and execs the container process once Podman has done the higher-level orchestration. crun is preferred over the Go-based `runc` alternative for being lighter (faster startup, smaller memory footprint) and for solid cgroup v2 support, which is what makes the compose resource limits behave correctly under rootless Podman. Its build ships the relevant security features compiled in (`+SECCOMP +APPARMOR +CAP +EBPF`); the `+EBPF` in particular is what lets `oci-seccomp-bpf-hook` trace syscalls for custom seccomp profiles (see `ideas.md` #11). The choice between crun and runc is purely the low-level execution mechanism: the stack's security properties come from rootless Podman, user namespaces, capability dropping, and seccomp, not from which of the two runtimes executes the container.
 * **`podman-compose`** handles compose-file orchestration: parsing (`config --services` to enumerate services in `docker-update.sh`), `up`/`down`/`restart` for lifecycle, and image pulls.
 * For interactive use, drop into a poduser login shell first (`sudo su - poduser`) then run `podman-compose ...` directly. The maintenance scripts use the non-interactive `sudo -u poduser podman-compose ...` form because they can't open a shell from within a script.
 * `poduser` has **no sudo privileges** and is not in any privileged group, so the only way to touch containers is through root user-switching. Clean privilege boundary between the orchestrator (root scripts) and the runtime (poduser).

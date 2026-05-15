@@ -1156,3 +1156,349 @@ WireGuard" firewall table (row 3 = port 8080), `REBUILD.md` Phase
 11 alternate + Phase 18 checklist, `CLAUDE.md` § Log pipeline
 (bouncer section).
 
+---
+
+## 11. Kernel-level container confinement: seccomp + AppArmor profiles
+
+Two kernel-level confinement layers were proposed for the three
+containers (`vaultwarden`, `bunkerweb`, `crowdsec`), each stacking on
+top of the existing compose hardening (`cap_drop: ALL` + minimal
+`cap_add`, `no-new-privileges`, `tmpfs` for `/tmp` + `/var/run`,
+`read_only: true` on Vaultwarden, resource limits, two-bridge network
+segmentation) rather than replacing any of it.
+
+The two layers turned out to have different fates, so this idea is
+split into two clearly separate sub-parts:
+
+- **11.1 Seccomp** (syscall allowlist): **live and actionable, do
+  this.** Seccomp does not need root, a process can always restrict
+  its own syscalls, so it works fine under rootless Podman.
+- **11.2 AppArmor** (Mandatory Access Control over files / network /
+  capabilities): **CUT.** AppArmor cannot be enforced under rootless
+  Podman, and this stack is rootless. Kept below as the second
+  sub-part for the record and the reasoning.
+
+The two are independent: neither depends on the other, they just
+happen to be applied through the same `security_opt` mechanism.
+Seccomp is 11.1 because it is the one to actually do; AppArmor is 11.2
+because it is cut. Read 11.1 as the live idea, 11.2 as a closed
+investigation.
+
+**Tangential cleanup surfaced during this analysis** (independent of
+both sub-parts): BunkerWeb is granted `NET_BIND_SERVICE` but does not
+need it, the internal ports 8080/8443 are above 1024 and host-side
+80/443 binding is done by Podman's rootlessport via the
+`net.ipv4.ip_unprivileged_port_start` sysctl, not by this capability.
+Dropping it from BunkerWeb's `cap_add` is a standalone capability
+tidy-up, neither seccomp nor AppArmor.
+
+### 11.1 Seccomp profiles (live, actionable)
+
+#### What
+
+Add a custom **seccomp** profile (syscall allowlist) to each of the
+three containers. Today all three run on Podman's default profile
+(`/usr/share/containers/seccomp.json`), which blocks ~44
+known-dangerous syscalls but allows the rest of the 300+ by design,
+for broad compatibility. A custom profile inverts that: allow only the
+syscalls the workload actually uses, deny everything else.
+
+Target end state per container:
+
+```yaml
+security_opt:
+  - no-new-privileges
+  - seccomp=./seccomp/<container>.json   # custom allowlist, ~50-120 syscalls
+```
+
+Proposed repo layout:
+
+```
+Vaultwarden/
+  seccomp/
+    vaultwarden.json
+    bunkerweb.json
+    crowdsec.json
+```
+
+The `seccomp=` line has to be mirrored across all three compose
+flavors (`public-dns01.yml`, `public-http01.yml`, `cf-tunnel.yml`),
+the same way every other shared setting is kept in lockstep.
+
+#### Why
+
+If an attacker gets code execution inside any of these containers (a
+Vaultwarden RCE, a WAF-bypass-plus-exec in BunkerWeb, a CrowdSec
+vulnerability), their next move is almost always to abuse syscalls to
+escalate or escape the container:
+
+- `ptrace` to inspect or hijack other processes
+- `mount` / `umount2` to reach host filesystems
+- `kexec_load` to replace the running kernel
+- `unshare` / `setns` to break out of namespaces
+- `perf_event_open` for side-channel attacks
+- `bpf` to load kernel programs
+
+A tight seccomp profile removes those primitives at the syscall
+boundary, regardless of what the attacker controls inside the
+container. None of the three workloads need the full 300+ syscall
+surface: Vaultwarden (Rust) likely needs ~50-80, CrowdSec (Go) a
+moderate set, BunkerWeb (nginx + Lua + ModSecurity) the widest of the
+three but still nowhere near all of them.
+
+#### How
+
+Use `oci-seccomp-bpf-hook`, a Podman-native OCI runtime hook that uses
+eBPF to trace every syscall a running container makes and emits the
+result as a JSON seccomp profile. crun in this environment is built
+with `+EBPF`, which the hook requires (see README, "Container
+runtime").
+
+```bash
+sudo apt install oci-seccomp-bpf-hook
+```
+
+Then trace each container (as `poduser`):
+
+```bash
+podman run \
+  --annotation io.containers.trace-syscall=of:./seccomp/vaultwarden-trace.json \
+  vaultwarden/server:latest
+```
+
+While the trace runs, every production code path must be exercised so
+the profile captures everything the workload legitimately needs (the
+per-container exercise checklists are below). Stop the container; the
+JSON is a starting allowlist. Repeat for all three, place the results
+in `seccomp/`, reference them via `security_opt: seccomp=...`. The
+whole flow is short and self-contained: generate, apply, test,
+iterate.
+
+#### Per-container syscall notes
+
+**Vaultwarden** (Rust, the most locked-down: `read_only: true`, zero
+`cap_add`). Smallest syscall surface, the easiest tight profile.
+Expected categories: file I/O (SQLite on `/data`), TCP (outbound
+SMTP, inbound listen on 8080), signal handling, time, basic memory
+management. Should NOT need `ptrace`, `mount`, `umount2`,
+`kexec_load`, `unshare`, `setns`, `perf_event_open`, `bpf`,
+`userfaultfd`, `syslog`. Trace exercise: login, admin panel, SMTP
+send (device verification + registration), vault sync, the `/alive`
+healthcheck, WebSocket notification path.
+
+**BunkerWeb** (nginx + Lua + ModSecurity, multi-process, ACME
+client). Widest syscall surface of the three: `clone` / `fork` for
+workers, `mmap` for shared memory, `futex`, `epoll`, many socket
+operations. Trace exercise: HTTP + HTTPS, Let's Encrypt DNS-01
+renewal, CrowdSec LAPI calls, ModSecurity rule processing, rate
+limiting, DNSBL lookups, custom-config loading on startup.
+
+**CrowdSec** (Go, moderate syscall surface). Trace exercise: startup,
+hub collection pull, bouncer registration, log parsing, decision-API
+queries from the BunkerWeb + VPS bouncers, AND a forced hub update
+(`cscli hub update && cscli hub upgrade`) so the trace captures the
+`symlink` / `linkat` syscalls only used during hub operations.
+
+#### Testing
+
+Apply the generated profile, `podman-compose up -d`, exercise every
+feature, watch `podman logs` for `SIGSYS` or unexpected exits, check
+`journalctl -k | grep seccomp` for violations, add any missing
+syscall to the JSON and restart, iterate until the full feature set
+works under the custom profile.
+
+#### Optional refinements
+
+- **Regenerate profiles after significant image bumps.** A new
+  `vaultwarden/server`, `bunkerweb-all-in-one`, or `crowdsec` image
+  can introduce syscalls not in the existing profile. Fold a re-trace
+  into the image-update runbook, or at minimum re-trace when a
+  container starts crashing after an update.
+- A scripted / CI re-trace so profile regeneration is not a manual
+  chore each time `:latest` moves.
+
+#### What this does NOT fix
+
+- **Seccomp does not stop abuse of allowed syscalls.** If the workload
+  legitimately needs `socket` + `connect`, an attacker with code
+  execution can still open network connections; seccomp only removes
+  syscalls the workload never uses.
+- **Profiles drift against `:latest` images.** All three containers
+  track `:latest`; each pull is a potential syscall-set change. A
+  profile is a snapshot, not a guarantee, it needs ongoing
+  maintenance.
+- **The ModSecurity engine flip (DetectionOnly to On)** and the paired
+  CrowdSec `crowdsecurity/modsecurity` scenario enable will change
+  BunkerWeb's and CrowdSec's syscall surface. The seccomp profiles
+  should be re-evaluated after that transition (tracked in
+  `MONITORING.local.md`).
+- **Does not prevent the initial compromise**, nor protect against a
+  kernel 0-day reachable through an allowed syscall, nor against a
+  malicious upstream `:latest` image push. Seccomp shrinks the
+  post-compromise blast radius; it does not stop an attacker getting
+  in.
+
+### 11.2 AppArmor profiles, CUT (does not work under rootless Podman)
+
+**Status: cut.** AppArmor was the other proposed kernel-level layer:
+Mandatory Access Control over which files and directories a container
+may read / write / execute, which network operations it may perform,
+and which capabilities it may exercise, enforced regardless of
+in-container privilege. It cannot be used on this stack.
+
+#### Why it is cut
+
+**If Podman runs rootless, AppArmor profiles do not apply. Full stop,
+this is settled, not an open question.** This stack runs rootless (as
+`poduser`, UID 1001), so the AppArmor sub-part is cut.
+
+Applying an AppArmor profile to a container requires the profile to be
+loaded into the kernel; loading needs `apparmor_parser`, which needs
+root; a rootless engine running as an unprivileged user cannot do it.
+So the Podman / containers stack reports AppArmor as unavailable for
+any rootless engine and skips it entirely, `security_opt:
+apparmor=<profile>` is ignored, never enforced. The host's own
+AppArmor being healthy and loaded with profiles makes no difference:
+the limitation is the rootless engine, not the host.
+
+The one theoretical workaround (root pre-loads the profile, the
+rootless container only references it by name) does not rescue it
+either: Podman gates all AppArmor handling on an internal availability
+flag that reads false for any rootless engine, regardless of what is
+already loaded in the kernel.
+
+**Rootful Podman was considered and rejected.** Running the three
+containers rootful would make AppArmor available, but it would throw
+away the rootless containment property that is a cornerstone of this
+stack: under rootless a container escape lands the attacker as
+`poduser` (UID 1001), an unprivileged user who still needs a separate
+kernel privilege-escalation to reach root and who cannot touch the
+root-owned backup crypto material in `/root/vault/`. Under rootful an
+escape lands as host root immediately. That containment is worth far
+more than the AppArmor hardening layer; trading it away would be a net
+security loss. Rootless stays, AppArmor stays cut.
+
+#### What it would have been (kept for the record)
+
+If AppArmor were viable, the approach would have been: write profiles
+from the `docker-default` base, load in complain mode (`aa-complain`,
+logs violations without blocking), exercise the full feature set,
+review violations (`aa-logprof`), switch to enforce mode
+(`aa-enforce`). Per-container resource scopes that were sketched:
+
+- **Vaultwarden**: write `/data/**`, `/logs/**`, `/tmp/**`; read
+  `/etc/ssl/certs/**`, `/etc/resolv.conf`, `/etc/hosts`; network TCP
+  only.
+- **BunkerWeb**: the hardest to profile, the scheduler regenerates
+  nginx config on every boot, so the profile would have to permit a
+  broad dynamic write set (`/etc/nginx`, `/var/cache/nginx`, `/data`)
+  or the container breaks on restart.
+- **CrowdSec**: the profile would need to cover the read-only
+  log-volume bind-mount sources (`/srv/bw-logs/**`, `/srv/vw-logs/**`).
+
+Recorded only as a starting point if a future Podman version ever
+supports referencing root-pre-loaded profiles from a rootless engine.
+Until then 11.2 is closed: AppArmor adds nothing to this stack and is
+not pursued.
+
+---
+
+## 12. Per-login notification via a Wazuh alert rule
+
+### What
+
+Get a notification on **every successful Vaultwarden login**, including
+logins from already-known devices, by writing a custom Wazuh alert
+rule that matches the successful-login log line and routes an alert
+out (Discord, per #7 Phase C).
+
+The gap: `REQUIRE_DEVICE_EMAIL=true` is set in the compose, but it only
+emails on an **unrecognized** device. Once a device is verified, every
+later login from it is silent. Vaultwarden has no built-in setting for
+a passive "email me on every login" notification, so the visibility
+has to come from the log + SIEM layer.
+
+### Why
+
+For a password manager, a successful login is a security-relevant
+event even from a trusted device: it catches a stolen-but-still-paired
+laptop, a session on a device you forgot was logged in, or an attacker
+who has the master password and is using a device Vaultwarden already
+trusts (so `REQUIRE_DEVICE_EMAIL` never fires). Failed logins are
+already covered by CrowdSec's bruteforce + user-enum scenarios; this
+idea closes the gap on the *successful* side.
+
+Wazuh is the right tool: the agent is already enrolled on
+`vaultwarden-home`, and alert rules + Discord Active Response are the
+mechanism `ideas.md` #7 Phase C describes. This idea is a concrete,
+narrow slice of that broader rollout.
+
+### How
+
+**The obstacle: `LOG_LEVEL`.** The Vaultwarden compose currently sets
+`LOG_LEVEL: "error"`, which drops info-level events (a successful
+login is info-level) before they ever reach
+`/srv/vw-logs/vaultwarden.log`. With the line never written, there is
+nothing for Wazuh to match.
+
+**The fix: `LOG_LEVEL: "info"`.** Log levels are hierarchical, info
+includes warn and error. So raising the level to info:
+
+- keeps every failed-auth and error line CrowdSec needs for its
+  bruteforce / user-enum scenarios (those are warn/error level and
+  were already getting through);
+- adds the info-level successful-login lines this idea needs;
+- does not confuse CrowdSec: its parsers only match the specific
+  failure patterns and simply ignore the extra info lines.
+
+Steps:
+
+1. Change `LOG_LEVEL` from `"error"` to `"info"` in the vaultwarden
+   service env block, in all three compose flavors (kept in lockstep
+   like every other shared setting). Restart the vaultwarden container.
+2. Perform a test login, then inspect `/srv/vw-logs/vaultwarden.log`
+   to capture the **exact** format of the successful-login line. The
+   rule cannot be written accurately until this real line is in hand.
+3. Confirm the Wazuh agent on the Vault VM has a `<localfile>` source
+   for `/srv/vw-logs/vaultwarden.log`. This is part of #7 Phase B and
+   is listed there as still pending; it is a hard prerequisite, with
+   no localfile source the log never reaches the manager and the rule
+   has nothing to match.
+4. Write a custom manager rule (`local_rules.xml`) matching the
+   confirmed success pattern, assign a sensible level, and tag it into
+   the rule group that routes to the Discord Active Response script
+   (#7 Phase C).
+5. Verify end-to-end: a login produces a Wazuh alert and a Discord
+   notification.
+
+### Optional refinements
+
+- **Enrich the alert** with the source IP, username, and device that
+  Vaultwarden's success line carries, via a small custom Wazuh
+  decoder, so the Discord message says "who, from where, on what"
+  rather than just "a login happened".
+- **Noise control** if per-login alerts get too chatty for a
+  multi-user vault: scope the rule to fire only on a login from a new
+  source /24, or only for specific accounts. For 5-6 users a plain
+  per-login alert is probably fine as-is.
+
+### What this does NOT fix
+
+- **`LOG_LEVEL: "info"` raises log volume substantially.** Every
+  successful login plus other info chatter now lands in
+  `vaultwarden.log`. Watch the effect on: the log file size (the
+  `/etc/logrotate.d/vaultwarden` config is daily / keep 3 /
+  copytruncate, should cope), CrowdSec's parse volume (negligible),
+  and the Wazuh agent's shipping volume to the manager (more events,
+  more indexer growth). Re-check disk + indexer after the flip.
+- **The on-VM log is not tamper-proof.** An attacker with root on the
+  Vault VM can suppress the success line before the agent ships it;
+  what the manager received is the source of truth, not the on-disk
+  file (same caveat as #7). This alerts on logins under normal
+  conditions, it is not an integrity guarantee.
+- **Successful logins only.** Failed-login alerting stays CrowdSec's
+  job via the existing scenarios; this idea does not touch that path.
+- **Cannot be fully spec'd until step 2 is done.** The exact rule
+  regex depends on the real log-line format, which only appears once
+  `LOG_LEVEL: "info"` is live and a test login has been captured.
+
