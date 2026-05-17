@@ -324,7 +324,7 @@ The image used in both compose flavors is the **`bunkerity/bunkerweb-all-in-one`
 |---------|---------------|--------------|
 | **ACME** | `AUTO_LETS_ENCRYPT: yes`, `LETS_ENCRYPT_CHALLENGE: dns` (or `http`), `LETS_ENCRYPT_DNS_PROVIDER: cloudflare` | Issues + renews Let's Encrypt certs. DNS-01 in `cf-tunnel` and `public-dns01`; HTTP-01 in `public-http01`. |
 | **Reverse proxy** | `USE_REVERSE_PROXY: yes`, `REVERSE_PROXY_HOST: http://vaultwarden:8080`, `REVERSE_PROXY_WS: yes` | Proxies all traffic to Vaultwarden. WS support is required for `/notifications/hub`. |
-| **TLS hardening** | `SSL_PROTOCOLS: TLSv1.3`, `SSL_CIPHERS_LEVEL: modern` | TLS 1.3 only; modern cipher suite. |
+| **TLS hardening** | `SSL_PROTOCOLS: TLSv1.2 TLSv1.3`, `SSL_CIPHERS_LEVEL: modern`, `SSL_ECDH_CURVE: X25519MLKEM768:X25519:prime256v1:secp384r1` | TLS 1.2 + 1.3; modern cipher level (AEAD-only, no CBC); post-quantum hybrid key exchange with X25519MLKEM768 preferred ahead of the classical x25519/P-256/P-384 curves. SSL Labs A+. |
 | **Real client IP** | `USE_REAL_IP: yes`, `REAL_IP_HEADER: CF-Connecting-IP`, `REAL_IP_FROM: 172.16.0.0/12 10.0.0.0/8 192.168.0.0/16` | `cf-tunnel` only: trusts Cloudflare's `CF-Connecting-IP` from the `cloudflared` hop. The two `public-*` flavors don't set this; BunkerWeb sees the real socket IP and forwards as `X-Forwarded-For`. |
 | **Country blacklist** | `BLACKLIST_COUNTRY: CN RU KP IR SY CU VE BY` | Geo-blocks at the proxy. |
 | **UA blacklist** | `BLACKLIST_USER_AGENT: python-requests python-urllib python-httpx httpx wget go-http-client libwww-perl masscan` (plus BW's own auto-fetched list) | Blocks scripted clients and known bad UAs. |
@@ -1172,7 +1172,7 @@ Password managers are high-value targets. These headers provide defense-in-depth
 
 These are CF dashboard settings that only have an effect when Cloudflare is the active edge (orange cloud / Cloudflare Tunnel). Documented here so the [`docker-compose.cf-tunnel.yml`](#-three-compose-flavors) reference flavor in the repo has a complete edge-side companion. Skip this whole sub-list unless you're running cf-tunnel:
 
-* TLS **1.3 enforced** as the minimum version (CF edge setting; today TLS 1.3 is enforced by BunkerWeb's `SSL_PROTOCOLS: TLSv1.3` at home instead)
+* TLS **1.3 enforced** as the minimum version (CF edge setting; today BunkerWeb at home sets `SSL_PROTOCOLS: TLSv1.2 TLSv1.3` instead, keeping TLS 1.2 enabled alongside 1.3 with the modern AEAD-only cipher level)
 * **Automatic HTTP → HTTPS redirection** (CF edge; today the redirect is served by BunkerWeb at home, see the `public-dns01` flavor's port-80 mapping)
 * **HSTS at CF edge** (max-age 12 months, include subdomains, preload). Today HSTS is set by BunkerWeb instead (same effective header reaching the browser)
 * **Full (strict) SSL/TLS** for CF-to-origin connection ([Cloudflare docs](https://developers.cloudflare.com/ssl/origin-configuration/ssl-modes/full-strict/)). Irrelevant when CF is grey-cloud since CF doesn't make an origin connection

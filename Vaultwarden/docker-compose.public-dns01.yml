@@ -103,7 +103,11 @@ services:
     environment:
       TZ: "${TZ}"
       SERVER_NAME: "${SERVER_NAME}"
+      # Refuse unknown-vhost connections at both layers: STRICT_SNI aborts
+      # the TLS handshake on unknown/missing SNI (no cert presented),
+      # DISABLE_DEFAULT_SERVER denies it later at the HTTP layer.
       DISABLE_DEFAULT_SERVER: "yes"
+      DISABLE_DEFAULT_SERVER_STRICT_SNI: "yes"
       USE_REVERSE_PROXY: "yes"
       REVERSE_PROXY_URL: "/"
       REVERSE_PROXY_HOST: "http://vaultwarden:8080"
@@ -156,9 +160,24 @@ services:
       LETS_ENCRYPT_DNS_PROVIDER: "cloudflare"
       LETS_ENCRYPT_DNS_CREDENTIAL_ITEM: "api_token ${CLOUDFLARE_API_TOKEN}"
 
-      # TLS hardening
-      SSL_PROTOCOLS: "TLSv1.3"
+      # TLS hardening: TLS 1.2 + 1.3. "modern" is BunkerWeb's strongest
+      # cipher preset (AEAD-only, no CBC), so keeping TLS 1.2 enabled
+      # broadens client reach without pulling in weak cipher suites.
+      SSL_PROTOCOLS: "TLSv1.2 TLSv1.3"
       SSL_CIPHERS_LEVEL: "modern"
+
+      # Key-exchange groups, set explicitly: "auto" is documented to
+      # prefer PQC on OpenSSL 3.5+ but wasn't offering it here, so the
+      # post-quantum hybrid X25519MLKEM768 is listed first, ahead of the
+      # classical curves already in use (x25519, P-256, P-384).
+      SSL_ECDH_CURVE: "X25519MLKEM768:X25519:prime256v1:secp384r1"
+
+      # HTTPS listener + HTTP->HTTPS redirect, pinned so a future
+      # BunkerWeb default change can't silently drop them. AUTO_REDIRECT
+      # redirects when HTTPS is detected, REDIRECT_HTTP_TO_HTTPS forces it.
+      LISTEN_HTTPS: "yes"
+      AUTO_REDIRECT_HTTP_TO_HTTPS: "yes"
+      REDIRECT_HTTP_TO_HTTPS: "yes"
 
       # Security headers are owned entirely by
       # custom-configs/server-http/headers-passthrough-apply.conf (with an
