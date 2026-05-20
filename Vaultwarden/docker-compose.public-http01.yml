@@ -111,12 +111,6 @@ services:
       SSL_PROTOCOLS: "TLSv1.2 TLSv1.3"
       SSL_CIPHERS_LEVEL: "modern"
 
-      # Key-exchange groups, set explicitly: "auto" is documented to
-      # prefer PQC on OpenSSL 3.5+ but wasn't offering it here, so the
-      # post-quantum hybrid X25519MLKEM768 is listed first, ahead of the
-      # classical curves already in use (x25519, P-256, P-384).
-      SSL_ECDH_CURVE: "X25519MLKEM768:X25519:prime256v1:secp384r1"
-
       # HTTPS listener + HTTP->HTTPS redirect, pinned so a future
       # BunkerWeb default change can't silently drop them. AUTO_REDIRECT
       # redirects when HTTPS is detected, REDIRECT_HTTP_TO_HTTPS forces it.
