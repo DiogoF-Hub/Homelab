@@ -85,13 +85,16 @@ services:
       #
       # The four-env-var pattern matches docker-compose.public-dns01.yml;
       # see that file's commentary for the per-var explanation. Same trust
-      # list for REAL_IP_FROM (rootlessport SNAT subnet 10.89.2.0/24 +
-      # the WG tunnel 10.10.10.0/30); adjust if your tunnel uses a
-      # different subnet.
+      # list for REAL_IP_FROM: both podman bridges (security 10.89.1.0/24
+      # + backend 10.89.2.0/24) plus the WG tunnel 10.10.10.0/30. Both
+      # bridges are listed because pasta (rootless podman 5.x default)
+      # picks one for inbound port-forwarded SNAT and the choice can
+      # shift between podman versions. Adjust the WG CIDR if your tunnel
+      # uses a different subnet.
       USE_PROXY_PROTOCOL: "yes"
       USE_REAL_IP: "yes"
       REAL_IP_HEADER: "proxy_protocol"
-      REAL_IP_FROM: "10.89.2.0/24 10.10.10.0/30"
+      REAL_IP_FROM: "10.89.1.0/24 10.89.2.0/24 10.10.10.0/30"
 
       # DNS resolvers: podman's aardvark-dns listens on each bridge's gateway.
       # BunkerWeb defaults to Docker's embedded resolver (127.0.0.11) which
