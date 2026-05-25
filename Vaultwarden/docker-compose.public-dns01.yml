@@ -126,12 +126,18 @@ services:
       #                         are needed; one without the other is a no-op.
       # - REAL_IP_HEADER      : tells realip to use the PROXY-protocol-derived
       #                         IP (not X-Forwarded-For or X-Real-IP)
-      # - REAL_IP_FROM        : trust list. Connections from these subnets are
-      #                         allowed to dictate $remote_addr via PROXY. The
-      #                         10.89.2.0/24 covers what bunkerweb actually
-      #                         sees as its TCP peer (the rootlessport SNAT
-      #                         source on the backend bridge); 10.10.10.0/30
-      #                         covers the WG tunnel as a safety belt.
+      # - REAL_IP_FROM        : trust list. Connections from these subnets
+      #                         are allowed to dictate $remote_addr via PROXY.
+      #                         Both podman bridges are listed (security
+      #                         10.89.1.0/24 + backend 10.89.2.0/24) because
+      #                         rootless podman's pasta backend (default in
+      #                         podman 5.x) picks one for inbound port-
+      #                         forwarded SNAT, and the choice can shift
+      #                         between podman versions (older slirp4netns +
+      #                         rootlessport landed on backend; pasta often
+      #                         picks security). Listing both stays correct
+      #                         regardless. 10.10.10.0/30 covers the WG
+      #                         tunnel as a safety belt.
       # Only meaningful when paired with the edge VPS doing TCP passthrough
       # WITH `proxy_protocol on;` set in its nginx stream config (see
       # vps/nginx/streams.d/passthrough.conf). Without that, the listener
@@ -140,7 +146,7 @@ services:
       USE_PROXY_PROTOCOL: "yes"
       USE_REAL_IP: "yes"
       REAL_IP_HEADER: "proxy_protocol"
-      REAL_IP_FROM: "10.89.2.0/24 10.10.10.0/30"
+      REAL_IP_FROM: "10.89.1.0/24 10.89.2.0/24 10.10.10.0/30"
 
       # DNS resolvers: podman's aardvark-dns listens on each bridge's gateway.
       # BunkerWeb defaults to Docker's embedded resolver (127.0.0.11) which
