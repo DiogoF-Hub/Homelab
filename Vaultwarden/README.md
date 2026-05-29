@@ -1,5 +1,7 @@
 # Vaultwarden Setup
 
+**This is my Vaultwarden setup, where I try to put every security control I reasonably can in front of one small password vault.** It's not paranoia, the threat model doesn't strictly need all of it; I just love the hustle of stacking defense-in-depth and watching the layers work together. The rest of this README is the detailed how and why behind each piece.
+
 This folder contains my **Vaultwarden configuration and automation scripts**, running on **rootless [Podman](https://podman.io/)** with a dedicated non-privileged user (`poduser`).
 
 The reverse proxy / WAF / bouncer layer was previously **Caddy + Certbot + Cloudflare Workers bouncer (host-installed CrowdSec)**, and is now a single **[BunkerWeb](https://www.bunkerweb.io/) all-in-one container** that handles ACME (Let's Encrypt), TLS termination, security headers, country blacklist, user-agent blacklist, rate limiting, ModSecurity/CRS WAF, and the CrowdSec bouncer in one place. CrowdSec itself is also now containerized.
@@ -81,14 +83,24 @@ vaultwarden/
 │   └── wireguard/
 │       └── wg0.conf.template                  # WG tunnel config template (10.10.10.0/30, point-to-point with OPNsense)
 │
-├── wazuh-home/                                # Targets the wazuh-home VM (Wazuh manager) + sidecar daemon for the LAN Pi-hole VM
-│   ├── README.md                              # Architecture, apply order, verification, migration notes
-│   ├── pihole-agent.localfile.xml             # <localfile> block for the Pi-hole VM's wazuh-agent (tails the sidecar's vault-dns/events.log)
+├── wazuh-home/                                # Targets the wazuh-home VM (Wazuh manager) + sidecars on the Vault VM and LAN Pi-hole VM. Visibility + per-source Discord alerting across 4 pipelines (DNS / ModSecurity / fail2ban / Squid); see wazuh-home/README.md
+│   ├── README.md                              # Architecture, apply order, verification for all four pipelines + the Discord integrator
+│   ├── pihole-agent.localfile.xml             # DNS: <localfile> for the Pi-hole VM's agent (tails the sidecar's vault-dns/events.log)
 │   ├── manager-global.snippet.xml             # logall_json toggle for the wazuh-home <global> block
-│   ├── manager-rules.xml                      # Rules 100250 (base) + 100251 (resolved, level 3) + 100252 (Pi-hole policy block, level 6) + 100253 (upstream no-answer, level 4)
+│   ├── manager-rules.xml                      # DNS rules 100250-100253 (base / resolved L3 / Pi-hole-policy block L6 / upstream no-answer L4)
+│   ├── manager-modsec-rules.xml               # ModSecurity rules 100300-100303 (base / band none L3 / low|mid L7 / high L11)
+│   ├── manager-fail2ban-decoder.xml           # Custom fail2ban-file decoder for the dedicated /var/log/fail2ban.log format
+│   ├── manager-fail2ban-rules.xml             # fail2ban rules 100400 (base) + 100401 (ban, L10)
+│   ├── vault-modsec-agent.localfile.xml       # ModSecurity: Vault VM agent tails the modsec-tail sidecar's events.log
+│   ├── fail2ban-agent.localfile.xml           # fail2ban: <localfile> for /var/log/fail2ban.log (every host running the sshd jail)
+│   ├── manager-discord-integration.xml        # <integration> blocks (one per source) wiring alerts to the custom-discord integrator
+│   ├── integrations/
+│   │   └── custom-discord.py                  # Manager-side Discord integrator: per-channel webhooks (placeholders in repo), GeoIP embeds, stdlib-only
 │   └── sidecar/
-│       ├── pihole-ftl-tail.py                 # Daemon: polls Pi-hole's FTL SQLite DB, emits one structured JSON event per query
-│       └── pihole-ftl-tail.service            # systemd unit (root, hardened, 10s polling tick)
+│       ├── pihole-ftl-tail.py                 # DNS daemon (Pi-hole VM): polls FTL SQLite DB, emits one JSON event per query
+│       ├── pihole-ftl-tail.service            # systemd unit (root, hardened, 10s polling tick)
+│       ├── modsec-tail.py                     # ModSecurity daemon (Vault VM): flattens modsec_audit.log JSON into clean events
+│       └── modsec-tail.service                # systemd unit (dedicated modsectail user, hardened)
 │
 ├── vault_domains_allow_dns.txt                # Pi-hole allowlist for the vaultwarden-vm group (mirror of proxy-home/vault_domains_allow_proxy.txt in gravity/ABP syntax)
 │
@@ -881,7 +893,9 @@ A map of every log this stack writes, what each one captures, and what consumes 
 | `/srv/vw-logs/vaultwarden.log` | Vaultwarden app log: failed logins, failed admin auth, failed 2FA (TOTP + email), app errors. Enabled via `EXTENDED_LOGGING=true` + `LOG_FILE` in compose. | CrowdSec (custom parsers in `crowdsec/parsers/vaultwarden-logs.yaml`, scenarios in `crowdsec/scenarios/vaultwarden-bf.yaml`) | Wazuh (planned, see [ideas.md](ideas.md) #7 Phase B) |
 | `/srv/bw-logs/access.log` | Every BunkerWeb HTTP request, 200s, 4xx, 5xx, all of it. The full request log. | CrowdSec (hub-installed parsers for nginx access patterns) | Wazuh (planned) |
 | `/srv/bw-logs/error.log` | Nginx errors at the proxy layer (upstream timeouts, config issues, etc.). | CrowdSec (hub-installed parsers) | Wazuh (planned) |
-| `/srv/bw-logs/modsec_audit.log` | **Only WAF-triggered events** (`SecAuditLogParts ABCFHJKZ` with `RelevantOnly` selector): every CRS rule match with full request context. Currently detection-only, see [ModSecurity / OWASP CRS](#-modsecurity--owasp-crs-detection-only--work-in-progress). | Operator (manual review during exclusion tuning), CrowdSec (correlation with attack scenarios) | Wazuh (planned) |
+| `/srv/bw-logs/modsec_audit.log` | **Only WAF-triggered events** (`SecAuditLogParts ABCFHJKZ` with `RelevantOnly` selector): every CRS rule match with full request context. Currently detection-only, see [ModSecurity / OWASP CRS](#-modsecurity--owasp-crs-detection-only--work-in-progress). | Operator (manual review during exclusion tuning), CrowdSec (via error.log inline), **`modsec-tail.py` sidecar** (flattens each transaction to `/var/log/modsec-events/events.log` for Wazuh) | , |
+| `/var/log/modsec-events/events.log` | Flattened ModSecurity events from the `modsec-tail.py` sidecar: one clean JSON line per CRS-matched transaction (`srcip / method / path / http_code / engine / rule_ids / anomaly_score / band`). Sidecar runs as the dedicated `modsectail` user. | Wazuh agent (tails as JSON; manager rules 100300-100303 in [`wazuh-home/manager-modsec-rules.xml`](./wazuh-home/manager-modsec-rules.xml); `band=high` → #modsec Discord) | n/a |
+| `/var/log/fail2ban.log` | fail2ban's own log: sshd-jail bans / unbans / jail lifecycle. Present on every host running the jail. | fail2ban itself, Wazuh agent (tails as syslog; manager `fail2ban-file` decoder + rule 100401; ban → #fail2ban Discord) | n/a |
 | `/srv/bw-logs/bunkerweb.log`, `redis.log`, `scheduler.log`, `ui.log` | BW's own internal logs: scheduler runs, Redis state, web UI activity, top-level container output. | Operator (debugging) |, |
 | `/srv/bw-logs/letsencrypt/*` | certbot logs from BW's bundled ACME flow. **Rotated internally by BW**, not in scope for the host logrotate config. | Operator (cert renewal debugging) |, |
 | `/srv/logs/{main,backup,docker,system}/*.log` | Maintenance script logs, one file per phase per day. `main-YYYY-MM-DD.log` (orchestrator), `vault-backup-YYYY-MM-DD.log`, `update-YYYY-MM-DD.log` (docker), `system-autoupdate-YYYY-MM-DD.log`. 30-day retention enforced by `find -mtime +30 -delete` at the end of each phase script (NOT logrotate). | Operator, TrueNAS (pulled nightly via `truenas-script.sh`) | Wazuh (planned: structured JSONL status log per ideas.md #7 Phase A, then ingested by Phase B) |
@@ -899,31 +913,32 @@ Wazuh agents are installed and enrolled across three VMs in the homelab, with ve
 
 | VM | Agent state | What's actually shipping |
 |----|-------------|--------------------------|
-| Vaultwarden VM | Installed, enrolled, **stock defaults** | Nothing app-specific. No `<localfile>` entries for `vw-logs/` / `bw-logs/` / `main.sh` status; no custom FIM beyond defaults; no custom decoders or rules on the manager side scoped to this VM. Stock keepalives + base syscheck/inventory only. |
-| `proxy-home` VM | Installed, enrolled, **stock defaults** | Stock keepalives + base syscheck/inventory only. With dnsproxy gone, the proxy-home VM has nothing application-specific to ship. |
-| LAN Pi-hole VM | Installed, enrolled, **with custom localfile + sidecar daemon + manager-side rules** | `pihole-ftl-tail.py` daemon polls Pi-hole's FTL SQLite DB and emits structured JSON events to `/var/log/vault-dns/events.log`; agent ships those; manager rules 100250 / 100251 / 100252 / 100253 produce per-query alerts (resolved at level 3, Pi-hole-policy block at level 6, upstream no-answer at level 4) using Wazuh's built-in JSON decoder. Configuration in [`wazuh-home/`](./wazuh-home/). |
+| Vaultwarden VM | Installed, enrolled, **custom localfile + sidecar** | `modsec-tail.py` sidecar (dedicated `modsectail` user) flattens BunkerWeb's `modsec_audit.log` to `/var/log/modsec-events/events.log`; agent ships it; manager rules 100300-100303 tier by CRS anomaly score (`band=high` → #modsec Discord). Still stock for `vw-logs/` / `bw-logs/` / `main.sh` status and FIM (see [ideas.md](ideas.md) #7). |
+| `proxy-home` VM | Installed, enrolled, **installer-auto-discovered localfile** | The Wazuh agent installer auto-detected Squid and added the `/var/log/squid/access.log` localfile itself (no manual config); Wazuh's built-in squid decoder handles it, `action=TCP_DENIED` → #squid Discord. |
+| LAN Pi-hole VM | Installed, enrolled, **custom localfile + sidecar daemon** | `pihole-ftl-tail.py` daemon polls Pi-hole's FTL SQLite DB and emits structured JSON events to `/var/log/vault-dns/events.log`; agent ships those; manager rules 100250-100253 produce per-query alerts (resolved L3, Pi-hole-policy block L6, upstream no-answer L4) using the built-in JSON decoder. Config in [`wazuh-home/`](./wazuh-home/). |
+| All four home VMs (not the VPS) | fail2ban localfile | Each tails `/var/log/fail2ban.log`; manager `fail2ban-file` decoder + rule 100401 fire on an sshd-jail ban (→ #fail2ban Discord). The edge VPS runs fail2ban but has no Wazuh agent, so its bans aren't shipped. |
 
 The Wazuh apt repo (`packages.wazuh.com`) is configured on each VM so the agent gets pulled in by normal `apt upgrade` cycles, the nightly `system-update.sh` phase on the Vaultwarden VM, and standard unattended-upgrades elsewhere. `packages.wazuh.com` is on the Vaultwarden VM's Squid allowlist (`proxy-home/vault_domains_allow_proxy.txt`) for that reason. Upgrade procedure documented upstream: [Wazuh agent, Linux upgrade guide](https://documentation.wazuh.com/current/upgrade-guide/wazuh-agent/linux.html).
 
-The full Wazuh build-out for Vault-VM-internal logs (log shipping for `bw-logs/` + `vw-logs/` + `main.sh` JSON status, custom decoders, alert rules, Discord Active Response) is still ahead, tracked in [ideas.md](ideas.md) #7. The DNS visibility piece in [`wazuh-home/`](./wazuh-home/) is the first slice of it that's actually live.
+**Discord notifications are live** for four sources via one `custom-discord` integrator on the manager (per-channel webhooks, placeholders in the repo): ModSecurity attacks (`band=high`), DNS allowlist denials, Squid `TCP_DENIED`, and fail2ban bans. Decoders, rules, the integrator, and the `<integration>` blocks are all in [`wazuh-home/`](./wazuh-home/). Still ahead, tracked in [ideas.md](ideas.md) #7: shipping the Vault VM's own `bw-logs/` + `vw-logs/` and a `main.sh` JSON status log (to retire `DEADMAN_URL`), agent-down notifications, and FIM.
 
 ### Where logs do NOT go
 
 - **`stdout` for the application containers**, Vaultwarden's own log goes to `/srv/vw-logs/vaultwarden.log` (file mode), not container stdout. BW's logs likewise go to `/srv/bw-logs/`. Container stdout is bounded at 30 MB per container (`json-file` driver, 10m × 3 files) and only carries startup messages and unhandled errors. Don't `podman logs` for application-level events, read the files.
-- **Off-box, in real time, for the Vaultwarden VM itself**, log shipping to Wazuh is **not yet wired up** (the agent is enrolled with `wazuh-home` but stock defaults apply on the Vault VM, no `<localfile>` entries for `vw-logs/` / `bw-logs/`, see [Wazuh agent (current state)](#wazuh-agent-current-state) below). All centralized retention happens at TrueNAS pull time, nightly. The DNS visibility piece is the only Vault-VM-related log stream currently flowing live into Wazuh, and that's because it's tapped at the Pi-hole side, not on the Vault VM.
+- **Off-box, in real time, for the Vaultwarden VM's raw `vw-logs/` + `bw-logs/`**, not yet shipped to Wazuh (see [ideas.md](ideas.md) #7). The Vault VM agent **does** now ship the flattened ModSecurity events (`/var/log/modsec-events/events.log`) and `/var/log/fail2ban.log`, but the raw `vaultwarden.log` / `access.log` / `error.log` are still only pulled to TrueNAS nightly, not streamed live.
 
 ### Consumer summary
 
 - **CrowdSec**, tails `vaultwarden.log` + `access.log` + `error.log` + `modsec_audit.log` in real time, parses them, applies bouncer decisions back at BunkerWeb. The parser/scenario/whitelist files in `crowdsec/` are the contract between log format and detection rules.
 - **TrueNAS**, pulls the encrypted backup bundle + the four `/srv/logs/{main,backup,docker,system}/` phase logs via scp using the `fetcher` user (see [Off-site replication](#off-site-replication-truenas-via-cron)).
-- **Wazuh**, agent on the LAN Pi-hole VM ships the FTL-DB-sidecar's `/var/log/vault-dns/events.log` (structured JSON) live; manager rules 100251 / 100252 / 100253 in [`wazuh-home/`](./wazuh-home/) produce per-query alerts (resolved at level 3, Pi-hole-policy block at level 6, upstream no-answer at level 4) for the Vault VM. Agents on the Vaultwarden VM and `proxy-home` VM are enrolled but otherwise at stock defaults (no `vw-logs/` / `bw-logs/` shipping yet, see [ideas.md](ideas.md) #7).
+- **Wazuh**, four live pipelines into `wazuh-home`, each with per-channel Discord via the `custom-discord` integrator: DNS (Pi-hole FTL sidecar → rules 100250-100253), ModSecurity (Vault VM `modsec-tail` sidecar → 100300-100303, `band=high` pings), Squid (proxy-home access.log → built-in squid decoder, `TCP_DENIED` pings), and fail2ban (every host → custom `fail2ban-file` decoder + 100401). The Vault VM's own raw `vw-logs/` + `bw-logs/` and a `main.sh` JSON status log are still not shipped (see [ideas.md](ideas.md) #7).
 - **Operator**, `tail -f` for live debugging; log files are the source of truth for everything except the BW internal scheduler/UI/Redis logs (those are debug-only).
 
 ---
 
 ## 🔁 Log Rotation
 
-Vaultwarden, BunkerWeb's nginx workers, and the FTL-DB sidecar's output log all append indefinitely; none rotate themselves. Three host-side configs cover this across two VMs. They live in `/etc/logrotate.d/<name>` and are NOT checked into this repo (created by hand from the snippets below). Pi-hole's own `pihole.log` is rotated by Pi-hole's bundled logrotate setup, no extra config needed for that.
+Vaultwarden, BunkerWeb's nginx workers, the modsec-tail sidecar's output, and the FTL-DB sidecar's output all append indefinitely; none rotate themselves. Four host-side configs cover this across two VMs (three on the Vault VM, one on the Pi-hole VM). They live in `/etc/logrotate.d/<name>` and are NOT checked into this repo (created by hand from the snippets below). Pi-hole's own `pihole.log` is rotated by Pi-hole's bundled logrotate setup, no extra config needed for that.
 
 `copytruncate` is **load-bearing** in every config below: the standard logrotate mode (rename + create new file) changes the file's inode, and CrowdSec tails by file descriptor, it would keep reading the renamed (eventually compressed-and-deleted) file forever and miss new entries. `copytruncate` keeps the same inode and truncates in place, so its open fd keeps seeing fresh writes uninterrupted.
 
@@ -956,6 +971,22 @@ Vaultwarden, BunkerWeb's nginx workers, and the FTL-DB sidecar's output log all 
 ```
 
 The `letsencrypt/` subdir under `/srv/bw-logs/` is rotated internally by BunkerWeb's bundled certbot, the glob above won't recurse into it, which is intentional. Leave it alone.
+
+#### `/etc/logrotate.d/modsec-events`
+
+Bounds the `modsec-tail.py` sidecar's output log (the flattened ModSecurity events the Wazuh agent ships). `copytruncate` so both the sidecar's append handle and the Wazuh agent's read handle stay valid across rotation.
+
+```
+/var/log/modsec-events/events.log {
+    daily
+    rotate 14
+    compress
+    delaycompress
+    missingok
+    notifempty
+    copytruncate
+}
+```
 
 ### LAN Pi-hole VM
 
