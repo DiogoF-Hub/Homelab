@@ -1,0 +1,48 @@
+<!--
+  Vault VM: Wazuh agent <localfile> for the ModSecurity event stream.
+
+  Append this inside any <ossec_config> block in the Vault VM's
+  /var/ossec/etc/ossec.conf, then restart the agent:
+      sudo systemctl restart wazuh-agent
+      sudo grep modsec-events /var/ossec/logs/ossec.log | tail
+      # expect: Analyzing file: '/var/log/modsec-events/events.log'
+
+  Multiple <ossec_config> blocks at the top level are valid Wazuh
+  syntax; the agent merges them at load time. Easiest pattern is to
+  drop a new <ossec_config> below the stock ones rather than splice
+  into existing blocks.
+
+  Single source: /var/log/modsec-events/events.log
+
+  Flat JSON, one line per ModSecurity audit transaction, emitted by the
+  sidecar at sidecar/modsec-tail.py. Fields: event_type / ts / srcip /
+  method / path / http_code / engine / rule_ids / n_rules /
+  anomaly_score / band / unique_id / hostname.
+
+  IMPORTANT: this tails the sidecar's OUTPUT, not
+  /srv/bw-logs/modsec_audit.log directly. The raw audit log is JSON
+  too, but Wazuh's JSON decoder collapses its messages[] array into one
+  opaque string, so the matched rule IDs / severities / anomaly score
+  are not individually filterable. The sidecar flattens them into clean
+  scalar fields first. See manager-modsec-rules.xml for the full
+  rationale.
+
+  log_format=json tells the agent to ship raw JSON lines; the manager's
+  built-in JSON decoder auto-extracts every key into data.* fields, so
+  manager-modsec-rules.xml just filters by field=value without a custom
+  decoder.
+
+  Rotation of this file is handled by /etc/logrotate.d/modsec-events
+  (host-side config, not in the repo; canonical text in
+  Vaultwarden/README.md § Log Rotation). copytruncate so both the
+  sidecar's append handle and the agent's read handle stay valid.
+-->
+
+<ossec_config>
+
+  <localfile>
+    <log_format>json</log_format>
+    <location>/var/log/modsec-events/events.log</location>
+  </localfile>
+
+</ossec_config>

@@ -1,0 +1,97 @@
+<!--
+  wazuh-home (manager): rules for BunkerWeb ModSecurity audit events.
+
+  Append inside /var/ossec/etc/rules/local_rules.xml on the manager.
+  After editing, validate + restart:
+      sudo /var/ossec/bin/wazuh-analysisd -t
+      sudo systemctl restart wazuh-manager
+
+  Source: the flat JSON events emitted by sidecar/modsec-tail.py on the
+  Vault VM (one line per ModSecurity audit transaction), tailed by the
+  Vault VM Wazuh agent via vault-modsec-agent.localfile.xml. Wazuh's
+  built-in JSON decoder auto-extracts each field into data.*; no custom
+  decoder needed. The JSON `srcip` field is auto-promoted to Wazuh's
+  static srcip slot, so <srcip> tags / GeoIP / dashboards work.
+
+  WHY A SIDECAR (not the raw modsec_audit.log):
+  Wazuh collapses transaction.messages[] (an array of objects holding
+  ruleId / severity / the 949110 score) into ONE opaque string. The
+  sidecar flattens it into clean scalar fields so these rules can tier
+  on a value instead of regex-diving a stringified array.
+
+  TIERING IS BY ANOMALY SCORE, NOT http_code.
+  In this stack http_code is backwards as a severity signal: the
+  heaviest multi-vector RCE/SQLi probes hit POST / (a nonexistent path)
+  and return 404, while a harmless missing-User-Agent scan returns 403.
+  The CRS anomaly score (rule 949110, "Total Score: N") is the clean
+  signal. The sidecar maps it to a `band`:
+      band=none : no 949110 fired. Lone Missing-User-Agent probes,
+                  http->https redirects, single low-severity matches.
+                  Noise.
+      band=low  : score 1-9    (one CRITICAL rule; .env / .git
+                  secret-file scanning). Routine scanning.
+      band=mid  : score 10-29  (a couple CRITICAL rules).
+      band=high : score >= 30  (multi-vector RCE / SQLi / XSS). Real
+                  attack. This is the Discord tier (Phase 2).
+
+  WORKS BEFORE AND AFTER THE ENGINE FLIP.
+  These rules are identical whether MODSECURITY_SEC_RULE_ENGINE is
+  DetectionOnly or On: in DetectionOnly the score is what modsec WOULD
+  have blocked; in On it's what it DID block. The `engine` field rides
+  along in each event so the alert shows which mode was active. No rule
+  changes needed when you flip the engine.
+
+  Four-rule chain (IDs 100300-100303; DNS pipeline uses 100250-100253,
+  retired text-log pipeline used 100190-100210, so this block is free):
+    100300 (level 0):  base. Every modsec event (event_type=bw_modsec).
+                       Archived with logall_json; never alerts. Other
+                       rules chain off it via if_sid so the discriminator
+                       check doesn't repeat.
+    100301 (level 3):  band=none. Probe / redirect noise.
+    100302 (level 7):  band=low|mid. Routine scoring scans.
+    100303 (level 11): band=high. Real multi-vector attack. The Discord
+                       integration (Phase 2) hooks this rule id.
+
+  Note on field matching: Wazuh treats <field> values as regex. The
+  band values are a closed set (none/low/mid/high), but we anchor with
+  ^...$ anyway so e.g. a future "none2" couldn't accidentally match.
+-->
+<group name="modsecurity,bunkerweb,vaultwarden">
+
+  <!-- Base: every event the sidecar emits, scoped via event_type.
+       Level 0 = archived (with logall_json) but never alerts. -->
+  <rule id="100300" level="0">
+    <decoded_as>json</decoded_as>
+    <field name="event_type">bw_modsec</field>
+    <description>BunkerWeb ModSecurity event: $(method) $(path) [$(rule_ids)]</description>
+  </rule>
+
+  <!-- band=none: no anomaly threshold crossed. Missing-User-Agent
+       probes, http->https redirects, isolated low-severity matches.
+       Pure scanner noise; kept low so it stays in the dashboard
+       without paging anyone. -->
+  <rule id="100301" level="3">
+    <if_sid>100300</if_sid>
+    <field name="band" type="pcre2">^none$</field>
+    <description>ModSec probe (no anomaly threshold): $(srcip) $(method) $(path)</description>
+  </rule>
+
+  <!-- band=low|mid: CRS anomaly threshold crossed at a routine level
+       (score 1-29). Typically .env / .git secret-file scanning and
+       similar automated probing. Worth seeing, not worth paging. -->
+  <rule id="100302" level="7">
+    <if_sid>100300</if_sid>
+    <field name="band" type="pcre2">^(low|mid)$</field>
+    <description>ModSec scan: $(srcip) $(method) $(path) [score $(anomaly_score), $(rule_ids)]</description>
+  </rule>
+
+  <!-- band=high: score >= 30. Multi-vector RCE / SQLi / XSS, a real
+       attack rather than a drive-by probe. High level so it stands out
+       and so the Phase 2 Discord integration can fire on this rule. -->
+  <rule id="100303" level="11">
+    <if_sid>100300</if_sid>
+    <field name="band" type="pcre2">^high$</field>
+    <description>ModSec ATTACK ($(engine)): $(srcip) $(method) $(path) [score $(anomaly_score), rules $(rule_ids)]</description>
+  </rule>
+
+</group>

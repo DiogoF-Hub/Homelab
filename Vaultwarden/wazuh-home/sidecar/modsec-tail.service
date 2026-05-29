@@ -1,0 +1,89 @@
+# systemd service unit for the ModSecurity audit-log tail sidecar.
+#
+# Install on the Vault VM (host, not inside the container):
+#     # dedicated unprivileged system user, no shell, no home
+#     sudo adduser --system --no-create-home --group modsectail
+#
+#     # writable dirs it owns (output log + offset state)
+#     sudo mkdir -p /var/log/modsec-events /var/lib/modsec-tail
+#     sudo chown modsectail:modsectail /var/log/modsec-events /var/lib/modsec-tail
+#     sudo chmod 0755 /var/log/modsec-events
+#     sudo chmod 0750 /var/lib/modsec-tail
+#
+#     sudo install -m 0755 modsec-tail.py      /usr/local/sbin/modsec-tail.py
+#     sudo install -m 0644 modsec-tail.service /etc/systemd/system/
+#     sudo systemctl daemon-reload
+#     sudo systemctl enable --now modsec-tail
+#
+# Verify:
+#     sudo systemctl status modsec-tail
+#     sudo journalctl -u modsec-tail -f
+#     sudo tail -f /var/log/modsec-events/events.log
+#
+# WHICH USER: a dedicated unprivileged user (modsectail), NOT root.
+# Unlike the Pi-hole FTL sidecar (which needs root to read Pi-hole's
+# locked-down SQLite DB on a less-sensitive box), this runs on the
+# crown-jewels VM, so it gets least privilege. It only needs to:
+#   - READ /srv/bw-logs/modsec_audit.log  (mode 0644, world-readable as
+#     written by the rootless-podman bunkerweb container, so the
+#     dedicated user reads it with NO group/ACL wiring needed)
+#   - WRITE /var/log/modsec-events/ and /var/lib/modsec-tail/
+# It opens no sockets and runs no subprocesses.
+#
+# The sidecar's output log is mode 0644 (created under the default
+# umask), so the Wazuh agent's logcollector can read it regardless of
+# which user that runs as. The contents (attack metadata) are no more
+# sensitive than the source audit log, which is already 0644.
+
+[Unit]
+Description=ModSecurity audit-log tail to Wazuh (BunkerWeb WAF visibility)
+Documentation=https://github.com/DiogoF-Hub/Homelab/blob/main/Vaultwarden/wazuh-home/README.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=modsectail
+Group=modsectail
+ExecStart=/usr/local/sbin/modsec-tail.py
+
+# Auto-restart on crash; back off so a tight crash loop doesn't peg
+# the CPU. The saved byte offset means a restart resumes without
+# dropping or replaying events.
+Restart=on-failure
+RestartSec=15s
+
+# Log to journald only. Inspect with:
+#   sudo journalctl -u modsec-tail -f
+StandardOutput=journal
+StandardError=journal
+
+# --- hardening ---
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateNetwork=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelLogs=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
+RestrictNamespaces=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged @resources
+# No network needed at all (writes a local file; the agent ships it).
+RestrictAddressFamilies=AF_UNIX
+CapabilityBoundingSet=
+# Whitelist the only paths the script writes to. /srv/bw-logs stays
+# readable (ProtectSystem=strict makes it read-only, not unreadable).
+ReadWritePaths=/var/log/modsec-events /var/lib/modsec-tail
+
+[Install]
+WantedBy=multi-user.target
