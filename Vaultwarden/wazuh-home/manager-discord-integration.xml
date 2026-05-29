@@ -1,0 +1,64 @@
+<!--
+  wazuh-home (manager): Discord integration blocks for custom-discord.
+
+  Append these inside /var/ossec/etc/ossec.conf on the manager, then
+  restart:  sudo systemctl restart wazuh-manager
+
+  Each block routes a source's alerts to the custom-discord integrator
+  (integrations/custom-discord.py). The PER-CHANNEL WEBHOOK lives in that
+  script's WEBHOOKS map, NOT here, so these blocks carry no secrets and
+  there is no <hook_url>. The script also applies the final data-field
+  filter these blocks can't express (dns drops status=
+  blocked-external-null-reply; squid keeps only action=TCP_DENIED).
+
+  Scope = which alerts even reach the script:
+    - modsec : group modsecurity, level >= 11  -> rule 100303 (band=high)
+    - dns    : rule 100252 (Pi-hole policy blocks); the script narrows to
+               status=blocked-regex (allowlist denial), so resolved queries
+               and upstream non-answers never ping
+    - squid  : group squid                      -> all squid alerts; the
+               script keeps only action=TCP_DENIED
+    - fail2ban: rule 100401 (host banned, from the custom fail2ban-file
+               decoder; the rule already filters to f2b_action=Ban)
+
+  If wazuh-integratord logs that it skipped an integration for a missing
+  <hook_url>, add a dummy <hook_url>http://127.0.0.1</hook_url> to that
+  block (the script ignores argv[3] and uses its own WEBHOOKS map).
+
+  Wire a future source (fail2ban, agent-down, ...) by adding its block
+  here, a WEBHOOKS key in the script, and un-commenting its branch in
+  the script's main().
+-->
+
+<ossec_config>
+  <integration>
+    <name>custom-discord</name>
+    <group>modsecurity</group>
+    <level>11</level>
+    <alert_format>json</alert_format>
+  </integration>
+</ossec_config>
+
+<ossec_config>
+  <integration>
+    <name>custom-discord</name>
+    <rule_id>100252</rule_id>
+    <alert_format>json</alert_format>
+  </integration>
+</ossec_config>
+
+<ossec_config>
+  <integration>
+    <name>custom-discord</name>
+    <group>squid</group>
+    <alert_format>json</alert_format>
+  </integration>
+</ossec_config>
+
+<ossec_config>
+  <integration>
+    <name>custom-discord</name>
+    <rule_id>100401</rule_id>
+    <alert_format>json</alert_format>
+  </integration>
+</ossec_config>
