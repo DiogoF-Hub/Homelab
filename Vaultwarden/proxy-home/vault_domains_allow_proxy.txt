@@ -51,7 +51,12 @@ api.cloudflare.com
 auth.docker.io
 registry-1.docker.io
 download.docker.com
+# Docker Hub serves image blobs from two CDN hostnames, Cloudflare and
+# AWS CloudFront. Despite looking like typos of each other, both are real
+# and a pull lands on either depending on routing; need both or image
+# downloads fail intermittently (TCP_DENIED on whichever one is missing).
 production.cloudflare.docker.com
+production.cloudfront.docker.com
 dl-cdn.alpinelinux.org
 
 # ================================

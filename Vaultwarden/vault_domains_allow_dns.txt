@@ -74,10 +74,13 @@ www.cloudflare.com
 api.cloudflare.com
 
 # === Docker / Podman / Containers ===
+# Two CDN hostnames, Cloudflare + AWS CloudFront (not typos of each
+# other); Docker Hub uses both, so allow both.
 auth.docker.io
 registry-1.docker.io
 download.docker.com
 production.cloudflare.docker.com
+production.cloudfront.docker.com
 dl-cdn.alpinelinux.org
 
 # === GitHub / Dev tools ===
