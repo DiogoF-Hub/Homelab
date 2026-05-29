@@ -1,6 +1,27 @@
-# Wazuh DNS visibility for the Vaultwarden VM
+# Wazuh visibility + alerting for the Vaultwarden stack
 
-This folder holds the Wazuh-side configuration that gives full visibility into every DNS query the Vaultwarden VM makes, by routing the VM's DNS through the homelab's existing LAN Pi-hole, tailing Pi-hole's FTL SQLite database with a small sidecar daemon, and shipping structured per-query events into Wazuh.
+This folder holds the Wazuh-side configuration for the Vaultwarden stack: structured log pipelines into the Wazuh manager (`wazuh-home`), plus per-source Discord notifications via one integrator. It started as DNS-only visibility and has grown to four sources.
+
+## Pipelines at a glance
+
+| Source | Surfaces | Manager rules | Discord (channel / when) |
+|--------|----------|---------------|--------------------------|
+| **DNS** (Pi-hole FTL sidecar) | every Vault VM DNS query; allowlist denials | 100250-100253 | #dns, `status=blocked-regex` |
+| **ModSecurity** (BunkerWeb WAF) | CRS matches, tiered by anomaly score | 100300-100303 | #modsec, `band=high` (score ≥ 30) |
+| **fail2ban** (all hosts) | SSH brute-force bans | 100400-100401 | #fail2ban, every ban |
+| **Squid** (proxy-home) | egress-allowlist denials | built-in `squid` group | #squid, `action=TCP_DENIED` |
+
+One integrator, `integrations/custom-discord.py`, fans these out to per-channel Discord webhooks (the webhook map + the final data-field filter live in the script; `manager-discord-integration.xml` has the `<integration>` blocks that decide which alerts reach it). Rule-ID map: DNS 100250-100253, ModSecurity 100300-100303, fail2ban 100400-100401 (the retired text-log DNS pipeline used 100190-100210; keep new pipelines clear of those).
+
+Squid has no files in this folder beyond its `<integration>` block: the Wazuh agent installer auto-discovers `/var/log/squid/access.log` on proxy-home, and the squid decoder/rules are built into Wazuh, so there's nothing custom to deploy for it.
+
+The **DNS pipeline is documented in full below** (it's the most involved, with a sidecar daemon). ModSecurity, fail2ban, and Discord each get a short section further down pointing at their snippet files, whose header comments carry the detailed rationale.
+
+---
+
+## DNS visibility (Pi-hole FTL)
+
+This routes the VM's DNS through the homelab's existing LAN Pi-hole, tails Pi-hole's FTL SQLite database with a small sidecar daemon, and ships structured per-query events into Wazuh.
 
 It is the successor to two earlier iterations:
 
@@ -14,7 +35,7 @@ Two things the Vault VM gets out of this:
 1. **Visibility**: every DNS query the VM makes (Let's Encrypt endpoints, Cloudflare tunnel, CrowdSec hub, apt mirrors, the Vaultwarden domain itself, Wazuh feeds) shows up as a Wazuh alert in the dashboard, scoped to the Vault VM's source IP, with full per-query metadata (qtype, query, status, blocked-or-not). If the host gets compromised and starts phoning home, the resolution attempt is captured before egress even tries.
 2. **DoH-encrypted upstream + Family-DNS filtering**, inherited from Pi-hole's existing `adguard/dnsproxy` upstream. Same upstream encryption story as the old dedicated-DoH-gateway setup, no plaintext-on-LAN sniffability.
 
-What this **doesn't** do (yet): alert on *unexpected* domains specifically. Right now every Vault VM DNS query produces a level-3 alert (resolved) or level-6 alert (blocked). The next iteration will add per-domain allowlist matching against the Squid allowlist (`Vaultwarden/proxy-home/vault_domains_allow_proxy.txt`), generating a higher-level alert only on misses. Sketched below under "Planned next step"; full design tracked in `Vaultwarden/ideas.md` idea #7 Phase C.
+Unexpected-domain alerting is already handled: the Vault VM resolves through a Pi-hole `vaultwarden-vm` group with a `.*` deny-regex + allowlist, so any non-allowlisted lookup comes back `status=blocked-regex`, fires rule 100252, and pings #dns. That subsumes the "allowlist-anomaly" feature originally sketched for a Wazuh integrator; see `Vaultwarden/ideas.md` idea #7 Phase C.
 
 ## Architecture
 
@@ -251,12 +272,40 @@ sudo systemctl restart wazuh-manager
 - **Status code → label drift**: Pi-hole's FTL enum (`STATUS_LABELS` in the script) can shift across major versions. If you see events with `status=status-N` (raw integer fallback), Pi-hole emitted a code we don't have a label for; add it to the dict and restart the sidecar. The data is never lost: `status_code` is always the raw integer.
 - **logrotate**: handled by `/etc/logrotate.d/vault-dns`, a host-side config not checked into the repo (matches the convention used for `vaultwarden` and `bunkerweb` logrotate configs in this stack). Canonical config text lives in `Vaultwarden/README.md` § "Log Rotation → LAN Pi-hole VM". Daily rotation, keep 14 compressed, `copytruncate` so the Wazuh agent's open fd stays valid across rotations. Picked up automatically by Debian's daily `logrotate` cron / systemd timer; nothing extra to schedule.
 
-## Planned next step (not yet implemented)
+## ModSecurity events (BunkerWeb WAF)
 
-Right now every Vault VM DNS query is alerted at level 3 (resolved) or level 6 (blocked). The next iteration adds **allowlist-anomaly detection**:
+BunkerWeb's `modsec_audit.log` is JSON, but Wazuh's JSON decoder collapses its `messages[]` array (where the matched rule IDs / severities live) into one opaque string. So a sidecar on the **Vault VM** flattens each transaction into one clean line first.
 
-- A fourth rule (e.g. 100253, level 7) fires when the resolved query's domain is NOT on the Squid allowlist (`Vaultwarden/proxy-home/vault_domains_allow_proxy.txt`).
-- Implementation option: extend the sidecar to read the allowlist file at startup (and on SIGHUP), set an extra boolean field `allowed: true|false` on each event, and add a rule that filters on `allowed=false`. Avoids needing a Wazuh integrator entirely; keeps the merge in one place.
-- Alternative: use Wazuh's `<integration>` daemon to invoke a script per 100251 alert (less efficient but doesn't require touching the sidecar).
+- `sidecar/modsec-tail.py` , tails `/srv/bw-logs/modsec_audit.log`, emits flat events (`srcip`, `method`, `path`, `http_code`, `engine`, `rule_ids`, `anomaly_score`, `band`, ...) to `/var/log/modsec-events/events.log`. Runs as a dedicated unprivileged **`modsectail`** user (least privilege on the crown-jewels VM; the Pi-hole sidecar runs as root only because it reads a root-owned DB on a less-sensitive box). Byte-offset state for gap-free resume, IPv4/IPv6, stdlib only, no shell-out.
+- `sidecar/modsec-tail.service` , hardened systemd unit.
+- `vault-modsec-agent.localfile.xml` , agent tails the events log.
+- `manager-modsec-rules.xml` , rules 100300 (base, L0) / 100301 (band=none, L3) / 100302 (band=low|mid, L7) / 100303 (band=high, L11).
 
-Full design: `Vaultwarden/ideas.md` idea #7, Phase C, subsection "Allowlist-anomaly alert for the Vault VM".
+Tiering is by **CRS anomaly score** (rule 949110's "Total Score: N"), NOT http_code, which is backwards here: the heaviest multi-vector attacks hit `POST /` and return 404 while harmless missing-UA scans return 403. Discord fires on `band=high` (100303) only. Works identically before and after the engine flip (`DetectionOnly` -> `On`); the `engine` field rides along so the alert reads "would block" vs "blocked". Full rationale in the file headers.
+
+## fail2ban bans (all hosts)
+
+Every home VM running the sshd jail (vault, manager, proxy-home, pihole) tails its own `/var/log/fail2ban.log`; the manager decodes it and rule 100401 fires on a ban. The edge VPS runs fail2ban too but has no Wazuh agent, so its bans aren't shipped, the most internet-exposed host is the one gap in this picture.
+
+- `fail2ban-agent.localfile.xml` , the `<localfile>` (add to every agent).
+- `manager-fail2ban-decoder.xml` , custom `fail2ban-file` decoder. The **built-in** fail2ban decoder only handles syslog-delivered fail2ban (`program_name=fail2ban`); this stack tails the dedicated log, whose lines the built-in doesn't match (confirmed via `wazuh-logtest`). The prematch anchors on the `[pid]: LEVEL [jail]` structure, NOT the word "fail2ban", which the syslog pre-decoder strips as the program token. Captures jail / `f2b_action` / srcip (IPv4 + IPv6). It's `f2b_action` not `action` because `action` is a reserved Wazuh static field that a rule can't match with `<field>`.
+- `manager-fail2ban-rules.xml` , 100400 (base, L0) / 100401 (ban, L10).
+
+Discord fires on every ban (100401).
+
+## Discord notifications (custom-discord integrator)
+
+`integrations/custom-discord.py` is one Wazuh integrator all four sources route through. It holds a **per-channel webhook map** (placeholders in the repo; real URLs filled only on the manager, never committed, same convention as `.env`) and applies the final data-field filter each source needs (dns: `status=blocked-regex`; squid: `action=TCP_DENIED`; modsec: `band=high`; fail2ban: rule 100401). It posts native Discord embeds (GeoIP-enriched for public source IPs), stdlib-only (urllib).
+
+- `integrations/custom-discord.py` , install at manager `/var/ossec/integrations/custom-discord` (mode 0750, `root:wazuh`; note: no `.py`, that's the name integratord calls).
+- `manager-discord-integration.xml` , the `<integration>` blocks (one per source, scoped by group / rule_id / level) for the manager's `ossec.conf`.
+
+Gotcha baked into the script: Discord's API is Cloudflare-fronted and **403s the default `Python-urllib` User-Agent**, so `send_discord` sets a `DiscordBot (...)` UA. The manager needs egress to `discord.com:443`.
+
+## What's still ahead
+
+The DNS allowlist-anomaly alerting once sketched here is done (Pi-hole regex + rule 100252, above). Remaining Wazuh build-out, tracked in `Vaultwarden/ideas.md` idea #7:
+
+- Vault VM maintenance-status alerting (structured JSON status log from `main.sh` + failure rules + a no-run-in-25h deadman-equivalent). Phase A not built yet; note the modsec pipeline took 100300-100303, so those rules need fresh IDs.
+- Agent-down notifications (rule 504). Investigated and parked: the nightly reboots show as clean stop/start (506/503) within the ~10-min disconnect threshold so they don't false-fire, but the channel isn't wired.
+- Shipping the Vault VM's own `vw-logs/` + `bw-logs/` and FIM on `/srv/vw-data`, compose files, etc.
