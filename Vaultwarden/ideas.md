@@ -35,7 +35,9 @@ README §Minisign Key Pair Generation, README §Backup and Redundancy.
 > **Current plan:** keep `DEADMAN_URL` as the simple-to-set-up stopgap.
 > Once Wazuh (#7) is deployed, alerting moves to Wazuh-native rules +
 > Discord notifications and `DEADMAN_URL` gets retired after a 30-day
-> overlap period.
+> overlap period. (Update: Wazuh + Discord are now live for *security*
+> events, but the maintenance-failure rules that would actually replace
+> this deadman aren't built yet, see #7, so `DEADMAN_URL` stays.)
 
 ### What
 
@@ -436,6 +438,28 @@ README §Automation Scripts.
 
 ## 7. Wazuh SIEM rollout, structured logs, agent, alerts, Discord
 
+> **Status, partially DONE (the Discord payoff is live for security events).**
+> One `custom-discord` integrator on the manager now pings per-source Discord
+> channels for: ModSecurity attacks (rule 100303, band=high), DNS allowlist
+> denials (100252, status=blocked-regex), Squid egress denials (TCP_DENIED),
+> and fail2ban bans (100401). Decoders, rules, the integrator, and the
+> `<integration>` blocks live in `wazuh-home/` (see its README). Rule-ID
+> allocation so far: DNS 100250-100253, ModSecurity 100300-100303, fail2ban
+> 100400-100401.
+>
+> **Still pending:** Phase A (structured JSON status log from `main.sh`) plus
+> the maintenance-failure / no-run-in-25h rules that would let Discord replace
+> `DEADMAN_URL` (#2); agent-down notifications (rule 504, investigated and
+> parked, the nightly reboots show as clean stop/start 506/503 within the
+> ~10-min disconnect threshold so they don't false-fire); shipping the Vault
+> VM's own `vw-logs/` + `bw-logs/`; FIM. Phase B (manager + agents) is done.
+>
+> NOTE the implementation diverged from the Phase C sketch below: it uses
+> Wazuh's `<integration>` integrator daemon (one `custom-discord.py` with a
+> per-channel webhook map), NOT the Active Response approach sketched there.
+> And the maintenance rules sketched at id 100300 must move, 100300-100303
+> are now the modsec pipeline; use 100500+.
+
 The single "proper monitoring" idea. Everything in the current stack that
 resembles "did something break? notify me", deadman pings, tail-and-grep
 logs, manual `podman ps` checks, collapses into one SIEM. Big build, but
@@ -630,10 +654,11 @@ reference. Skip directly to "What's left" above for the current plan.
 **Rules (`local_rules.xml` on the manager, version-controlled in this
 repo alongside compose files, rules-as-code):**
 
-> Rule IDs in the 100190 / 100200 range are already in use by the DNS
-> visibility chain (`wazuh-home/manager-rules.xml`). The example IDs below
-> have been bumped to the 100300 range to keep namespaces clean once
-> these get implemented.
+> Rule-ID ranges already in use: DNS 100250-100253, ModSecurity
+> 100300-100303, fail2ban 100400-100401 (all in `wazuh-home/`). The example
+> maintenance IDs below were drafted at 100300, but that range is now the
+> modsec pipeline, so use a fresh range (e.g. 100500+) when implementing
+> these.
 
 ```xml
 <rule id="100300" level="12">

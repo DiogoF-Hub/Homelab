@@ -466,17 +466,31 @@ This is a host-level kernel setting, applies to every container.
 ### Wazuh agent (if matching the reference setup)
 
 The reference setup runs the Wazuh agent on every VM (Vaultwarden VM +
-`proxy-home` VM + LAN Pi-hole VM), enrolled with a dedicated
-`wazuh-home` manager. On the Vaultwarden VM and `proxy-home` VM the
-agent runs with stock defaults, binary present, kept patched via apt,
-talking to the manager. The LAN Pi-hole VM is the one with custom
-config: a sidecar daemon (`pihole-ftl-tail.py`) polls Pi-hole's FTL
-SQLite DB and emits structured JSON events to
-`/var/log/vault-dns/events.log`; the agent tails that log; manager
-rules 100250 / 100251 / 100252 / 100253 produce per-query alerts. See
-[`wazuh-home/README.md`](./wazuh-home/README.md) for the full apply
-procedure; idea #7 in `ideas.md` covers the wider SIEM rollout for
-`vw-logs/` / `bw-logs/`.
+`proxy-home` VM + LAN Pi-hole VM + `wazuh-home` itself), enrolled with a
+dedicated `wazuh-home` manager. What each ships:
+
+- **Vaultwarden VM**, a `modsec-tail.py` sidecar (runs as a dedicated
+  unprivileged `modsectail` user) flattens BunkerWeb's `modsec_audit.log`
+  into `/var/log/modsec-events/events.log`; the agent tails that; manager
+  rules 100300-100303 tier WAF events by CRS anomaly score.
+- **`proxy-home` VM**, the agent installer auto-discovers Squid's
+  `/var/log/squid/access.log` (no manual config; built-in squid decoder).
+- **LAN Pi-hole VM**, a `pihole-ftl-tail.py` sidecar polls Pi-hole's FTL
+  SQLite DB and emits per-query JSON to `/var/log/vault-dns/events.log`;
+  manager rules 100250-100253.
+- **The four home VMs running the sshd jail** (vault, manager,
+  proxy-home, pihole) each tail `/var/log/fail2ban.log`; manager
+  `fail2ban-file` decoder + rule 100401 fire on a ban. The edge VPS runs
+  fail2ban too but has no Wazuh agent, so its bans aren't shipped.
+
+All four sources also fan out to per-channel Discord via one
+`custom-discord` integrator. Decoders, rules, sidecars, localfiles, and
+the integrator all live in [`wazuh-home/`](./wazuh-home/); follow its
+README for the full apply procedure (the `modsec-tail.service` and
+`pihole-ftl-tail.service` headers carry the per-host install commands,
+and README §Log Rotation has the `modsec-events` + `vault-dns` logrotate
+text). Idea #7 in `ideas.md` covers the still-pending SIEM rollout for
+`vw-logs/` / `bw-logs/` + a `main.sh` status log.
 
 If you don't have a Wazuh manager and don't plan to add one, skip this
 sub-section entirely.
@@ -484,8 +498,10 @@ sub-section entirely.
 Install the agent + apt repo (from Wazuh's official install guide for
 the version you're standardising on). Confirm `packages.wazuh.com` is
 in `proxy-home/vault_domains_allow_proxy.txt` so the apt fetch flows
-through Squid (Phase 4 wires Squid up; the agent install can wait
-until after Phase 4 if it's blocking on Squid availability).
+through Squid (Phase 4 wires Squid up; the agent install can wait until
+after Phase 4 if it's blocking on Squid availability). The Vaultwarden
+VM's `modsec-tail` sidecar can only go in after the BunkerWeb stack is
+up (Phase 10+), since it tails `/srv/bw-logs/`.
 
 ## Phase 3, prerequisites on other hosts
 
