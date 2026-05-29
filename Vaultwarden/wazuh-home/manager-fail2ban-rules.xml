@@ -1,0 +1,33 @@
+<!--
+  wazuh-home (manager): rules for fail2ban bans (paired with the
+  fail2ban-file decoder in manager-fail2ban-decoder.xml).
+
+  Append inside /var/ossec/etc/rules/local_rules.xml on the manager.
+  Validate + restart:
+      sudo /var/ossec/bin/wazuh-analysisd -t
+      sudo systemctl restart wazuh-manager
+
+  Source: /var/log/fail2ban.log on the four home hosts running fail2ban
+  (vault, manager, proxy-home, pihole; localfile in
+  fail2ban-agent.localfile.xml). The edge VPS runs fail2ban too but has
+  no Wazuh agent, so its bans are not covered. The fail2ban-file
+  decoder extracts jail / f2b_action / srcip; srcip is auto-promoted to
+  Wazuh's static srcip slot so <srcip> tags / GeoIP work.
+
+  Two rules:
+    100400 (level 0):  any decoded fail2ban-file line. Base, never alerts.
+    100401 (level 10): f2b_action=Ban, a host was banned (SSH brute force
+                       tripped the sshd jail). The Discord integration
+                       hooks this rule id.
+-->
+<group name="fail2ban,">
+  <rule id="100400" level="0">
+    <decoded_as>fail2ban-file</decoded_as>
+    <description>fail2ban (dedicated log) event.</description>
+  </rule>
+  <rule id="100401" level="10">
+    <if_sid>100400</if_sid>
+    <field name="f2b_action">^Ban$</field>
+    <description>fail2ban: host $(srcip) banned on jail $(jail).</description>
+  </rule>
+</group>

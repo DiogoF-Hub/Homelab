@@ -1,0 +1,42 @@
+<!--
+  wazuh-home (manager): custom decoder for fail2ban's dedicated log
+  (/var/log/fail2ban.log).
+
+  Append to /var/ossec/etc/decoders/local_decoder.xml on the manager.
+  Validate + restart:
+      sudo /var/ossec/bin/wazuh-analysisd -t
+      sudo systemctl restart wazuh-manager
+
+  WHY a custom decoder: Wazuh's built-in "fail2ban" decoder targets
+  fail2ban delivered via SYSLOG (program_name=fail2ban). This stack tails
+  fail2ban's own /var/log/fail2ban.log, whose lines look like:
+      2026-05-29 17:45:00,000 fail2ban.actions  [654]: NOTICE  [sshd] Ban 1.2.3.4
+  The built-in does NOT match that format (confirmed: wazuh-logtest
+  returned "No decoder matched").
+
+  KEY DETAIL: the <prematch> anchors on the `[pid]: LEVEL [jail]`
+  structure, NOT the word "fail2ban". With <log_format>syslog</log_format>
+  the pre-decoder consumes the "fail2ban.actions" token as the program,
+  so by the time the decoder runs "fail2ban" is gone from the string it
+  sees; the `[654]: NOTICE [sshd]` part remains. (This bit cost a few
+  iterations; the working prematch came from a known-good decoder.)
+
+  Two deliberate adaptations from that known-good decoder:
+   - named fail2ban-file (not "fail2ban") so it doesn't collide with the
+     built-in decoder of the same name.
+   - order field is f2b_action (not "action"); "action" is a reserved
+     Wazuh static field and can't be matched with <field> in a rule.
+   - srcip uses (\S+)$ so it captures IPv4 AND IPv6 (the original was
+     IPv4-only).
+
+  Paired rules: manager-fail2ban-rules.xml (100400 base + 100401 ban).
+-->
+<decoder name="fail2ban-file">
+  <prematch>[\d+]:\s*\w+\s*[\w*]</prematch>
+</decoder>
+
+<decoder name="fail2ban-file">
+  <parent>fail2ban-file</parent>
+  <regex>[(\d+)]:\s*(\w+)\s*[(\w*)]\s*(\w*)\s*(\S+)$</regex>
+  <order>process_id, log_level, jail, f2b_action, srcip</order>
+</decoder>

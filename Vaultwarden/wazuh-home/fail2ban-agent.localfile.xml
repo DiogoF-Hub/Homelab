@@ -1,0 +1,29 @@
+<!--
+  Wazuh agent <localfile> for fail2ban's dedicated log.
+
+  Append inside any <ossec_config> block in /var/ossec/etc/ossec.conf on
+  EVERY host running fail2ban, then restart that agent (on the manager
+  host, restart wazuh-manager instead):
+      sudo systemctl restart wazuh-agent
+      sudo grep fail2ban.log /var/ossec/logs/ossec.log | tail
+      # expect: Analyzing file: '/var/log/fail2ban.log'
+
+  In this stack that's the four home hosts (vault, manager, proxy-home,
+  pihole), each running the same sshd jail (jail.local: maxretry=3 /
+  findtime=10m / bantime=1h). The edge VPS runs fail2ban too but has NO
+  Wazuh agent, so its bans are not shipped here. fail2ban
+  writes ban events to /var/log/fail2ban.log; the manager decodes them
+  with the fail2ban-file decoder (manager-fail2ban-decoder.xml) and rule
+  100401 fires on a ban.
+
+  log_format=syslog: plain text lines. NOTE the manager-side decoder
+  anchors on the `[pid]: LEVEL [jail]` structure rather than the
+  "fail2ban" token, because the syslog pre-decoder strips the
+  fail2ban.actions program token. See manager-fail2ban-decoder.xml.
+-->
+<ossec_config>
+  <localfile>
+    <log_format>syslog</log_format>
+    <location>/var/log/fail2ban.log</location>
+  </localfile>
+</ossec_config>
