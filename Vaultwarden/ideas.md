@@ -32,12 +32,16 @@ README §Minisign Key Pair Generation, README §Backup and Redundancy.
 
 ## 2. Backup deadman's switch
 
-> **Current plan:** keep `DEADMAN_URL` as the simple-to-set-up stopgap.
-> Once Wazuh (#7) is deployed, alerting moves to Wazuh-native rules +
-> Discord notifications and `DEADMAN_URL` gets retired after a 30-day
-> overlap period. (Update: Wazuh + Discord are now live for *security*
-> events, but the maintenance-failure rules that would actually replace
-> this deadman aren't built yet, see #7, so `DEADMAN_URL` stays.)
+> **Current plan:** keep `DEADMAN_URL`. (Update: Wazuh + Discord are now live
+> for security events AND for the nightly maintenance run summary, see #7, so
+> a failed/degraded run now pings #maintenance with an @. But the deadman's
+> real job, catching the run that NEVER happens (VM dead, cron broken, disk
+> full before the log), would need a "no `phase=run` event in 25h" silence
+> rule, which is NOT built, the maintenance summary fires on a run, not on its
+> absence. So `DEADMAN_URL` stays as the independent external net, and the
+> user has decided to keep it permanently regardless: an external monitor that
+> expects a ping at a fixed time still catches total-failure cases the on-box
+> agent path structurally can't.)
 
 ### What
 
@@ -438,27 +442,40 @@ README §Automation Scripts.
 
 ## 7. Wazuh SIEM rollout, structured logs, agent, alerts, Discord
 
-> **Status, partially DONE (the Discord payoff is live for security events).**
-> One `custom-discord` integrator on the manager now pings per-source Discord
+> **Status, mostly DONE (the Discord payoff is live, including maintenance).**
+> One `custom-discord` integrator on the manager pings per-source Discord
 > channels for: ModSecurity attacks (rule 100303, band=high), DNS allowlist
 > denials (100252, status=blocked-regex), Squid egress denials (TCP_DENIED),
-> and fail2ban bans (100401). Decoders, rules, the integrator, and the
-> `<integration>` blocks live in `wazuh-home/` (see its README). Rule-ID
-> allocation so far: DNS 100250-100253, ModSecurity 100300-100303, fail2ban
-> 100400-100401.
+> fail2ban bans (100401), AND the nightly maintenance run summary (100501 ok /
+> 100502 degraded|fail → #maintenance). Decoders, rules, the integrator, and
+> the `<integration>` blocks live in `wazuh-home/` (see its README). Rule-ID
+> allocation: DNS 100250-100253, ModSecurity 100300-100303, fail2ban
+> 100400-100401, maintenance 100500-100502.
 >
-> **Still pending:** Phase A (structured JSON status log from `main.sh`) plus
-> the maintenance-failure / no-run-in-25h rules that would let Discord replace
-> `DEADMAN_URL` (#2); agent-down notifications (rule 504, investigated and
-> parked, the nightly reboots show as clean stop/start 506/503 within the
-> ~10-min disconnect threshold so they don't false-fire); shipping the Vault
-> VM's own `vw-logs/` + `bw-logs/`; FIM. Phase B (manager + agents) is done.
+> **Phase A is DONE:** `lib.sh` `emit_status` + `main.sh` `emit_run_summary`
+> write a JSON status log (`/srv/logs/status/vault-maint-status-*.jsonl`, one
+> line per phase + a `phase=run` rollup); the Vault VM agent tails it (strftime
+> localfile) and rules 100500-100502 fire the nightly report. Two non-obvious
+> implementation notes: (1) the rules match a DERIVED `vw_sev` (info/warn)
+> field, because Wazuh reserves `status` as a static field that `<field>`
+> can't match (same trap as fail2ban's `action`); (2) the run summary is
+> emitted BEFORE the reboot (not from main.sh's exit trap), so the agent ships
+> it before the box goes down, an immediate `reboot -h now` otherwise races
+> the shutdown and the summary is lost. A blocked-reboot escalation covers the
+> "didn't reboot → Vaultwarden down" edge.
+>
+> **Still pending:** the **no-run-in-25h silence rule** that would actually let
+> Wazuh replace `DEADMAN_URL` (#2) is NOT built, the maintenance summary fires
+> on a run, not on its absence, so `DEADMAN_URL` stays (and the user wants it
+> kept permanently regardless). Also: agent-down notifications (rule 504,
+> investigated and parked, the nightly reboots show as clean stop/start
+> 506/503 within the ~10-min disconnect threshold so they don't false-fire);
+> shipping the Vault VM's own `vw-logs/` + `bw-logs/`; FIM. Phase B (manager +
+> agents) is done.
 >
 > NOTE the implementation diverged from the Phase C sketch below: it uses
 > Wazuh's `<integration>` integrator daemon (one `custom-discord.py` with a
 > per-channel webhook map), NOT the Active Response approach sketched there.
-> And the maintenance rules sketched at id 100300 must move, 100300-100303
-> are now the modsec pipeline; use 100500+.
 
 The single "proper monitoring" idea. Everything in the current stack that
 resembles "did something break? notify me", deadman pings, tail-and-grep
@@ -527,7 +544,20 @@ Wazuh rules are firing reliably, then retire `DEADMAN_URL` from
 
 ---
 
-### Phase A, Structured JSON status log
+### Phase A, Structured JSON status log, ✅ DONE
+
+> Implemented. `lib.sh` has `emit_status PHASE STATUS RC [k=v ...]` (printf-built
+> JSON, no jq dependency to emit) + a `status_init` EXIT-trap scaffold each
+> phase script uses; `main.sh` has `emit_run_summary` that rolls the per-phase
+> lines into a `phase=run` event (jq-aggregated). Output is DATED
+> (`/srv/logs/status/vault-maint-status-YYYY-MM-DD.jsonl`, not the single file
+> sketched below), 30-day `find` retention. The run summary is emitted BEFORE
+> the reboot phase (an exit-trap-after-reboot races the shutdown and the
+> summary is lost). Wazuh ingests it (rules 100500-100502 → #maintenance). The
+> shipped fields differ from the draft below: added `vw_sev` (the rule-match
+> field, since `status` is a reserved Wazuh static field), `backup_size`,
+> `images_updated`, `pull_failures`, `apt_upgraded`/`apt_count`; dropped
+> `duration_s`.
 
 Add to `lib.sh`:
 ```bash
@@ -567,7 +597,7 @@ tail-and-mail script.
 `proxy-home` VM, and the LAN Pi-hole VM, all enrolled with `wazuh-home`.
 The Vault VM and proxy-home agents are at stock defaults. The **LAN
 Pi-hole VM is the first agent with custom config**: a sidecar daemon
-(`wazuh-home/sidecar/pihole-ftl-tail.py`) polls Pi-hole's FTL SQLite DB
+(`wazuh-home/sidecar/pihole/pihole-ftl-tail.py`) polls Pi-hole's FTL SQLite DB
 and emits one structured JSON event per Vault VM DNS query to
 `/var/log/vault-dns/events.log`; the agent tails that log; manager rules
 100250 / 100251 / 100252 fire (archive base, resolved at level 3, blocked
@@ -654,11 +684,14 @@ reference. Skip directly to "What's left" above for the current plan.
 **Rules (`local_rules.xml` on the manager, version-controlled in this
 repo alongside compose files, rules-as-code):**
 
-> Rule-ID ranges already in use: DNS 100250-100253, ModSecurity
-> 100300-100303, fail2ban 100400-100401 (all in `wazuh-home/`). The example
-> maintenance IDs below were drafted at 100300, but that range is now the
-> modsec pipeline, so use a fresh range (e.g. 100500+) when implementing
-> these.
+> Rule-ID ranges in use: DNS 100250-100253, ModSecurity 100300-100303,
+> fail2ban 100400-100401, maintenance 100500-100502 (all in `wazuh-home/`).
+> ✅ The maintenance rules below are now BUILT, at 100500-100502 in
+> `wazuh-home/maintenance/manager-maint-rules.xml`, but the implementation differs from
+> this sketch: they match a derived `vw_sev` (info/warn) field rather than
+> `status` (Wazuh reserves `status` as a static field that `<field>` can't
+> match), and the "no-run-in-25h" silence rule (the 100310 sketch below) is
+> NOT built, so it does NOT yet replace `DEADMAN_URL`.
 
 ```xml
 <rule id="100300" level="12">
@@ -692,7 +725,7 @@ decisions, FIM hits.
 
 **DNS-driven rules** (over the `qtype` / `query` / `srcip` / `status` /
 `blocked` fields the FTL-DB sidecar emits; see
-`wazuh-home/sidecar/pihole-ftl-tail.py` for the field schema):
+`wazuh-home/sidecar/pihole/pihole-ftl-tail.py` for the field schema):
 
 - High-volume queries from one client (DNS tunneling / DGA indicator).
 - Queries to known-bad domains (threat-intel-driven blocklist match).

@@ -6,7 +6,7 @@
       sudo /var/ossec/bin/wazuh-analysisd -t
       sudo systemctl restart wazuh-manager
 
-  Source: the flat JSON events emitted by sidecar/modsec-tail.py on the
+  Source: the flat JSON events emitted by sidecar/vault/modsec-tail.py on the
   Vault VM (one line per ModSecurity audit transaction), tailed by the
   Vault VM Wazuh agent via vault-modsec-agent.localfile.xml. Wazuh's
   built-in JSON decoder auto-extracts each field into data.*; no custom

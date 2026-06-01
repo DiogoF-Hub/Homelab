@@ -9,7 +9,7 @@
   Goal: surface every Vault VM DNS query as a Wazuh alert with full
   metadata (qtype, query, status label) in a single event. The data
   source is the structured JSON log emitted by the sidecar at
-  sidecar/pihole-ftl-tail.py, tailed by the Wazuh agent on the
+  sidecar/pihole/pihole-ftl-tail.py, tailed by the Wazuh agent on the
   Pi-hole VM via pihole-agent.localfile.xml.
 
   Four-rule chain:

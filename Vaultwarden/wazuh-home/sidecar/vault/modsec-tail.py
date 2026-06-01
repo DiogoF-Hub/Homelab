@@ -8,7 +8,7 @@ line with clean scalar fields, and appends it to
 /var/log/modsec-events/events.log. The Wazuh agent on this VM tails
 that file via a <localfile> entry; the manager fires rules
 100300 / 100301 / 100302 / 100303 (see
-Vaultwarden/wazuh-home/manager-modsec-rules.xml) on the decoded events.
+Vaultwarden/wazuh-home/modsec/manager-modsec-rules.xml) on the decoded events.
 
 WHY THIS EXISTS (why not tail modsec_audit.log directly)
 
@@ -105,7 +105,7 @@ OUTPUT_LOG = Path("/var/log/modsec-events/events.log")
 """
 Where this script appends flat JSON-per-line events. The Wazuh agent
 on this VM tails this file; see
-Vaultwarden/wazuh-home/vault-modsec-agent.localfile.xml.
+Vaultwarden/wazuh-home/modsec/vault-modsec-agent.localfile.xml.
 
 Own subdirectory so logrotate can target the dir cleanly. Rotation
 config deployed by hand to /etc/logrotate.d/modsec-events; canonical

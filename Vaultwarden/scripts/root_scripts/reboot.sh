@@ -27,6 +27,12 @@ source "$(dirname "$(readlink -f "$0")")/lib.sh"
 # Write into the main log, no separate reboot log file.
 PHASE_LOG="$MAIN_LOG"
 
+# reboot.sh ends in `exec /sbin/reboot`, which replaces the process, so an
+# EXIT trap can't emit the success status. This trap covers the fail()
+# paths (safety gate blocked); the OK status is emitted explicitly just
+# before the exec below.
+trap 'rc=$?; (( rc != 0 )) && emit_status reboot fail "$rc"' EXIT
+
 require_root
 ensure_log_dirs
 
@@ -61,6 +67,7 @@ fi
 # --- do it -----------------------------------------------------------------
 
 log "all safety checks passed, REBOOT COMMAND being issued in 5 seconds"
+emit_status reboot ok 0
 
 sync
 sleep 5

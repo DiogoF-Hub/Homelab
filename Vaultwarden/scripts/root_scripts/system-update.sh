@@ -19,6 +19,7 @@ set -euo pipefail
 source "$(dirname "$(readlink -f "$0")")/lib.sh"
 
 PHASE_LOG="$SYSTEM_LOG"
+status_init "system-update"
 
 require_root
 require_cmd apt-get
@@ -48,6 +49,15 @@ dpkg --configure -a >> "$PHASE_LOG" 2>&1 \
 log "apt-get update"
 apt-get update -y >> "$PHASE_LOG" 2>&1 \
     || fail "apt-get update failed" 31
+
+# Snapshot what's about to be upgraded, names only (e.g. "libldb2"), for
+# the nightly status report. Captured now, right after the package lists
+# refreshed and before any upgrade runs; on a successful run these are the
+# packages that get upgraded. grep '/' keeps only "name/repo …" lines and
+# drops apt's "Listing…" header.
+mapfile -t __upgradable < <(apt list --upgradable 2>/dev/null | grep '/' | cut -d/ -f1)
+APT_UPGRADED_LIST=$(IFS=,; echo "${__upgradable[*]}")
+APT_UPGRADED_COUNT=${#__upgradable[@]}
 
 # --- openssh-server special case (DO THIS FIRST) --------------------------
 # Upgrade openssh-server while keeping the existing hardened sshd_config.
@@ -88,6 +98,11 @@ apt-get upgrade -y >> "$PHASE_LOG" 2>&1 \
 log "apt-get dist-upgrade"
 apt-get dist-upgrade -y >> "$PHASE_LOG" 2>&1 \
     || fail "apt-get dist-upgrade failed" 33
+
+# Record the upgraded package names for the status report. Only reached on
+# a successful upgrade; a failure above fail()s and the trap reports
+# status=fail instead.
+PHASE_KV+=("apt_upgraded=$APT_UPGRADED_LIST" "apt_upgraded_count=$APT_UPGRADED_COUNT")
 
 # --- cleanup --------------------------------------------------------------
 

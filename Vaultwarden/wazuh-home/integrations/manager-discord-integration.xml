@@ -20,6 +20,9 @@
                script keeps only action=TCP_DENIED
     - fail2ban: rule 100401 (host banned, from the custom fail2ban-file
                decoder; the rule already filters to f2b_action=Ban)
+    - maintenance: rules 100501 (run ok) + 100502 (run degraded/fail), the
+               nightly maintenance summary. Fires every night; the script
+               @s you only on degraded/fail.
 
   If wazuh-integratord logs that it skipped an integration for a missing
   <hook_url>, add a dummy <hook_url>http://127.0.0.1</hook_url> to that
@@ -59,6 +62,14 @@
   <integration>
     <name>custom-discord</name>
     <rule_id>100401</rule_id>
+    <alert_format>json</alert_format>
+  </integration>
+</ossec_config>
+
+<ossec_config>
+  <integration>
+    <name>custom-discord</name>
+    <rule_id>100501,100502</rule_id>
     <alert_format>json</alert_format>
   </integration>
 </ossec_config>

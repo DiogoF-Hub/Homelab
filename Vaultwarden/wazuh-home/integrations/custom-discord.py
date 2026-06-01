@@ -17,7 +17,7 @@ the final data-field filter, and the embed.
 
 WIRED SOURCES (the three pipelines configured today):
   - modsec : flattened ModSecurity events from the Vault VM sidecar
-             (sidecar/modsec-tail.py), tiered by manager-modsec-rules.xml.
+             (sidecar/vault/modsec-tail.py), tiered by manager-modsec-rules.xml.
              Pings on band=high only (rule 100303, level 11), the
              multi-vector attacks, never the scanner noise.
   - dns    : Pi-hole FTL events from the Vault VM (manager-rules.xml).
@@ -27,12 +27,13 @@ WIRED SOURCES (the three pipelines configured today):
              decoder). Pings on action=TCP_DENIED, an egress-allowlist
              denial from the locked-down Vault VM.
 
-WEBHOOKS / SECRETS: the committed copy carries PLACEHOLDER URLs. Fill the
-real per-channel webhooks ONLY in the deployed copy on the manager
-(/var/ossec/integrations/custom-discord) and never commit them back, same
-convention as .env. deliver() skips any channel whose URL is still a
-placeholder, so a half-configured manager just stays quiet instead of
-erroring.
+WEBHOOKS / SECRETS: the committed copy carries PLACEHOLDER URLs. The real
+per-channel webhooks live in a side-file on the manager,
+/var/ossec/integrations/discord-webhooks.json (JSON, mode 0640 root:wazuh,
+not committed), whose keys override the placeholders at startup. So
+re-installing this script never clobbers your URLs, and deliver() skips
+any channel still on a placeholder (a half-configured manager just stays
+quiet instead of erroring).
 
 FUTURE SOURCES (not configured yet; add a WEBHOOKS key + an <integration>
 block + un-comment the branch in main(), and verify the real alert shape
@@ -57,15 +58,26 @@ MENTION = ""
 
 LOCAL_TZ = "Europe/Luxembourg"
 
-# Per-channel webhooks. PLACEHOLDERS in the repo; fill the real URLs only
-# in the deployed copy on the manager. Add a key here when wiring a new
-# source (and an <integration> block + a branch in main()).
+# Per-channel webhooks. The committed copy holds PLACEHOLDERS; the real
+# URLs live in a side-file on the manager so re-installing this script
+# never clobbers them. Fill them once in
+# /var/ossec/integrations/discord-webhooks.json (mode 0640 root:wazuh), a
+# JSON object like {"modsec": "https://discord.com/api/webhooks/...", ...}.
+# Any keys it contains override the placeholders below; that file is not
+# in the repo. Add a key here when wiring a new source (plus an
+# <integration> block + a branch in main()).
 WEBHOOKS = {
-    "modsec":   "https://discord.com/api/webhooks/REPLACE_WITH_MODSEC_WEBHOOK",
-    "dns":      "https://discord.com/api/webhooks/REPLACE_WITH_DNS_WEBHOOK",
-    "squid":    "https://discord.com/api/webhooks/REPLACE_WITH_SQUID_WEBHOOK",
-    "fail2ban": "https://discord.com/api/webhooks/REPLACE_WITH_FAIL2BAN_WEBHOOK",
+    "modsec":      "https://discord.com/api/webhooks/REPLACE_WITH_MODSEC_WEBHOOK",
+    "dns":         "https://discord.com/api/webhooks/REPLACE_WITH_DNS_WEBHOOK",
+    "squid":       "https://discord.com/api/webhooks/REPLACE_WITH_SQUID_WEBHOOK",
+    "fail2ban":    "https://discord.com/api/webhooks/REPLACE_WITH_FAIL2BAN_WEBHOOK",
+    "maintenance": "https://discord.com/api/webhooks/REPLACE_WITH_MAINTENANCE_WEBHOOK",
 }
+try:
+    with open("/var/ossec/integrations/discord-webhooks.json") as _wf:
+        WEBHOOKS.update(json.load(_wf))
+except (FileNotFoundError, ValueError, OSError):
+    pass    # no side-file (or unreadable) -> placeholders stay; deliver() skips them
 
 
 # ---------------------------------------------------------------------------
@@ -256,6 +268,69 @@ def format_squid(alert):
     }
 
 
+# --- maintenance: the nightly run summary (rules 100501 / 100502) -----------
+
+def _maint_cap_list(csv, limit=20):
+    """Comma-joined names -> readable, capped list (Discord field max 1024c)."""
+    if not csv:
+        return "none"
+    items = csv.split(",")
+    if len(items) <= limit:
+        return ", ".join(items)
+    return ", ".join(items[:limit]) + f"  … (+{len(items) - limit} more)"
+
+def format_maintenance(alert):
+    """
+    Discord embed from the nightly `run` summary event. main.sh rolls the
+    per-phase status lines into one event with these data.* fields. Color +
+    icon track the overall status; the @ is decided by the caller (only on
+    degraded/fail), not here.
+    """
+    data = alert.get("data", {})
+    ts = alert.get("timestamp", "N/A")
+    status = data.get("status", "unknown")
+
+    color = {"ok": 3066993, "degraded": 15844367, "fail": 15158332}.get(status, 10070709)
+    icon = {"ok": "🟢", "degraded": "🟠", "fail": "🔴"}.get(status, "⚪")
+
+    backup = data.get("backup_status", "N/A")
+    size = data.get("backup_size", "")
+    backup_val = f"{backup} ({size})" if size else backup
+    images = data.get("images_updated", "")
+
+    fields = [
+        {"name": "Backup", "value": backup_val, "inline": True},
+        {"name": "Reboot", "value": data.get("reboot_status") or "scheduled", "inline": True},
+        {"name": "Docker images updated", "value": (images.replace(",", ", ") if images else "none"), "inline": False},
+    ]
+
+    pulls = data.get("pull_failures", "")
+    if pulls:
+        fields.append({"name": "⚠️ Docker pull FAILED", "value": pulls.replace(",", ", "), "inline": False})
+
+    fields.append({
+        "name": f"APT upgraded ({data.get('apt_count', '0')})",
+        "value": _maint_cap_list(data.get("apt_upgraded", "")),
+        "inline": False,
+    })
+
+    # the two pinned tools (age / minisign): only shown when a bump is available
+    upd = []
+    if data.get("age_update"):
+        upd.append(f"age → {data['age_update']}")
+    if data.get("minisign_update"):
+        upd.append(f"minisign → {data['minisign_update']}")
+    if upd:
+        fields.append({"name": "🔧 Tool update available", "value": ", ".join(upd), "inline": False})
+
+    return {
+        "title": f"{icon} Vault maintenance: {status.upper()}",
+        "color": color,
+        "fields": fields,
+        "footer": {"text": format_timestamp(ts)},
+    }
+
+
 # --- DORMANT templates for future sources. Not wired in main() yet; add a
 #     WEBHOOKS key + an <integration> block + un-comment the branch, and
 #     verify the real alert shape first (the way modsec was). ---
@@ -329,16 +404,17 @@ def send_discord(webhook_url, embed, mention=None, retries=3, delay=5):
                 raise
 
 
-def deliver(channel, embed):
+def deliver(channel, embed, mention=MENTION):
     """
     Post to the channel's webhook. Skips silently if that channel's URL is
     still a placeholder, so a freshly-deployed (un-filled) manager stays
-    quiet instead of erroring.
+    quiet instead of erroring. `mention` defaults to the global MENTION;
+    pass "" to post without a ping (e.g. the all-OK maintenance heartbeat).
     """
     url = WEBHOOKS.get(channel, "")
     if not url or "REPLACE_WITH" in url:
         return
-    send_discord(url, embed, mention=MENTION or None)
+    send_discord(url, embed, mention=(mention or None))
 
 
 # ---------------------------------------------------------------------------
@@ -382,6 +458,12 @@ def main():
     #     decoder) already filters to f2b_action=Ban, so key on the rule. ---
     elif rule.get("id") == "100401":
         deliver("fail2ban", format_fail2ban(alert))
+
+    # --- maintenance: nightly run summary. 100501 = ok (quiet heartbeat),
+    #     100502 = degraded|fail. @ you only when it's not ok. ---
+    elif rule.get("id") in ("100501", "100502"):
+        deliver("maintenance", format_maintenance(alert),
+                mention=(MENTION if data.get("status") != "ok" else ""))
 
     # --- FUTURE (add WEBHOOKS key + <integration> block, verify shape) ---
     # elif rule.get("id", "") in ("504", "506"):
