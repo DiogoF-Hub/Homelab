@@ -1,0 +1,34 @@
+<!--
+  Vault VM: Wazuh agent <localfile> for the nightly maintenance status log.
+
+  Append inside any <ossec_config> block in the Vault VM's
+  /var/ossec/etc/ossec.conf, then restart the agent:
+      sudo systemctl restart wazuh-agent
+      sudo grep maint-status /var/ossec/logs/ossec.log | tail
+      # expect: Analyzing file: '/srv/logs/status/vault-maint-status-...jsonl'
+
+  Source: /srv/logs/status/vault-maint-status-YYYY-MM-DD.jsonl, the JSON
+  lines emitted by the nightly maintenance run (lib.sh emit_status: one
+  line per phase + a final phase=run summary). The filename is dated daily
+  (matching the other maintenance logs + their find-based retention), so
+  the <location> uses strftime (%Y-%m-%d); Wazuh's logcollector resolves
+  it per day and tails the current file. The run fires at ~05:35, well
+  after the midnight rollover, so there's no gap.
+
+  log_format=json so the manager's built-in JSON decoder extracts every
+  field into data.*; manager-maint-rules.xml fires rules 100500-100502
+  (event_type=vault_maint). The nightly Discord report fires on the
+  phase=run summary (100501 ok / 100502 degraded|fail).
+
+  NOTE this is SEPARATE from the existing human logs (main / backup /
+  docker / system) , those stay exactly as they are (TrueNAS still pulls
+  them, still your debugging record). This JSON log is an additional,
+  machine-readable summary just for Wazuh -> Discord; nothing reads the
+  human logs into Wazuh.
+-->
+<ossec_config>
+  <localfile>
+    <log_format>json</log_format>
+    <location>/srv/logs/status/vault-maint-status-%Y-%m-%d.jsonl</location>
+  </localfile>
+</ossec_config>

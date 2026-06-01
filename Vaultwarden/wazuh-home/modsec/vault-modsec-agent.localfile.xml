@@ -15,7 +15,7 @@
   Single source: /var/log/modsec-events/events.log
 
   Flat JSON, one line per ModSecurity audit transaction, emitted by the
-  sidecar at sidecar/modsec-tail.py. Fields: event_type / ts / srcip /
+  sidecar at sidecar/vault/modsec-tail.py. Fields: event_type / ts / srcip /
   method / path / http_code / engine / rule_ids / n_rules /
   anomaly_score / band / unique_id / hostname.
 

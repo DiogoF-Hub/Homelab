@@ -42,6 +42,55 @@ require_root
 require_cmd flock
 ensure_log_dirs
 
+# Unique id for this run, exported so every phase script stamps its status
+# lines with it; the finish trap then rolls those lines up into the single
+# `run` summary event the nightly Discord report fires on.
+export MAINT_RUN_ID="$(date '+%Y%m%dT%H%M%S')-$$"
+
+# emit_run_summary RC, roll this run's per-phase status lines into one
+# `run` event. overall = fail if any phase failed, else degraded if any
+# degraded, else ok; carries the docker image lists + apt list so the
+# Discord report has them in one message. Uses jq when present; without
+# jq it still emits an overall-only summary, so a missing jq never blocks
+# the run (jq is only needed for the rich rollup).
+emit_run_summary() {
+    local rc="$1"
+    [[ -f "$STATUS_LOG" ]] || return 0
+    local lines
+    lines=$(grep -F "\"run_id\":\"${MAINT_RUN_ID}\"" "$STATUS_LOG" 2>/dev/null | grep -v '"phase":"run"' || true)
+    [[ -n "$lines" ]] || return 0    # nothing ran (e.g. exited before any phase)
+    RUN_SUMMARY_EMITTED=1            # mark emitted (read by the finish trap so it doesn't re-emit)
+
+    local overall kv=()
+    if command -v jq >/dev/null 2>&1; then
+        overall=$(jq -rs 'if any(.[];.status=="fail") then "fail" elif any(.[];.status=="degraded") then "degraded" else "ok" end' <<<"$lines")
+        # _f PHASE FIELD, first value of FIELD across this run's lines for PHASE
+        _f() { jq -rs --arg p "$1" --arg f "$2" '[.[]|select(.phase==$p)|.[$f]//""]|.[0]//""' <<<"$lines"; }
+        kv=(
+            "backup_status=$(_f backup status)"
+            "backup_size=$(_f backup size)"
+            "images_updated=$(_f docker-update images_updated)"
+            "pull_failures=$(_f docker-update pull_failures)"
+            "apt_upgraded=$(_f system-update apt_upgraded)"
+            "apt_count=$(_f system-update apt_upgraded_count)"
+            "reboot_status=$(_f reboot status)"
+            "age_update=$(_f backup age_update)"
+            "minisign_update=$(_f backup minisign_update)"
+        )
+    else
+        if   grep -q '"status":"fail"'     <<<"$lines"; then overall="fail"
+        elif grep -q '"status":"degraded"' <<<"$lines"; then overall="degraded"
+        else overall="ok"; fi
+        warn "jq not found, run summary omits the per-phase lists"
+    fi
+    # vw_sev: a non-static field the maint rules match on. Wazuh reserves
+    # "status" as a static decoder field that <field> can't match, so the
+    # rules key on this instead, info when the overall is ok, else warn.
+    local sev="info"; [[ "$overall" != "ok" ]] && sev="warn"
+    kv+=("vw_sev=$sev")
+    emit_status "run" "$overall" "$rc" "${kv[@]}"
+}
+
 # ---- locking --------------------------------------------------------------
 
 exec 9>"$LOCK_FILE"
@@ -49,7 +98,20 @@ if ! flock -n 9; then
     echo "[$(date '+%H:%M:%S')] [main.sh] $(explain_exit_code 1)" | tee -a "$PHASE_LOG" >&2
     exit 1
 fi
-trap 'rm -f "$LOCK_FILE"' EXIT
+# On ANY exit (normal, backup-abort, etc.): roll up the run summary, then
+# release the lock. Emitting the summary from the trap guarantees the
+# nightly Discord report still fires even when backup fails and we abort
+# early (the most important night to hear about).
+finish() {
+    local rc=$?
+    # The normal path emits the run summary explicitly before the reboot
+    # (so the agent ships it before the box goes down). Only emit from here
+    # if that didn't happen , e.g. a backup failure aborted the run before
+    # we got there , so the failure still gets reported.
+    [[ -n "${RUN_SUMMARY_EMITTED:-}" ]] || emit_run_summary "$rc"
+    rm -f "$LOCK_FILE"
+}
+trap finish EXIT
 
 {
     echo
@@ -107,17 +169,33 @@ fi
 
 (( BACKUP_OK == 1 )) && deadman_ping
 
+# ---- run summary (emitted BEFORE the reboot) -----------------------------
+# Roll up + emit the run summary NOW, while the VM is fully up and the
+# Wazuh agent is alive, so the agent ships it to the manager before
+# reboot.sh takes the box down. Emitting it from the finish trap (after
+# reboot.sh) loses a race with the shutdown: a bash EXIT trap doesn't run
+# on the SIGTERM/SIGHUP a reboot delivers, and even if the line is written
+# the agent gets stopped before it ships. That race ate the first real
+# run's Discord summary. reboot.sh's 5s pre-reboot sleep is the shipping
+# window; the reboot hasn't happened yet, so it reads "scheduled" here.
+emit_run_summary 0
+
 # ---- phase 4: reboot (always) --------------------------------------------
 
 REBOOT_OK=0
 # reboot.sh always reboots unless a safety gate (containers still running
 # or apt/dpkg lock held) blocks it. On a successful reboot, /sbin/reboot
-# replaces the process and we never return, so REBOOT_OK=1 only ever
-# lands if the script exited 0 without actually rebooting (which should
-# not happen in the current implementation, but we keep the branch so
-# future reboot.sh changes don't silently break the summary block).
+# replaces the process and we never return here.
 if run_phase "reboot" "${SCRIPTS_DIR}/reboot.sh"; then
     REBOOT_OK=1
+else
+    # Non-zero = the safety gate BLOCKED the reboot. We did NOT reboot and
+    # the containers are stopped (backup/docker left them down), so
+    # Vaultwarden is DOWN. The summary above already shipped as "scheduled",
+    # so fire a separate loud alert to correct it , the one case where not
+    # rebooting is an emergency, not a relief.
+    REBOOT_RC=$?
+    emit_status run fail "$REBOOT_RC" "vw_sev=warn" "reboot_status=BLOCKED" "backup_status=ok"
 fi
 
 # ---- summary --------------------------------------------------------------
@@ -145,7 +223,8 @@ fi
 
 log "orchestrator done: $STATUS"
 
-# Retention on the orchestrator log itself
-find "$MAIN_LOG_DIR" -name "main-*.log" -mtime +"$RETENTION_DAYS" -print -delete >> "$PHASE_LOG" 2>&1 || true
+# Retention on the orchestrator log + the JSON status log
+find "$MAIN_LOG_DIR"   -name "main-*.log"                 -mtime +"$RETENTION_DAYS" -print -delete >> "$PHASE_LOG" 2>&1 || true
+find "$STATUS_LOG_DIR" -name "vault-maint-status-*.jsonl" -mtime +"$RETENTION_DAYS" -print -delete >> "$PHASE_LOG" 2>&1 || true
 
 exit 0

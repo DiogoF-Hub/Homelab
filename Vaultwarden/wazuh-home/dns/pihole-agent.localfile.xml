@@ -13,7 +13,7 @@
   Single source: /var/log/vault-dns/events.log
 
   Structured JSON log emitted by the FTL-DB sidecar at
-  sidecar/pihole-ftl-tail.py. One line per Vault VM DNS query, with
+  sidecar/pihole/pihole-ftl-tail.py. One line per Vault VM DNS query, with
   fields qtype / query / status / status_code / blocked / forward.
 
   Lives in its own subdirectory so logrotate can target the dir

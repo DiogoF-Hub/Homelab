@@ -17,6 +17,7 @@ set -euo pipefail
 source "$(dirname "$(readlink -f "$0")")/lib.sh"
 
 PHASE_LOG="$BACKUP_LOG"
+status_init "backup"
 
 require_root
 require_cmd tar
@@ -155,7 +156,9 @@ $SIGN_BACKUPS && BUNDLE_FILES+=("$(basename "$SIGNATURE_FILE")" "minisign" "mini
 tar -czvf "$FINAL_BUNDLE" -C "$BACKUP_DIR" "${BUNDLE_FILES[@]}" >> "$PHASE_LOG" 2>&1 \
     || fail "final bundle creation failed" 14
 
-log "final bundle written to $FINAL_BUNDLE ($(du -h "$FINAL_BUNDLE" | awk '{print $1}'))"
+BUNDLE_SIZE=$(du -h "$FINAL_BUNDLE" | awk '{print $1}')
+log "final bundle written to $FINAL_BUNDLE ($BUNDLE_SIZE)"
+PHASE_KV+=("bundle=$(basename "$FINAL_BUNDLE")" "size=$BUNDLE_SIZE")
 
 # --- cleanup intermediates -------------------------------------------------
 
@@ -197,6 +200,14 @@ if $SIGN_BACKUPS; then
     else
         MINISIGN_LINE="  [OK] minisign $MINISIGN_VERSION (latest)"
     fi
+fi
+
+# Surface "update available" for the two pinned tools (age / minisign)
+# into the phase status, so the nightly Discord report flags when they
+# need a manual bump (setup-age.sh / setup-minisign.sh + version bump).
+[[ -n "$LATEST_AGE" && "$LATEST_AGE" != "$AGE_VERSION" ]] && PHASE_KV+=("age_update=$LATEST_AGE")
+if $SIGN_BACKUPS && [[ -n "${LATEST_MINISIGN:-}" && "$LATEST_MINISIGN" != "$MINISIGN_VERSION" ]]; then
+    PHASE_KV+=("minisign_update=$LATEST_MINISIGN")
 fi
 
 # Emit as one block: one blank line above, no blanks between internal

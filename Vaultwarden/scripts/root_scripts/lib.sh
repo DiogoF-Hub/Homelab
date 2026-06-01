@@ -53,6 +53,14 @@ readonly BACKUP_LOG="${BACKUP_LOG_DIR}/vault-backup-${TODAY_DATE}.log"
 readonly DOCKER_LOG="${DOCKER_LOG_DIR}/update-${TODAY_DATE}.log"
 readonly SYSTEM_LOG="${SYSTEM_LOG_DIR}/system-autoupdate-${TODAY_DATE}.log"
 
+# ---- maintenance status log (JSON, for Wazuh -> Discord) ----------------
+# One JSON object per phase, plus a final `run` summary line, written by
+# emit_status(). The Vault VM Wazuh agent tails it (event_type=vault_maint)
+# and the manager turns the `run` event into a nightly Discord report.
+# See wazuh-home/ + ideas.md #7 Phase A.
+readonly STATUS_LOG_DIR="${LOG_ROOT}/status"
+readonly STATUS_LOG="${STATUS_LOG_DIR}/vault-maint-status-${TODAY_DATE}.jsonl"
+
 # ---- locking ------------------------------------------------------------
 
 readonly LOCK_FILE="/var/run/vaultwarden-maint.lock"
@@ -231,6 +239,62 @@ warn() {
     log "WARN: $*"
 }
 
+# =========================================================================
+# maintenance status events (JSON, for Wazuh -> Discord)
+# =========================================================================
+
+# emit_status PHASE STATUS RC [key=value ...]
+# Append one JSON object (one line) to STATUS_LOG. STATUS is one of
+# ok | degraded | fail. Extra key=value pairs become JSON string fields.
+# event_type=vault_maint is the discriminator the manager rules key on;
+# run_id (from $MAINT_RUN_ID, set by main.sh) ties one night's phase lines
+# together so main.sh can roll them up into the `run` summary.
+#
+# printf-built (not jq) so EMITTING never depends on jq; values are
+# escaped for backslash + double-quote. Package/image names don't contain
+# those, but escape anyway so a weird value can't break the JSON.
+emit_status() {
+    local phase="$1" status="$2" rc="$3"; shift 3
+    local ts json kv key val
+    ts="$(date '+%Y-%m-%dT%H:%M:%S%z')"
+    json=$(printf '{"event_type":"vault_maint","run_id":"%s","ts":"%s","host":"%s","phase":"%s","status":"%s","rc":%d' \
+        "${MAINT_RUN_ID:-}" "$ts" "$(hostname)" "$phase" "$status" "$rc")
+    for kv in "$@"; do
+        key="${kv%%=*}"
+        val="${kv#*=}"
+        val="${val//\\/\\\\}"   # escape backslash first
+        val="${val//\"/\\\"}"   # then double-quote
+        json+=$(printf ',"%s":"%s"' "$key" "$val")
+    done
+    json+='}'
+    mkdir -p "$STATUS_LOG_DIR"
+    printf '%s\n' "$json" >> "$STATUS_LOG"
+}
+
+# status_init PHASE, set up an EXIT trap that emits exactly one status
+# line for this phase no matter how the script exits. After calling it a
+# phase script may set PHASE_STATUS=degraded and append "key=value" detail
+# to the PHASE_KV array; the trap emits them. If the script exits non-zero
+# and PHASE_STATUS wasn't already set to fail, the trap marks it fail
+# automatically (covers fail() and set -e aborts).
+#
+# NOTE: a script that ends in `exec` (reboot.sh) replaces its process, so
+# the EXIT trap never fires on that path; such scripts emit explicitly
+# before the exec instead.
+status_init() {
+    PHASE_NAME_FOR_STATUS="$1"
+    PHASE_STATUS="ok"
+    PHASE_KV=()
+    trap '__status_on_exit' EXIT
+}
+__status_on_exit() {
+    local rc=$?
+    if (( rc != 0 )) && [[ "${PHASE_STATUS:-ok}" != "fail" ]]; then
+        PHASE_STATUS="fail"
+    fi
+    emit_status "$PHASE_NAME_FOR_STATUS" "${PHASE_STATUS:-ok}" "$rc" "${PHASE_KV[@]}"
+}
+
 require_root() {
     [[ $EUID -eq 0 ]] || fail "must run as root" 1
 }
@@ -247,6 +311,7 @@ ensure_log_dirs() {
         "$BACKUP_LOG_DIR" \
         "$DOCKER_LOG_DIR" \
         "$SYSTEM_LOG_DIR" \
+        "$STATUS_LOG_DIR" \
         "$BACKUP_DIR"
 }
 

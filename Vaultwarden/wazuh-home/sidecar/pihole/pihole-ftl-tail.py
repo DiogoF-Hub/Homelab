@@ -7,7 +7,7 @@ up new query rows since the last processed `id`, formats each as a
 JSON line, and appends to /var/log/vault-dns/events.log. Wazuh agent
 on this VM tails that file via a <localfile> entry; the manager fires
 rule 100250 / 100251 / 100252 / 100253 (see
-Vaultwarden/wazuh-home/manager-rules.xml) on the resulting decoded
+Vaultwarden/wazuh-home/dns/manager-rules.xml) on the resulting decoded
 events.
 
 WHY THIS EXISTS
@@ -86,7 +86,7 @@ elsewhere, adjust here.
 OUTPUT_LOG = Path("/var/log/vault-dns/events.log")
 """
 Where this script appends JSON-per-line events. The Wazuh agent on
-this VM tails this file; see Vaultwarden/wazuh-home/pihole-agent.localfile.xml.
+this VM tails this file; see Vaultwarden/wazuh-home/dns/pihole-agent.localfile.xml.
 
 Lives in its own subdirectory so logrotate can target the dir cleanly
 without globbing /var/log/. Rotation config: deployed by hand to

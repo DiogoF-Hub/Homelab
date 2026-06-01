@@ -1,0 +1,67 @@
+<!--
+  wazuh-home (manager): rules for the nightly maintenance status events.
+
+  Append inside /var/ossec/etc/rules/local_rules.xml on the manager.
+  Validate + restart:
+      sudo /var/ossec/bin/wazuh-analysisd -t
+      sudo systemctl restart wazuh-manager
+
+  Source: /srv/logs/status/vault-maint-status-*.jsonl on the Vault VM
+  (lib.sh emit_status; localfile in vault-maint-agent.localfile.xml). The
+  built-in JSON decoder extracts each field into data.*; event_type=
+  vault_maint is the discriminator.
+
+  Per-phase lines (phase=backup/docker-update/system-update/reboot) are
+  archived under the level-0 base rule (logall_json, already on from the
+  DNS pipeline) for dashboard drill-down; the Discord report fires only on
+  the phase=run summary.
+
+  Rule-ID block 100500-100502 (DNS 100250-100253, modsec 100300-100303,
+  fail2ban 100400-100401 are taken):
+    100500 (level 0):  base, every vault_maint event. Archived, no alert.
+    100501 (level 3):  vw_sev=info  (overall ok). Nightly heartbeat.
+    100502 (level 11): vw_sev=warn  (degraded|fail). Needs attention.
+
+  NOTE: the run rules match the derived `vw_sev` field (info/warn), NOT
+  `status`, because Wazuh reserves `status` as a static decoder field that
+  <field> can't match (analysisd errors "Field 'status' is static", same
+  trap as fail2ban's `action`). main.sh's emit_run_summary sets vw_sev=info
+  when the overall status is ok, else warn. vw_sev only exists on the
+  phase=run line, so matching it alone uniquely targets the summary.
+  `status` still rides along (static) for the Discord embed and the
+  $(status) interpolation in 100502's description.
+
+  The custom-discord integrator hooks 100501 + 100502 (so it fires every
+  night, and @s only on degraded/fail). It reads the run event's
+  aggregated fields , backup_status / backup_size, images_updated,
+  pull_failures, apt_upgraded / apt_count, reboot_status, age_update,
+  minisign_update , to build one embed. The external DEADMAN_URL stays as
+  the independent "did it run at all" net (idea #7 / #2); these rules only
+  fire when a run DID happen.
+-->
+<group name="vault_maint,vaultwarden">
+
+  <!-- Base: every maintenance status line. Level 0 = archived, no alert.
+       Per-phase lines live here; the run summary chains off it below. -->
+  <rule id="100500" level="0">
+    <decoded_as>json</decoded_as>
+    <field name="event_type">vault_maint</field>
+    <description>Vault maintenance event: $(phase) [$(status)]</description>
+  </rule>
+
+  <!-- Nightly heartbeat: the run completed clean. -->
+  <rule id="100501" level="3">
+    <if_sid>100500</if_sid>
+    <field name="vw_sev" type="pcre2">^info$</field>
+    <description>Vault maintenance run OK.</description>
+  </rule>
+
+  <!-- The run finished but something needs attention (a degraded phase,
+       e.g. a docker pull failed, or a failed phase like backup). -->
+  <rule id="100502" level="11">
+    <if_sid>100500</if_sid>
+    <field name="vw_sev" type="pcre2">^warn$</field>
+    <description>Vault maintenance run $(status), needs attention.</description>
+  </rule>
+
+</group>

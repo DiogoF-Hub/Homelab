@@ -17,6 +17,7 @@ set -euo pipefail
 source "$(dirname "$(readlink -f "$0")")/lib.sh"
 
 PHASE_LOG="$DOCKER_LOG"
+status_init "docker-update"
 
 require_root
 require_cmd podman
@@ -58,6 +59,8 @@ cd "$COMPOSE_DIR" || fail "cannot access compose directory: $COMPOSE_DIR" 20
 UPDATED=0
 PULL_FAILURES=0
 UPDATED_SERVICES=()
+UPDATED_NAMES=()
+FAILED_NAMES=()
 SERVICES=$(sudo -u "$USER_POD" podman-compose config --services 2>/dev/null || true)
 
 if [[ -z "$SERVICES" ]]; then
@@ -108,6 +111,7 @@ print(config.get('services', {}).get('$service', {}).get('image', ''))
         if ! $pulled; then
             warn "[$service] pull FAILED after 3 attempts, next run will retry"
             PULL_FAILURES=$((PULL_FAILURES + 1))
+            FAILED_NAMES+=("$service")
             continue
         fi
 
@@ -135,6 +139,7 @@ print(config.get('services', {}).get('$service', {}).get('image', ''))
             fi
 
             UPDATED=$((UPDATED + 1))
+            UPDATED_NAMES+=("$service")
             if [[ -n "$LOCAL_ID" ]]; then
                 sudo -u "$USER_POD" podman rmi -f "$LOCAL_ID" >> "$PHASE_LOG" 2>&1 \
                     || warn "[$service] failed to remove old image $LOCAL_ID"
@@ -156,6 +161,17 @@ print(config.get('services', {}).get('$service', {}).get('image', ''))
     SUMMARY_LINES+=("=====================================")
     write_block "${SUMMARY_LINES[@]}"
 fi
+
+# --- status detail for the nightly report ---------------------------------
+# Pull failures keep the exit code 0 (non-fatal: run continues + reboots),
+# but mark the phase 'degraded' so the Discord report flags it and @s you.
+(( PULL_FAILURES > 0 )) && PHASE_STATUS="degraded"
+PHASE_KV+=(
+    "images_updated=$(IFS=,; echo "${UPDATED_NAMES[*]}")"
+    "pull_failures=$(IFS=,; echo "${FAILED_NAMES[*]}")"
+    "images_updated_count=$UPDATED"
+    "pull_failures_count=$PULL_FAILURES"
+)
 
 # --- retention -------------------------------------------------------------
 

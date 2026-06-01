@@ -72,7 +72,7 @@ concrete. Adapt freely if your situation differs:
   with `docker-compose.public-dns01.yml` for the home side.
 - **Different VLAN / IP / hostname conventions** → search-and-replace
   `192.168.173.9` (proxy-home / Squid), `192.168.173.2` (LAN Pi-hole),
-  `192.168.50.3` (Vault VM, used in `wazuh-home/manager-rules.xml`),
+  `192.168.50.3` (Vault VM, used in `wazuh-home/dns/manager-rules.xml`),
   `vault.example.com` (the public hostname), `vaultwarden-prod` (the
   Cloudflare tunnel name), and any internal subnet references with your
   own values.
@@ -281,7 +281,7 @@ From a fresh SSH session as `vwadmin`:
 ```bash
 sudo apt update && sudo apt full-upgrade -y
 sudo apt install -y sudo curl ca-certificates unattended-upgrades \
-    apt-listchanges fail2ban rsyslog python3-yaml
+    apt-listchanges fail2ban rsyslog python3-yaml jq
 sudo dpkg-reconfigure -plow unattended-upgrades
 ```
 
@@ -298,6 +298,12 @@ ships with journald-only logging by default, and the fail2ban
 config below points at `/var/log/auth.log`. Without rsyslog, that
 file doesn't exist and the sshd jail fails to start. rsyslog's
 package config splits authpriv events into auth.log automatically.
+
+`jq` is used by `main.sh`'s `emit_run_summary` to roll the per-phase JSON
+status lines into the nightly `run` summary the Wazuh maintenance pipeline
+ships to #maintenance Discord. The per-phase emit is printf-built and needs
+no jq; only the rollup does (and it degrades to an overall-status-only
+summary without it). See the Wazuh agent section below.
 
 Configure fail2ban with an `sshd` jail at
 `/etc/fail2ban/jail.local`:
@@ -482,15 +488,22 @@ dedicated `wazuh-home` manager. What each ships:
   proxy-home, pihole) each tail `/var/log/fail2ban.log`; manager
   `fail2ban-file` decoder + rule 100401 fire on a ban. The edge VPS runs
   fail2ban too but has no Wazuh agent, so its bans aren't shipped.
+- **Vaultwarden VM (maintenance)**, `main.sh` writes a JSON status log
+  (`/srv/logs/status/*.jsonl`) that the agent tails (strftime localfile);
+  manager rules 100500-100502 turn the nightly run summary into a
+  #maintenance Discord report (green OK, @ on degraded/fail). Wire this
+  after the first `main.sh` run (Phase 14), since the log is born then.
 
-All four sources also fan out to per-channel Discord via one
-`custom-discord` integrator. Decoders, rules, sidecars, localfiles, and
-the integrator all live in [`wazuh-home/`](./wazuh-home/); follow its
-README for the full apply procedure (the `modsec-tail.service` and
-`pihole-ftl-tail.service` headers carry the per-host install commands,
-and README §Log Rotation has the `modsec-events` + `vault-dns` logrotate
-text). Idea #7 in `ideas.md` covers the still-pending SIEM rollout for
-`vw-logs/` / `bw-logs/` + a `main.sh` status log.
+All five sources also fan out to per-channel Discord via one
+`custom-discord` integrator (real webhook URLs live in a gitignored
+`discord-webhooks.json` side-file on the manager, not in the script).
+Decoders, rules, sidecars, localfiles, and the integrator all live in
+[`wazuh-home/`](./wazuh-home/); follow its README for the full apply
+procedure (the `modsec-tail.service` and `pihole-ftl-tail.service` headers
+carry the per-host install commands, and README §Log Rotation has the
+`modsec-events` + `vault-dns` logrotate text). Idea #7 in `ideas.md` covers
+what's still pending: shipping `vw-logs/` / `bw-logs/`, the no-run-in-25h
+deadman-equivalent rule, and FIM.
 
 If you don't have a Wazuh manager and don't plan to add one, skip this
 sub-section entirely.
@@ -563,16 +576,16 @@ Things to verify on the LAN Pi-hole VM before continuing:
   gate; DNS-layer blocking would just add a hard-to-diagnose failure
   mode).
 - Sidecar daemon installed on the Pi-hole VM:
-  `wazuh-home/sidecar/pihole-ftl-tail.py` at `/usr/local/sbin/`,
-  `wazuh-home/sidecar/pihole-ftl-tail.service` at `/etc/systemd/system/`,
+  `wazuh-home/sidecar/pihole/pihole-ftl-tail.py` at `/usr/local/sbin/`,
+  `wazuh-home/sidecar/pihole/pihole-ftl-tail.service` at `/etc/systemd/system/`,
   enabled and running (`sudo systemctl status pihole-ftl-tail`).
   The daemon writes structured JSON events to
   `/var/log/vault-dns/events.log`.
 - Wazuh agent on the Pi-hole VM with the localfile blocks from
-  `wazuh-home/pihole-agent.localfile.xml` applied (tails the sidecar's
+  `wazuh-home/dns/pihole-agent.localfile.xml` applied (tails the sidecar's
   output log); manager-side rules from
-  `wazuh-home/manager-rules.xml` applied to wazuh-home; `logall_json`
-  from `wazuh-home/manager-global.snippet.xml` flipped on; optionally
+  `wazuh-home/dns/manager-rules.xml` applied to wazuh-home; `logall_json`
+  from `wazuh-home/manager/manager-global.snippet.xml` flipped on; optionally
   filebeat's wazuh archives module also enabled
   (`/etc/filebeat/filebeat.yml`, `archives.enabled: true`) so the
   `wazuh-archives-4.x-*` index appears in the dashboard for catch-all
@@ -784,7 +797,7 @@ sudo chmod 750 /srv/vw-data /srv/vw-logs /srv/bw-logs
 
 # Backups + maintenance script logs
 sudo mkdir -p /srv/backups
-sudo mkdir -p /srv/logs/{main,backup,docker,system}
+sudo mkdir -p /srv/logs/{main,backup,docker,system,status}
 
 # Pinned-tools dirs (populated by Phase 8)
 sudo mkdir -p /srv/tools/age /srv/tools/minisign
@@ -1265,6 +1278,19 @@ succeeded (`OK` / `DOCKER_UPDATE_FAILED_BACKUP_OK` / `SYSTEM_UPDATE_FAILED` /
 etc.). Deadman ping fires at the end if `DEADMAN_URL` is set in
 `lib.sh` (off by default, see `ideas.md` #2).
 
+`main.sh` also writes a machine-readable JSON status log, one line per
+phase plus a `phase=run` rollup, to
+`/srv/logs/status/vault-maint-status-YYYY-MM-DD.jsonl` (`emit_status` /
+`emit_run_summary`; needs `jq` for the rollup). The `run` line is emitted
+**before** the reboot so the Wazuh agent can ship it to the manager before
+the box goes down (an exit-trap-after-reboot races the shutdown). If you've
+wired the Wazuh maintenance pipeline (`vault-maint-agent.localfile.xml` +
+`manager-maint-rules.xml` rules 100500-100502 + the maintenance
+`<integration>` block, see `wazuh-home/README.md`), this manual run also
+produces a #maintenance Discord report (green OK, since nothing failed).
+Eyeball the JSON with
+`sudo cat /srv/logs/status/vault-maint-status-$(date +%F).jsonl | jq .`.
+
 ## Phase 15, Restore from backup (the actually-important phase)
 
 This is where you verify the rebuild worked. Not theoretical, do it.
@@ -1399,6 +1425,9 @@ Tick all of these before declaring the rebuild done:
       email; verify it arrives.
 - [ ] First successful `main.sh` run visible at
       `/srv/logs/main/main-YYYY-MM-DD.log` with `STATUS: OK`.
+- [ ] (If the Wazuh maintenance pipeline is wired) the run also wrote a
+      `phase=run` line to `/srv/logs/status/*.jsonl` and posted a green
+      #maintenance Discord report.
 - [ ] `/srv/backups/vaultwarden-backup-bundle-YYYY-MM-DD.tar.gz` exists
       and is signed (the `.minisig` is bundled inside).
 - [ ] TrueNAS shows the latest bundle (the `truenas-script.sh` cron
