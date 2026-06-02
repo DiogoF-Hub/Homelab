@@ -97,7 +97,7 @@ vaultwarden/
 │   │   └── fail2ban-agent.localfile.xml       # <localfile> for /var/log/fail2ban.log (every host running the sshd jail)
 │   ├── maintenance/                           # maintenance pipeline (nightly main.sh run summary)
 │   │   ├── manager-maint-rules.xml            # rules 100500 (base) + 100501 (run ok, L3) + 100502 (run degraded|fail, L11); match the derived vw_sev field, not the static status
-│   │   └── vault-maint-agent.localfile.xml    # Vault VM agent tails the JSON status log (strftime path, dated daily)
+│   │   └── vault-maint-agent.localfile.xml    # Vault VM agent tails the JSON status log (single stable path)
 │   ├── manager/                               # manager-wide config (not pipeline-specific)
 │   │   └── manager-global.snippet.xml         # logall_json toggle for the wazuh-home <global> block
 │   ├── integrations/                          # the Discord integrator + its routing blocks
@@ -581,7 +581,7 @@ So if the TrueNAS-side private key is ever stolen, the blast radius is "an attac
 * **Image-update + system-update failures log-and-continue**, retry tomorrow
 * **Reboot is unconditional** if both safety gates pass (containers stopped + apt/dpkg lock free)
 * The `STATUS:` line at the end of each `main.sh` run summarises what succeeded (`OK` / `DOCKER_UPDATE_FAILED_BACKUP_OK` / etc.)
-* Human-readable logs land at `/srv/logs/{main,backup,docker,system}/` with 30-day retention; a machine-readable JSON status log lands at `/srv/logs/status/vault-maint-status-YYYY-MM-DD.jsonl` (same 30-day `find` retention), which Wazuh tails for the nightly #maintenance Discord report. `DEADMAN_URL` stays as the independent external "did it run at all" net (the Discord summary fires when a run completes; it can't catch a run that never happened)
+* Human-readable logs land at `/srv/logs/{main,backup,docker,system}/` with 30-day retention; a machine-readable JSON status log lands at `/srv/logs/status/vault-maint-status.jsonl` (a single file, rotated host-side by logrotate copytruncate), which Wazuh tails for the nightly #maintenance Discord report. `DEADMAN_URL` stays as the independent external "did it run at all" net (the Discord summary fires when a run completes; it can't catch a run that never happened)
 
 Only `main.sh` goes in cron, never schedule phase scripts independently. They depend on the orchestrator's locking and ordering.
 
@@ -908,7 +908,7 @@ A map of every log this stack writes, what each one captures, and what consumes 
 | `/srv/bw-logs/bunkerweb.log`, `redis.log`, `scheduler.log`, `ui.log` | BW's own internal logs: scheduler runs, Redis state, web UI activity, top-level container output. | Operator (debugging) |, |
 | `/srv/bw-logs/letsencrypt/*` | certbot logs from BW's bundled ACME flow. **Rotated internally by BW**, not in scope for the host logrotate config. | Operator (cert renewal debugging) |, |
 | `/srv/logs/{main,backup,docker,system}/*.log` | Maintenance script logs, one file per phase per day. `main-YYYY-MM-DD.log` (orchestrator), `vault-backup-YYYY-MM-DD.log`, `update-YYYY-MM-DD.log` (docker), `system-autoupdate-YYYY-MM-DD.log`. 30-day retention enforced by `find -mtime +30 -delete` at the end of each phase script (NOT logrotate). | Operator, TrueNAS (pulled nightly via `truenas-script.sh`) | , (human-readable; the machine-readable summary is the JSONL row below) |
-| `/srv/logs/status/vault-maint-status-YYYY-MM-DD.jsonl` | Machine-readable maintenance status: one JSON line per phase (`emit_status` in `lib.sh`) plus a final `phase=run` rollup (`emit_run_summary` in `main.sh`), with `event_type=vault_maint`, `status`, the derived `vw_sev`, and detail (backup bundle size, images updated, apt package names, etc.). Dated daily, same 30-day `find` retention. | Wazuh agent (tails as `log_format=json` via a strftime localfile; manager rules 100500-100502; the `phase=run` line → #maintenance Discord, green OK or @ on degraded/fail) | n/a |
+| `/srv/logs/status/vault-maint-status.jsonl` | Machine-readable maintenance status: one JSON line per phase (`emit_status` in `lib.sh`) plus a final `phase=run` rollup (`emit_run_summary` in `main.sh`), with `event_type=vault_maint`, `status`, the derived `vw_sev`, and detail (backup bundle size, images updated, apt package names, etc.). Single file; rotated host-side by logrotate (copytruncate). | Wazuh agent (tails as `log_format=json` via a single-file localfile; manager rules 100500-100502; the `phase=run` line → #maintenance Discord, green OK or @ on degraded/fail) | n/a |
 
 ### LAN Pi-hole VM
 
@@ -923,7 +923,7 @@ Wazuh agents are installed and enrolled across three VMs in the homelab, with ve
 
 | VM | Agent state | What's actually shipping |
 |----|-------------|--------------------------|
-| Vaultwarden VM | Installed, enrolled, **custom localfiles + sidecar** | `modsec-tail.py` sidecar (dedicated `modsectail` user) flattens BunkerWeb's `modsec_audit.log` to `/var/log/modsec-events/events.log`; agent ships it; manager rules 100300-100303 tier by CRS anomaly score (`band=high` → #modsec Discord). Plus the nightly `main.sh` JSON status log (`/srv/logs/status/*.jsonl`, strftime localfile) → manager rules 100500-100502 → #maintenance Discord. Still stock for `vw-logs/` / `bw-logs/` and FIM (see [ideas.md](ideas.md) #7). |
+| Vaultwarden VM | Installed, enrolled, **custom localfiles + sidecar** | `modsec-tail.py` sidecar (dedicated `modsectail` user) flattens BunkerWeb's `modsec_audit.log` to `/var/log/modsec-events/events.log`; agent ships it; manager rules 100300-100303 tier by CRS anomaly score (`band=high` → #modsec Discord). Plus the nightly `main.sh` JSON status log (`/srv/logs/status/*.jsonl`, single-file localfile) → manager rules 100500-100502 → #maintenance Discord. Still stock for `vw-logs/` / `bw-logs/` and FIM (see [ideas.md](ideas.md) #7). |
 | `proxy-home` VM | Installed, enrolled, **installer-auto-discovered localfile** | The Wazuh agent installer auto-detected Squid and added the `/var/log/squid/access.log` localfile itself (no manual config); Wazuh's built-in squid decoder handles it, `action=TCP_DENIED` → #squid Discord. |
 | LAN Pi-hole VM | Installed, enrolled, **custom localfile + sidecar daemon** | `pihole-ftl-tail.py` daemon polls Pi-hole's FTL SQLite DB and emits structured JSON events to `/var/log/vault-dns/events.log`; agent ships those; manager rules 100250-100253 produce per-query alerts (resolved L3, Pi-hole-policy block L6, upstream no-answer L4) using the built-in JSON decoder. Config in [`wazuh-home/`](./wazuh-home/). |
 | All four home VMs (not the VPS) | fail2ban localfile | Each tails `/var/log/fail2ban.log`; manager `fail2ban-file` decoder + rule 100401 fire on an sshd-jail ban (→ #fail2ban Discord). The edge VPS runs fail2ban but has no Wazuh agent, so its bans aren't shipped. |
@@ -1022,7 +1022,23 @@ Bounds the FTL-DB sidecar's output log. Install logrotate first if it isn't ther
 
 ### Maintenance script logs (Vaultwarden VM)
 
-Maintenance script logs at `/srv/logs/{main,backup,docker,system}/`, and the JSON status log at `/srv/logs/status/`, are NOT rotated by logrotate, each phase script (and `main.sh` for the status log) handles its own 30-day retention via `find -mtime +30 -delete` at the end of the run.
+The human-readable maintenance logs at `/srv/logs/{main,backup,docker,system}/` are NOT rotated by logrotate, each phase script handles its own 30-day retention via `find -mtime +30 -delete` at the end of the run.
+
+The machine-readable JSON status log is the exception: it's a **single file** (`/srv/logs/status/vault-maint-status.jsonl`) the Wazuh agent tails continuously, so it needs `copytruncate` rotation (same reason as `vault-dns` / `bunkerweb` above, keep the agent's open fd valid). Host-side `/etc/logrotate.d/vault-maint-status`:
+
+```
+/srv/logs/status/vault-maint-status.jsonl {
+    monthly
+    rotate 12
+    compress
+    delaycompress
+    missingok
+    notifempty
+    copytruncate
+}
+```
+
+It's a single file (not dated-per-day) on purpose: that keeps the agent's tail position persistent across the nightly reboot. A dated, new-each-day file isn't picked up by the agent before the run reboots, so the nightly line never ships (which is exactly what happened the first cron night). Volume is tiny (~one run/day), so `monthly` / `rotate 12` is plenty.
 
 ---
 

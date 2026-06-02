@@ -223,8 +223,8 @@ fi
 
 log "orchestrator done: $STATUS"
 
-# Retention on the orchestrator log + the JSON status log
-find "$MAIN_LOG_DIR"   -name "main-*.log"                 -mtime +"$RETENTION_DAYS" -print -delete >> "$PHASE_LOG" 2>&1 || true
-find "$STATUS_LOG_DIR" -name "vault-maint-status-*.jsonl" -mtime +"$RETENTION_DAYS" -print -delete >> "$PHASE_LOG" 2>&1 || true
+# Retention on the orchestrator log. The JSON status log is a single file
+# rotated host-side by logrotate (copytruncate), see README Log Rotation.
+find "$MAIN_LOG_DIR" -name "main-*.log" -mtime +"$RETENTION_DAYS" -print -delete >> "$PHASE_LOG" 2>&1 || true
 
 exit 0

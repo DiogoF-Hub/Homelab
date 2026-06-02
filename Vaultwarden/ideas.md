@@ -453,9 +453,9 @@ README §Automation Scripts.
 > 100400-100401, maintenance 100500-100502.
 >
 > **Phase A is DONE:** `lib.sh` `emit_status` + `main.sh` `emit_run_summary`
-> write a JSON status log (`/srv/logs/status/vault-maint-status-*.jsonl`, one
-> line per phase + a `phase=run` rollup); the Vault VM agent tails it (strftime
-> localfile) and rules 100500-100502 fire the nightly report. Two non-obvious
+> write a JSON status log (`/srv/logs/status/vault-maint-status.jsonl`, one
+> line per phase + a `phase=run` rollup); the Vault VM agent tails it (a single
+> stable file) and rules 100500-100502 fire the nightly report. Two non-obvious
 > implementation notes: (1) the rules match a DERIVED `vw_sev` (info/warn)
 > field, because Wazuh reserves `status` as a static field that `<field>`
 > can't match (same trap as fail2ban's `action`); (2) the run summary is
@@ -549,11 +549,14 @@ Wazuh rules are firing reliably, then retire `DEADMAN_URL` from
 > Implemented. `lib.sh` has `emit_status PHASE STATUS RC [k=v ...]` (printf-built
 > JSON, no jq dependency to emit) + a `status_init` EXIT-trap scaffold each
 > phase script uses; `main.sh` has `emit_run_summary` that rolls the per-phase
-> lines into a `phase=run` event (jq-aggregated). Output is DATED
-> (`/srv/logs/status/vault-maint-status-YYYY-MM-DD.jsonl`, not the single file
-> sketched below), 30-day `find` retention. The run summary is emitted BEFORE
-> the reboot phase (an exit-trap-after-reboot races the shutdown and the
-> summary is lost). Wazuh ingests it (rules 100500-100502 → #maintenance). The
+> lines into a `phase=run` event (jq-aggregated). Output is a SINGLE file
+> (`/srv/logs/status/vault-maint-status.jsonl`, as the sketch below shows),
+> rotated host-side by logrotate. A dated-per-day variant was tried and
+> reverted: the agent didn't pick up the brand-new daily file before the
+> run's reboot, so the first cron night produced no Discord; one stable file
+> keeps a persistent tail position. The run summary is emitted BEFORE the
+> reboot phase (an exit-trap-after-reboot races the shutdown and the summary
+> is lost). Wazuh ingests it (rules 100500-100502 → #maintenance). The
 > shipped fields differ from the draft below: added `vw_sev` (the rule-match
 > field, since `status` is a reserved Wazuh static field), `backup_size`,
 > `images_updated`, `pull_failures`, `apt_upgraded`/`apt_count`; dropped

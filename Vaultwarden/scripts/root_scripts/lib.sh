@@ -58,8 +58,15 @@ readonly SYSTEM_LOG="${SYSTEM_LOG_DIR}/system-autoupdate-${TODAY_DATE}.log"
 # emit_status(). The Vault VM Wazuh agent tails it (event_type=vault_maint)
 # and the manager turns the `run` event into a nightly Discord report.
 # See wazuh-home/ + ideas.md #7 Phase A.
+#
+# SINGLE non-dated file on purpose: the agent keeps a persistent tail
+# position on one stable path, so the `run` line still ships even though
+# the run reboots ~5s after writing it. A dated, new-each-day file is NOT
+# picked up by the agent's logcollector in that tiny window and the line is
+# lost (learned the hard way: the first cron night produced no Discord).
+# Retention is host-side logrotate copytruncate, like vault-dns / modsec.
 readonly STATUS_LOG_DIR="${LOG_ROOT}/status"
-readonly STATUS_LOG="${STATUS_LOG_DIR}/vault-maint-status-${TODAY_DATE}.jsonl"
+readonly STATUS_LOG="${STATUS_LOG_DIR}/vault-maint-status.jsonl"
 
 # ---- locking ------------------------------------------------------------
 
