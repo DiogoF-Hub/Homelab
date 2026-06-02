@@ -163,9 +163,18 @@ touch starts failing.
 3. Include `/var/log/lynis/` in the `main.sh` backup set so reports travel
    with the vault bundle, they're tiny and useful post-incident.
 
-4. Add `packages.cisofy.com` / `github.com` (already present) to
-   `proxy-home/vault_domains_allow_proxy.txt` if you later switch to their APT
-   repo; git-clone method needs no new allowlist entry.
+4. Allowlist entries (mirror any new one in BOTH `vault_domains_allow_dns.txt`
+   and `proxy-home/vault_domains_allow_proxy.txt`, the usual lockstep
+   convention):
+   - **`lynis-latest-version.cisofy.com`**, REQUIRED regardless of install
+     method. `lynis audit system` runs a version check against this host (a
+     DNS TXT lookup for the latest release); without it Lynis logs an
+     "update check failed" warning on every run. The DNS-side entry is the
+     load-bearing one (it's a TXT lookup, so Pi-hole's `.*` deny-regex would
+     otherwise block it); add the Squid one too to keep the pair in sync.
+   - `packages.cisofy.com` / `github.com` (the latter already present), only
+     needed if you switch to their APT repo; the git-clone install method
+     needs no new entry for the binary itself.
 
 5. First run produces a baseline hardening index (0–100). Subsequent runs
    should stay at-or-above that number; investigate any drop. Aim for the
@@ -1161,12 +1170,16 @@ and becomes a peer (or replacement) for the cosign-based age path.
 
 ---
 
-## 9. Wazuh alert when the Vault VM resolves a domain not on the Squid allowlist, MERGED INTO #7
+## 9. Wazuh alert when the Vault VM resolves a domain not on the Squid allowlist, ✅ DONE (MERGED INTO #7)
 
 Originally drafted as a standalone idea, but it's structurally a Wazuh
 alert rule and belongs under the broader Wazuh rollout. Full write-up
 moved to **idea #7, Phase C, subsection "Allowlist-anomaly alert for
-the Vault VM"**.
+the Vault VM"**, which is ✅ DONE: the Vault VM resolves through a Pi-hole
+`vaultwarden-vm` group with a `.*` deny-regex + allowlist, so any
+non-allowlisted lookup comes back `status=blocked-regex` and fires rule
+100252 (→ #dns). The DNS layer actually BLOCKS the lookup, not just alerts,
+so it's stronger than the Wazuh-only check first sketched here.
 
 This stub is kept so cross-references to "idea #9" still resolve to a
 forwarding pointer rather than a dead link. Don't expand back into a
