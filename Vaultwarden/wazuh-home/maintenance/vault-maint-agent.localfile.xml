@@ -5,15 +5,17 @@
   /var/ossec/etc/ossec.conf, then restart the agent:
       sudo systemctl restart wazuh-agent
       sudo grep maint-status /var/ossec/logs/ossec.log | tail
-      # expect: Analyzing file: '/srv/logs/status/vault-maint-status-...jsonl'
+      # expect: Analyzing file: '/srv/logs/status/vault-maint-status.jsonl'
 
-  Source: /srv/logs/status/vault-maint-status-YYYY-MM-DD.jsonl, the JSON
-  lines emitted by the nightly maintenance run (lib.sh emit_status: one
-  line per phase + a final phase=run summary). The filename is dated daily
-  (matching the other maintenance logs + their find-based retention), so
-  the <location> uses strftime (%Y-%m-%d); Wazuh's logcollector resolves
-  it per day and tails the current file. The run fires at ~05:35, well
-  after the midnight rollover, so there's no gap.
+  Source: /srv/logs/status/vault-maint-status.jsonl, the JSON lines emitted
+  by the nightly maintenance run (lib.sh emit_status: one line per phase +
+  a final phase=run summary). A SINGLE non-dated file ON PURPOSE: the agent
+  keeps a persistent tail position on one stable path, so the phase=run
+  line still ships even though the run reboots ~5s after writing it. A
+  dated, new-each-day file is NOT picked up by logcollector in that window
+  and the line is lost before the reboot (the first cron night produced no
+  Discord because of exactly this). Retention is host-side logrotate
+  copytruncate, see Vaultwarden/README.md Log Rotation.
 
   log_format=json so the manager's built-in JSON decoder extracts every
   field into data.*; manager-maint-rules.xml fires rules 100500-100502
@@ -29,6 +31,6 @@
 <ossec_config>
   <localfile>
     <log_format>json</log_format>
-    <location>/srv/logs/status/vault-maint-status-%Y-%m-%d.jsonl</location>
+    <location>/srv/logs/status/vault-maint-status.jsonl</location>
   </localfile>
 </ossec_config>

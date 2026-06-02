@@ -6,7 +6,7 @@
       sudo /var/ossec/bin/wazuh-analysisd -t
       sudo systemctl restart wazuh-manager
 
-  Source: /srv/logs/status/vault-maint-status-*.jsonl on the Vault VM
+  Source: /srv/logs/status/vault-maint-status.jsonl on the Vault VM
   (lib.sh emit_status; localfile in vault-maint-agent.localfile.xml). The
   built-in JSON decoder extracts each field into data.*; event_type=
   vault_maint is the discriminator.

@@ -489,7 +489,7 @@ dedicated `wazuh-home` manager. What each ships:
   `fail2ban-file` decoder + rule 100401 fire on a ban. The edge VPS runs
   fail2ban too but has no Wazuh agent, so its bans aren't shipped.
 - **Vaultwarden VM (maintenance)**, `main.sh` writes a JSON status log
-  (`/srv/logs/status/*.jsonl`) that the agent tails (strftime localfile);
+  (`/srv/logs/status/*.jsonl`) that the agent tails (single-file localfile);
   manager rules 100500-100502 turn the nightly run summary into a
   #maintenance Discord report (green OK, @ on degraded/fail). Wire this
   after the first `main.sh` run (Phase 14), since the log is born then.
@@ -1280,7 +1280,7 @@ etc.). Deadman ping fires at the end if `DEADMAN_URL` is set in
 
 `main.sh` also writes a machine-readable JSON status log, one line per
 phase plus a `phase=run` rollup, to
-`/srv/logs/status/vault-maint-status-YYYY-MM-DD.jsonl` (`emit_status` /
+`/srv/logs/status/vault-maint-status.jsonl` (`emit_status` /
 `emit_run_summary`; needs `jq` for the rollup). The `run` line is emitted
 **before** the reboot so the Wazuh agent can ship it to the manager before
 the box goes down (an exit-trap-after-reboot races the shutdown). If you've
@@ -1289,7 +1289,7 @@ wired the Wazuh maintenance pipeline (`vault-maint-agent.localfile.xml` +
 `<integration>` block, see `wazuh-home/README.md`), this manual run also
 produces a #maintenance Discord report (green OK, since nothing failed).
 Eyeball the JSON with
-`sudo cat /srv/logs/status/vault-maint-status-$(date +%F).jsonl | jq .`.
+`sudo cat /srv/logs/status/vault-maint-status.jsonl | jq .`.
 
 ## Phase 15, Restore from backup (the actually-important phase)
 
