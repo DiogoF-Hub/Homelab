@@ -1,0 +1,32 @@
+# Ban an IP the moment ModSecurity scores a request as a serious attack.
+#
+# CRS rule 949110 is the inbound anomaly-score VERDICT: it fires once per
+# request whose accumulated score crosses the threshold, regardless of which
+# attack class (SQLi / XSS / RCE / Node / ...) contributed. So this is a
+# GENERAL "ModSecurity says this is an attack" ban, not tied to one rule.
+#
+# Gated on Total Score >= 30 (matches the #modsec "high" band): the live
+# score histogram showed non-attack traffic topping out at 10 and real
+# attacks starting at 55, so 30 sits cleanly in the empty gap. The regex
+# matches 30-99 and 100+; scores of 5 / 10 (single low-severity rule clips)
+# are left alone so legit/borderline requests are never banned.
+#
+# Source: the inline `ModSecurity: Warning ... [id "949110"] [msg "...Total
+# Score: N..."]` lines BunkerWeb writes to error.log, parsed by
+# crowdsecurity/modsecurity (which sets evt.Meta.rule_id / source_ip /
+# modsec_message). Private/LAN IPs are already protected by
+# crowdsecurity/whitelists, so this can never ban internal traffic.
+#
+# Deploy: this folder is mounted :ro into the crowdsec container at
+# /etc/crowdsec/scenarios/vaultwarden/. After adding/editing, reload with
+# `podman restart crowdsec` and confirm via `cscli scenarios list`.
+type: trigger
+name: vaultwarden/modsec-high-anomaly
+description: "ModSecurity flagged a high-severity attack (CRS inbound anomaly score >= 30)"
+filter: 'evt.Meta.log_type == "modsecurity" && evt.Meta.rule_id == "949110" && evt.Meta.modsec_message matches "Total Score: ([3-9][0-9]|[0-9]{3,})"'
+groupby: "evt.Meta.source_ip"
+blackhole: 1m
+labels:
+  remediation: true
+  behavior: "http:exploit"
+  label: "ModSecurity high-anomaly attack"
