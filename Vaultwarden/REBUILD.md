@@ -1021,8 +1021,28 @@ cd vault/bunkerweb
 > stop running containers, corrupting the next backup. Match the name.
 
 Copy `.env.template` → `.env` and fill in **every** value. The file is
-grouped by purpose (infra / ACME / tunnel / CrowdSec / Vaultwarden /
-SMTP). Do not commit the filled `.env`.
+grouped by purpose (infra / ACME / tunnel / BunkerWeb UI / CrowdSec /
+Vaultwarden / SMTP). Do not commit the filled `.env`.
+
+**Web UI TLS cert.** All three flavours set `UI_SSL_ENABLED=yes` for the
+BunkerWeb admin UI (port 7000) and bind-mount its cert from
+`/srv/bw-ui-tls`, so that dir must hold `cert.pem` + `key.pem` before the
+first boot (Phase 12) or the UI won't start. Generate an internal-CA-signed
+leaf off-box (SANs for the VM hostname + its LAN IP, e.g. `vaultwarden-home`
++ `192.168.50.3`), then place it:
+
+```bash
+sudo mkdir -p /srv/bw-ui-tls
+# copy cert.pem + key.pem in (scp / paste), then:
+sudo chown poduser:poduser /srv/bw-ui-tls/cert.pem /srv/bw-ui-tls/key.pem
+sudo chmod 0644 /srv/bw-ui-tls/cert.pem
+sudo chmod 0600 /srv/bw-ui-tls/key.pem
+```
+
+The UI loads its cert as root at container startup (poduser maps to
+container-root in the rootless userns), so `poduser:poduser 0600` on the key
+is readable, no need to chown to a subuid. The admin account is seeded from
+`.env`'s `UI_ADMIN_*` on first boot, so there's no setup wizard to complete.
 
 Pick your flavour. **What's actually running in this deployment**:
 `docker-compose.public-dns01.yml` paired with the edge VPS in
