@@ -199,7 +199,7 @@ Notes:
 - This is a system-wide setting, not per-user. Any unprivileged process can bind 80 and above. On a single-purpose VM running just the Vaultwarden stack with one human user, this is acceptable.
 - The setting controls both IPv4 and IPv6 binding despite the IPv4 name.
 - The `CAP_NET_BIND_SERVICE` capability granted to the BunkerWeb container in compose only governs the *container's internal* listener; it doesn't grant the host-side port bind that Podman performs as `poduser`.
-- Not needed for the `cf-tunnel` flavor (no host ports are published; everything goes through the cloudflared outbound tunnel).
+- Not needed for 80/443 on the `cf-tunnel` flavor (those go through the cloudflared outbound tunnel). The admin Web UI's port `7000` IS host-published on all three flavors (on `cf-tunnel` it's the only host port opened), but being >1024 it doesn't need this sysctl, only 80/443 do.
 - If you set the threshold to `443` instead of `80`, port 443 works but port 80 does not. Fine if you've dropped port 80 from the compose, otherwise use `80`.
 
 ##### QUIC UDP receive buffer (only relevant for `cf-tunnel` flavor)
@@ -235,6 +235,10 @@ EMAIL_LETS_ENCRYPT=''          # Used as the ACME contact email
 CLOUDFLARE_API_TOKEN=''        # Scoped Cloudflare token for DNS-01 challenges (used by public-dns01 and cf-tunnel; not needed for public-http01)
 CLOUD_TOKEN=''                 # cloudflared tunnel token (cf-tunnel reference flavor only; not used today)
 
+# --- BunkerWeb Web UI ---
+UI_ADMIN_USERNAME=''           # Admin login for BunkerWeb's Web UI (port 7000); seeds the account on boot, skips the setup wizard
+UI_ADMIN_PASSWORD=''           # 8+ chars, lower+upper+digit+special; mapped to BW's ADMIN_PASSWORD (UI_* namespaced so it doesn't clash with ADMIN_TOKEN). Avoid # and $ in .env
+
 # --- CrowdSec ---
 CROWDSEC_BOUNCER_KEY=''        # API key shared between CrowdSec LAPI and BunkerWeb's bouncer plugin (generate with `openssl rand -base64 48`)
 CROWDSEC_ENROLL_KEY=''         # Console-enrollment key for app.crowdsec.net (one-time)
@@ -258,6 +262,16 @@ I personally use [Mailjet](https://www.mailjet.com) for SMTP.
 
 ---
 
+### **BunkerWeb Admin Web UI**
+
+BunkerWeb's all-in-one image bundles a web UI (`SERVICE_UI=yes` by default); this stack exposes it on **port 7000**, served over HTTPS directly on the UI's own listener (no reverse-proxy vhost).
+
+- **TLS via an internal-CA cert.** `UI_SSL_ENABLED=yes` + `UI_SSL_CERTFILE`/`UI_SSL_KEYFILE` point at an internal-CA-signed leaf (SANs for the VM hostname + LAN IP) bind-mounted read-only from `/srv/bw-ui-tls`, a host dir kept **outside** the git tree since it holds the private key. The UI does **not** auto-generate a cert. Devices that trust the homelab root CA get a clean padlock. The key on the VM is `0600`, owned by the container's mapped uid (the one that owns `ui.log`) so the rootless container can read it, a `root:root 0600` key bind-mounted into a rootless container is NOT readable (host root isn't mapped into the container userns).
+- **Admin seeded from `.env`.** `UI_ADMIN_USERNAME`/`UI_ADMIN_PASSWORD` create the admin account on boot and skip the first-run setup wizard (reproducible across restarts/rebuilds). They're namespaced `UI_*` so they don't clash with Vaultwarden's `ADMIN_TOKEN`; the compose maps them to BunkerWeb's own `ADMIN_USERNAME`/`ADMIN_PASSWORD`. Enable TOTP 2FA on the account once you're in.
+- **Never public.** 7000 is host-published but deliberately kept out of the VPS_TUNNEL firewall rules, so it's unreachable from the edge. Restrict it to your admin device at OPNsense (see [DMZ Firewall Rules](#-dmz-firewall-rules)).
+
+---
+
 ### **Three Compose Flavors**
 
 Three `docker-compose.*.yml` files are provided. They are **mutually exclusive**, only one runs at a time, all three define the same service / volume / network names so a switchover is non-destructive. **I'm only running `public-dns01.yml`** (paired with the edge VPS in `vps/`); the other two are kept in the repo as fully-working references so anyone reading this evaluating their own setup can see what each option looks like.
@@ -266,7 +280,7 @@ Three `docker-compose.*.yml` files are provided. They are **mutually exclusive**
 |------|-------------------|-----------------|----------------|--------------------|
 | **`docker-compose.public-dns01.yml`** | **Running this in production** | Direct host ports 80 + 443 (TCP) | DNS-01 via Cloudflare API token | Used here in combination with an edge VPS doing TCP passthrough + PROXY protocol (see [`vps/README.md`](vps/README.md)) since the home connection is CGNAT'd and Cloudflare-at-edge isn't acceptable for a password manager. Port 80 kept open for the http→https redirect convenience, NOT used for ACME (DNS-01 handles cert validation; no `/.well-known/acme-challenge/` exposed). Comment the `80:8080/tcp` line to close port 80 entirely if you don't want the redirect. UDP/443 (HTTP/3) deliberately not exposed because PROXY protocol is TCP-only. Requires DNS on Cloudflare for the API token. |
 | **`docker-compose.public-http01.yml`** | Reference only (not running it) | Direct host ports 80/443 (TCP+UDP) | HTTP-01 | Direct exposure when home has a routable public IP. Simplest direct setup; origin IP is public. Port 80 MUST stay open for ACME validation. The PROXY-protocol env vars are present in this file too because the same VPS topology could in principle front this flavor; **remove them if you're running with TRUE direct exposure** (no upstream proxy), or BunkerWeb will reject every connection waiting for a PROXY header that never arrives. |
-| **`docker-compose.cf-tunnel.yml`** | Reference only (not running it) | Cloudflare Tunnel (no host ports) | DNS-01 via Cloudflare API token | Outbound-only firewall, hidden origin IP, edge filtering at Cloudflare. **Reason I don't use this here**: Cloudflare terminates TLS at its edge and sees plaintext request bodies (admin token POSTs, master-password hashes), unacceptable for a password manager once you understand the threat model. Genuinely fine for non-sensitive services. Preserved as a working compose flavor; switching to it would be `podman-compose down` of the current flavor + `up -d` of this one (Podman networks + volumes carry state across cleanly). |
+| **`docker-compose.cf-tunnel.yml`** | Reference only (not running it) | Cloudflare Tunnel (no public host ports; admin UI on 7000 is host-published, LAN-only) | DNS-01 via Cloudflare API token | Outbound-only firewall, hidden origin IP, edge filtering at Cloudflare. **Reason I don't use this here**: Cloudflare terminates TLS at its edge and sees plaintext request bodies (admin token POSTs, master-password hashes), unacceptable for a password manager once you understand the threat model. Genuinely fine for non-sensitive services. Preserved as a working compose flavor; switching to it would be `podman-compose down` of the current flavor + `up -d` of this one (Podman networks + volumes carry state across cleanly). |
 
 All three run the same four services: `bunkerweb` (proxy/WAF), `crowdsec` (LAPI + parsers), `vaultwarden`, and, in the `cf-tunnel` flavor only, `cloudflared` (tunnel client).
 
@@ -625,6 +639,10 @@ Port 80 exists only for the BunkerWeb-side http→https 301 redirect, not for AC
 Rule 3 carries CrowdSec ban-decision pulls from the VPS-side bouncer to the home LAPI. The VPS runs `crowdsec-firewall-bouncer-nftables`, which polls every 10s and programs nftables drop rules for any IP banned by the home engine (BunkerWeb bruteforce scenarios, community blocklists, CTI, manual `cscli decisions add`). Result: known-bad IPs get dropped at the VPS edge before crossing the WG tunnel, in addition to BunkerWeb's in-stack bouncer plugin still 403-ing inline at home (two enforcement layers, same engine making the decisions). See [`vps/README.md` § "CrowdSec bouncer (block banned IPs at the VPS edge)"](vps/README.md) for install and config. Omit rule 3 if you're not running the VPS-side bouncer.
 
 > **Note on Rule 5 (QUIC):** Cloudflare publishes their IP ranges as a single aggregated list covering all of their services, they do not provide separate ranges per product (e.g., Tunnels, CDN, Workers). Because of this, the firewall rule must allow the entire [Cloudflare IP list](https://www.cloudflare.com/ips/) on UDP port 7844 so the `cloudflared` tunnel can be established. While this is broader than ideal, the rule is scoped to a single port (QUIC 7844) and only permits outbound UDP from the DMZ, limiting the effective exposure.
+
+### **Admin Web UI access (port 7000)**
+
+The BunkerWeb admin Web UI listens on `192.168.50.3:7000` (HTTPS, internal-CA cert) and is **deliberately absent from the VPS_TUNNEL rules above**, so it is never reachable from the public edge. To reach it from an admin workstation, add a single pass rule on that workstation's interface scoped to its source → `192.168.50.3:7000/tcp`, and let the DMZ catch-all deny everything else. Anything sharing **VLAN-DMZ** with the VM reaches `:7000` directly without traversing OPNsense, so keep that VLAN to this one host. TLS / cert details are in [BunkerWeb Admin Web UI](#bunkerweb-admin-web-ui).
 
 ---
 

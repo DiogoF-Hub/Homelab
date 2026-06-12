@@ -57,9 +57,20 @@ services:
     deploy:
       resources:
         limits:
-          memory: 384M
+          # 512M (was 384M) for headroom now that the bundled Web UI is
+          # exposed. The UI shares this container's budget with nginx +
+          # scheduler + redis; idle the whole lot sits ~240M, but active UI
+          # use can spike and an OOM here would take nginx (the proxy) down
+          # with it. +128M is cheap insurance on a 4G+ VM.
+          memory: 512M
           cpus: "0.75"
-    # No ports exposed: all traffic comes through Cloudflare Tunnel
+    # Public traffic (80/443) comes through Cloudflare Tunnel, so no host
+    # ports for it. The admin Web UI is the one exception: host-published for
+    # LAN-only admin access so it does NOT traverse Cloudflare's edge (keeps
+    # the admin session off CF, same reasoning as terminating the vault TLS at
+    # home). Restrict 7000 at your firewall to the admin device.
+    ports:
+      - "7000:7000/tcp"
     environment:
       TZ: "${TZ}"
       SERVER_NAME: "${SERVER_NAME}"
@@ -199,11 +210,36 @@ services:
       CROWDSEC_API_KEY: "${CROWDSEC_BOUNCER_KEY}"
       CROWDSEC_MODE: "stream"
       CROWDSEC_UPDATE_FREQUENCY: "15"
+
+      # --- Admin Web UI ---------------------------------------------------
+      # Bundled in the all-in-one image and enabled via SERVICE_UI below,
+      # listening on 7000 (published above). Served over TLS directly on its
+      # own listener, no reverse-proxy vhost needed. Point UI_SSL_CERTFILE/
+      # KEYFILE at an internal-CA-signed leaf (SANs for the VM hostname + LAN
+      # IP) mounted ro at /ui-tls (see volumes); the UI does NOT generate one
+      # for you. Restrict 7000 at your firewall to the admin device.
+      # SERVICE_UI pinned: it's the AIO default, but pinning keeps a future
+      # image default from silently dropping the UI.
+      SERVICE_UI: "yes"
+      UI_SSL_ENABLED: "yes"
+      UI_SSL_CERTFILE: "/ui-tls/cert.pem"
+      UI_SSL_KEYFILE: "/ui-tls/key.pem"
+      # Admin account seeded from .env (reproducible across restarts/rebuilds,
+      # skips the setup wizard). UI_ADMIN_* are namespaced in .env so they
+      # don't collide with Vaultwarden's ADMIN_TOKEN; BunkerWeb reads the keys
+      # ADMIN_USERNAME / ADMIN_PASSWORD. Password policy: 8+ chars with
+      # lower+upper+digit+special. OVERRIDE_ADMIN_CREDS: "yes" forces a reset.
+      ADMIN_USERNAME: "${UI_ADMIN_USERNAME}"
+      ADMIN_PASSWORD: "${UI_ADMIN_PASSWORD}"
     volumes:
       - bw-data:/data
       - /srv/bw-logs:/var/log/bunkerweb
       - ./bunkerweb/security.txt:/etc/bunkerweb/security.txt:ro
       - ./bunkerweb/robots.txt:/etc/bunkerweb/robots.txt:ro
+      # Web UI TLS material (internal-CA leaf + key, see UI_SSL_* above). Host
+      # dir lives OUTSIDE the git tree (private key) and its files are chown'd
+      # to the container's mapped uid so the rootless container can read them.
+      - /srv/bw-ui-tls:/ui-tls:ro
       # Custom configs mounted at /data/configs (BW's native ingest path), not
       # /etc/bunkerweb/configs. The scheduler scans /data/configs/<type>/,
       # writes into its DB, then renders to /etc/bunkerweb/configs (internal,
