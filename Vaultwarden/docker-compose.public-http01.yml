@@ -205,9 +205,14 @@ services:
       # configs in custom-configs/modsec-crs/).
       USE_MODSECURITY: "yes"
       USE_MODSECURITY_CRS: "yes"
-      # Start in DetectionOnly to identify false positives before blocking
-      # Change to "on" once you've reviewed modsec_audit.log and tuned exclusions
-      MODSECURITY_SEC_RULE_ENGINE: "DetectionOnly"
+      # Flipped to "On" 2026-06-16 after nearly two months in DetectionOnly
+      # tuning exclusions. modsec_audit.log only retains 7 days (logrotate), and
+      # that window showed only scanners crossing the blocking threshold; the FP
+      # exclusions in custom-configs/modsec-crs/ were verified against live
+      # /api/ciphers + /admin/config traffic (both 200, sub-threshold). Roll back
+      # to "DetectionOnly" + recreate if a legit-traffic FP ever surfaces, add
+      # the matching exclusion, then re-flip.
+      MODSECURITY_SEC_RULE_ENGINE: "On"
       MODSECURITY_SEC_AUDIT_ENGINE: "RelevantOnly"
       # NOTE: audit log format (JSON vs Native) is NOT exposed as a BW env
       # var; the equivalent libmodsecurity directive `SecAuditLogFormat`
@@ -310,24 +315,24 @@ services:
     environment:
       TZ: "${TZ}"
       COLLECTIONS: "bunkerity/bunkerweb"
-      # Parser-only install for now. The matching scenario
-      # (crowdsecurity/modsecurity) is intentionally NOT included because
-      # it would self-ban us on legit /admin/config and /api/ciphers
-      # traffic while MODSECURITY_SEC_RULE_ENGINE is DetectionOnly.
+      # We deliberately do NOT add the upstream crowdsecurity/modsecurity
+      # COLLECTION. Its scenario bans on a single CRITICAL-severity (sev 2)
+      # rule match, which is far too aggressive (one borderline request can
+      # cross sev-2 without being a real attack).
       #
-      # ╔══════════════════════════════════════════════════════════════════╗
-      # ║ TODO when MODSECURITY_SEC_RULE_ENGINE flips DetectionOnly→On:    ║
-      # ║   1. Delete the `PARSERS:` line below.                           ║
-      # ║   2. Change the COLLECTIONS line above to:                       ║
-      # ║      COLLECTIONS: "bunkerity/bunkerweb crowdsecurity/modsecurity"║
-      # ║   3. `podman-compose up -d` to recreate crowdsec.                ║
-      # ║                                                                  ║
-      # ║ This pulls in the parser AND the scenario. Scenario fires on     ║
-      # ║ any CRITICAL-severity (sev 2) modsec rule match; by then the     ║
-      # ║ BW-level exclusions in custom-configs/modsec-crs/ stop those     ║
-      # ║ rules firing on legit traffic, so only real probes get banned.   ║
-      # ╚══════════════════════════════════════════════════════════════════╝
-      # See acquis.d/bunkerweb.yaml for the full reasoning.
+      # Instead we ship our own scenario vaultwarden/modsec-high-anomaly (in
+      # crowdsec/scenarios/), which bans on the AGGREGATE CRS inbound anomaly
+      # score >= 10. That floor is data-driven: with the engine On, the
+      # would-be-blocks audit proved legit traffic never reaches score 5 (the
+      # BW-level exclusions strip the FP rules), so 10 (a couple of rule
+      # matches) keeps a 2x margin over legit while catching lower-scoring
+      # attacks a higher gate would miss. Less trigger-happy than the upstream
+      # single-rule scenario, which fires on one borderline match.
+      #
+      # So: KEEP the PARSERS line below even now that the engine is On, the
+      # custom scenario needs the parser's rule_id / log_type / source_ip
+      # fields, and do NOT add the collection.
+      # See acquis.d/bunkerweb.yaml for the parser-routing reasoning.
       PARSERS: "crowdsecurity/modsecurity"
       # BOUNCER_KEY_<NAME> auto-registers a bouncer named <NAME> with the
       # given API key on container start. Idempotent across container

@@ -5,28 +5,43 @@
 # attack class (SQLi / XSS / RCE / Node / ...) contributed. So this is a
 # GENERAL "ModSecurity says this is an attack" ban, not tied to one rule.
 #
-# Gated on Total Score >= 30 (matches the #modsec "high" band): the live
-# score histogram showed non-attack traffic topping out at 10 and real
-# attacks starting at 55, so 30 sits cleanly in the empty gap. The regex
-# matches 30-99 and 100+; scores of 5 / 10 (single low-severity rule clips)
-# are left alone so legit/borderline requests are never banned.
+# Gated on Total Score >= 10. After the engine flipped to On (2026-06-16), the
+# 949110 would-be-blocks audit proved legit traffic never reaches score 5 (the
+# BW-level exclusions strip the FP rules, so real traffic trips ~0 rules), only
+# scanners cross. So 10 keeps a comfortable margin above the legit ceiling while
+# catching lower-scoring attacks the old 30 gate would miss, including a future
+# attacker who stays deliberately "quiet" to dodge a high threshold. Single-rule
+# clips (score 5) are left to the per-request WAF 403 + the URI scenarios
+# (http-probing / sensitive-files), which already ban light probers. Was 30,
+# chosen during DetectionOnly before the legit ceiling was proven.
 #
-# Source: the inline `ModSecurity: Warning ... [id "949110"] [msg "...Total
-# Score: N..."]` lines BunkerWeb writes to error.log, parsed by
-# crowdsecurity/modsecurity (which sets evt.Meta.rule_id / source_ip /
-# modsec_message). Private/LAN IPs are already protected by
-# crowdsecurity/whitelists, so this can never ban internal traffic.
+# Score source (IMPORTANT): read from the rule's operator match
+# (`...BLOCKING_INBOUND_ANOMALY_SCORE' (Value: `N')`), NOT the [msg] field. In
+# blocking (On) mode ModSec writes an EMPTY `[msg ""]` on the deny, so an
+# [msg]-based "Total Score: N" filter matches nothing and the scenario never
+# fires (learned the hard way 2026-06-16). The operator Value is present in
+# BOTH On and DetectionOnly. crowdsecurity/modsecurity parses the 949110 line
+# (it handles both "Warning" and "Access denied") and exposes the operator
+# string as evt.Parsed.modsecmessage; the regex "Value: [^0-9]*[0-9]{2,}" fires
+# at score >= 10. Private/LAN IPs are protected by crowdsecurity/whitelists, so
+# this can never ban internal traffic.
 #
 # Deploy: this folder is mounted :ro into the crowdsec container at
 # /etc/crowdsec/scenarios/vaultwarden/. After adding/editing, reload with
 # `podman restart crowdsec` and confirm via `cscli scenarios list`.
 type: trigger
 name: vaultwarden/modsec-high-anomaly
-description: "ModSecurity flagged a high-severity attack (CRS inbound anomaly score >= 30)"
-filter: 'evt.Meta.log_type == "modsecurity" && evt.Meta.rule_id == "949110" && evt.Meta.modsec_message matches "Total Score: ([3-9][0-9]|[0-9]{3,})"'
+description: "ModSecurity flagged an attack (CRS inbound anomaly score >= 10)"
+filter: 'evt.Meta.log_type == "modsecurity" && evt.Meta.rule_id == "949110" && evt.Parsed.modsecmessage matches "Value: [^0-9]*[0-9]{2,}"'
 groupby: "evt.Meta.source_ip"
 blackhole: 1m
 labels:
-  remediation: true
+  remediation: true               # the load-bearing one: turns the alert into a ban
   behavior: "http:exploit"
   label: "ModSecurity high-anomaly attack"
+  service: http
+  spoofable: 0                     # HTTP source IPs are TCP-handshake-verified, not spoofable
+  confidence: 2
+  classification:                  # MITRE ATT&CK: active scanning + exploit public-facing app
+    - attack.T1595
+    - attack.T1190

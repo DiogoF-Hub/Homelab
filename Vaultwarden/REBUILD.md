@@ -1222,10 +1222,12 @@ What to watch for on first boot, in order:
 `podman ps` should show `bunkerweb`, `crowdsec`, `vaultwarden`, and (for
 `cf-tunnel` only) `cloudflared` all healthy.
 
-Test the vault loads over HTTPS from your workstation. ModSecurity is
-in `DetectionOnly` mode by default (see README §ModSecurity / OWASP CRS),
-so it won't hard-block anything yet, but every rule match is logged
-to `/srv/bw-logs/modsec_audit.log` for tuning.
+Test the vault loads over HTTPS from your workstation. ModSecurity ships
+`On` (actively blocking) in the compose (see README §ModSecurity / OWASP
+CRS), so a request crossing the CRS blocking threshold is rejected (403);
+every rule match is also logged to `/srv/bw-logs/modsec_audit.log`. If you
+hit a legit false positive during initial bring-up, roll back to
+`DetectionOnly` and recreate the container while you add an exclusion.
 
 ## Phase 13, First real login
 
@@ -1382,12 +1384,16 @@ podman exec crowdsec cscli decisions delete --ip <your-ip>
 exit   # back to your previous shell
 ```
 
-## Phase 17, ModSecurity / CRS tuning (still WIP)
+## Phase 17, ModSecurity / CRS tuning
 
-The compose ships with `MODSECURITY_SEC_RULE_ENGINE: DetectionOnly`,
-**nothing is being blocked**, every rule match is just logged to
-`/srv/bw-logs/modsec_audit.log`. This is intentional; flipping to `On`
-without exclusions in place will break Vaultwarden's API.
+The compose ships with `MODSECURITY_SEC_RULE_ENGINE: On` (blocking) as of
+2026-06-16, every rule match is logged to `/srv/bw-logs/modsec_audit.log`
+and a request crossing the CRS threshold is rejected (403). The engine ran
+in `DetectionOnly` through the tuning period until the audit log was clean
+and the exclusions were verified against live traffic. The workflow below
+is how those exclusions were built and how to add a new one if a false
+positive surfaces (roll back to `DetectionOnly` first if a FP is blocking
+real traffic).
 
 Per README §ModSecurity / OWASP CRS:
 
@@ -1403,9 +1409,10 @@ Per README §ModSecurity / OWASP CRS:
    ```bash
    podman-compose -f docker-compose.public-dns01.yml restart bunkerweb
    ```
-4. Once the audit log is consistently clean, flip
-   `MODSECURITY_SEC_RULE_ENGINE` from `DetectionOnly` to `On`.
-5. Then bump `blocking_paranoia_level` from PL1 to PL2 in
+4. The engine is already `On` in the shipped compose (flipped 2026-06-16
+   after the audit log ran clean). Roll it back to `DetectionOnly` and
+   recreate if you hit a legit FP during initial bring-up.
+5. Still pending: bump `blocking_paranoia_level` from PL1 to PL2 in
    `bunkerweb/custom-configs/modsec-crs/paranoia.conf` and re-tune.
 
 Known exclusions table (currently just rule **911100** for
