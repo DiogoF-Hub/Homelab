@@ -1401,11 +1401,14 @@ works under the custom profile.
   track `:latest`; each pull is a potential syscall-set change. A
   profile is a snapshot, not a guarantee, it needs ongoing
   maintenance.
-- **The ModSecurity engine flip (DetectionOnly to On)** and the paired
-  CrowdSec `crowdsecurity/modsecurity` scenario enable will change
-  BunkerWeb's and CrowdSec's syscall surface. The seccomp profiles
-  should be re-evaluated after that transition (tracked in
-  `MONITORING.local.md`).
+- **The ModSecurity engine flip (DetectionOnly to On)** ✅ DONE
+  (2026-06-16) changed BunkerWeb's request-handling path (it now returns
+  403 on a CRS block instead of passing through), so the seccomp profiles
+  should be re-evaluated now that blocking is live. Note the CrowdSec side
+  did NOT change: we kept the parser-only install + our custom
+  `vaultwarden/modsec-high-anomaly` scenario rather than enabling the
+  upstream `crowdsecurity/modsecurity` collection, so CrowdSec's syscall
+  surface is unchanged by the flip.
 - **Does not prevent the initial compromise**, nor protect against a
   kernel 0-day reachable through an allowed syscall, nor against a
   malicious upstream `:latest` image push. Seccomp shrinks the

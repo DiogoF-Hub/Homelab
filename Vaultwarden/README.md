@@ -66,7 +66,8 @@ vaultwarden/
 │   ├── parsers/
 │   │   └── vaultwarden-logs.yaml              # Custom parser (based on Dominic-Wagner's hub collection)
 │   ├── scenarios/
-│   │   └── vaultwarden-bf.yaml                # Custom bf + user-enum scenarios (tightened thresholds)
+│   │   ├── vaultwarden-bf.yaml                # Custom bf + user-enum scenarios (tightened thresholds)
+│   │   └── modsec-high-anomaly.yaml           # Bans on CRS anomaly score >= 10 (ModSecurity attacks)
 │   └── whitelists/
 │       └── admin-diagnostics.yaml             # Drops Vaultwarden's intentional /admin/diagnostics 4xx probes
 │
@@ -366,7 +367,7 @@ The image used in both compose flavors is the **`bunkerity/bunkerweb-all-in-one`
 | **DNSBL** | `USE_DNSBL: yes`, `DNSBL_LIST: bl.blocklist.de dnsbl.dronebl.org` | Checks source IPs against public abuse lists. |
 | **Rate limit** | `USE_LIMIT_REQ: yes`, `LIMIT_REQ_RATE: 5r/s`, `LIMIT_REQ_BURST: 15` | Per-IP nginx-level throttle. Burst of 15 absorbs parallel asset fetches on normal page loads. |
 | **bad_behavior** | `USE_BAD_BEHAVIOR: no` | **Disabled**, naive non-200 counter false-positives on Vaultwarden's `/admin/diagnostics`. CrowdSec's scenario-based detection covers this surface instead. |
-| **ModSecurity / CRS** | `USE_MODSECURITY: yes`, `USE_MODSECURITY_CRS: yes`, `MODSECURITY_SEC_RULE_ENGINE: DetectionOnly` | Engine is in **DetectionOnly**, every rule match is written to `modsec_audit.log` but **nothing is blocked**. Tuning + exclusions are still being written; the engine flips to `On` only once the audit log is clean on legitimate traffic. Full detail in the [ModSecurity / OWASP CRS section](#-modsecurity--owasp-crs-detection-only--work-in-progress). |
+| **ModSecurity / CRS** | `USE_MODSECURITY: yes`, `USE_MODSECURITY_CRS: yes`, `MODSECURITY_SEC_RULE_ENGINE: On` | Engine is **On** (actively blocking) as of 2026-06-16; a request crossing the CRS blocking threshold is rejected (403). Every rule match is still written to `modsec_audit.log`. Exclusions for Vaultwarden's API were tuned + verified against live traffic before the flip; rollback to `DetectionOnly` is trivial if a false positive surfaces. Full detail in the [ModSecurity / OWASP CRS section](#-modsecurity--owasp-crs-blocking-tuned). |
 | **CrowdSec bouncer** | `USE_CROWDSEC: yes`, `CROWDSEC_API: http://crowdsec:8080`, `CROWDSEC_MODE: stream`, `CROWDSEC_UPDATE_FREQUENCY: 15` | Polls CrowdSec LAPI every 15s for the active decisions list; enforces bans inline (returns 403). |
 | **Server header suppression** | `REMOVE_HEADERS: Server Via X-Powered-By X-AspNet-Version X-AspNetMvc-Version` | Removes server-identification headers. |
 | **Error-body passthrough** | `INTERCEPTED_ERROR_CODES: ""` | Empty override, BW does NOT replace upstream 4xx/5xx responses with branded HTML pages. Required so Vaultwarden's API JSON error bodies pass through to Bitwarden clients. |
@@ -382,15 +383,17 @@ Mounted at `/data/configs/` inside the container, BunkerWeb's native ingest path
 | `http/headers-upstream-passthrough.conf` | http | http-scope `map` directives that capture Vaultwarden's `X-Frame-Options` and `Content-Security-Policy` from upstream so the apply file can pass them through (preserving Vaultwarden's per-endpoint control, e.g., the Duo iframe on `/2fa-connector.html`). |
 | `server-http/security-txt-lang.conf` | server-http | nginx `location` blocks for `/.well-known/security.txt` and `/robots.txt`; redirects `/security.txt` to the canonical path; re-applies headers (nginx `add_header` in a `location` replaces parent headers, so they must be repeated). |
 
-ModSecurity-specific custom configs (`modsec-crs/paranoia.conf`, `modsec-crs/exclusions-before-crs.conf`, `modsec/exclusions-after-crs.conf`) are documented in the dedicated [ModSecurity / OWASP CRS section](#-modsecurity--owasp-crs-detection-only--work-in-progress) below.
+ModSecurity-specific custom configs (`modsec-crs/paranoia.conf`, `modsec-crs/exclusions-before-crs.conf`, `modsec/exclusions-after-crs.conf`) are documented in the dedicated [ModSecurity / OWASP CRS section](#-modsecurity--owasp-crs-blocking-tuned) below.
 
 ---
 
-## 🧪 ModSecurity / OWASP CRS (detection-only, work in progress)
+## 🧪 ModSecurity / OWASP CRS (blocking, tuned)
 
-> **Current state: nothing is being blocked by the WAF.** The engine is set to `MODSECURITY_SEC_RULE_ENGINE: DetectionOnly` in the compose file, so every rule match is written to `/srv/bw-logs/modsec_audit.log` but the request is **not** rejected. This is intentional, exclusions for Vaultwarden's API are still being built up, and flipping to blocking before the audit log is clean would break the clients (vault edits, attachments, sync, sends, admin panel).
+> **Current state: the WAF is actively blocking.** As of 2026-06-16 the engine is set to `MODSECURITY_SEC_RULE_ENGINE: On` in all three compose files, so a request that crosses the CRS blocking threshold is now rejected (403), not just logged. Every rule match is still written to `/srv/bw-logs/modsec_audit.log` for review.
 >
-> The engine will flip to `On` only after the audit log is consistently quiet on legitimate traffic. Until then, treat the WAF as a **logging-only tripwire**, not an active defence, blocking on this stack today is done by CrowdSec (scenario-driven IP bans) and BunkerWeb's other plugins (country / UA / DNSBL / rate limit), not by ModSecurity.
+> How it got here: the engine ran in `DetectionOnly` for nearly two months while the Vaultwarden API exclusions were tuned. `modsec_audit.log` only retains 7 days (logrotate keeps the live file plus 7 rotated `.gz`), and that window showed only external scanners crossing the CRS blocking verdict (rule 949110), no legitimate traffic. The Vaultwarden API exclusions (below) were verified active against real live traffic, a genuine `/api/ciphers` sync and an `/admin/config` save, both returned HTTP 200 and both stayed sub-threshold. Only then was the engine flipped from `DetectionOnly` to `On`.
+>
+> Rollback is trivial if a legitimate false positive ever surfaces: set `MODSECURITY_SEC_RULE_ENGINE` back to `DetectionOnly` in the compose file and recreate the container. ModSecurity now sits alongside CrowdSec (scenario-driven IP bans) and BunkerWeb's other plugins (country / UA / DNSBL / rate limit) as an active defence layer, not just a logging tripwire.
 
 ### Configuration files
 
@@ -414,7 +417,7 @@ Three custom configs in `bunkerweb/custom-configs/` carry the CRS tuning:
     podman-compose -f docker-compose.public-dns01.yml restart bunkerweb
     ```
 5. Repeat the action that triggered the false positive. Confirm the rule no longer fires.
-6. Once `modsec_audit.log` is consistently clean for ≥1 week of normal use, flip `MODSECURITY_SEC_RULE_ENGINE` from `DetectionOnly` to `On` in the compose file. Then bump `blocking_paranoia_level` from PL1 to PL2 in `paranoia.conf`.
+6. **Done (2026-06-16):** after nearly two months in `DetectionOnly` (with `modsec_audit.log`'s 7-day retention window consistently showing only external scanners crossing the blocking threshold) and the exclusions verified against live `/api/ciphers` + `/admin/config` traffic, `MODSECURITY_SEC_RULE_ENGINE` was flipped from `DetectionOnly` to `On` in all three compose files. Rollback to `DetectionOnly` + recreate stays available if a legit FP surfaces. **Remaining future step:** bump `blocking_paranoia_level` from PL1 to PL2 in `paranoia.conf` (separate later change).
 
 ### Known exclusions list
 
@@ -506,6 +509,12 @@ Two leaky-bucket scenarios, **tightened** from the hub defaults to suit a small 
 | `Dominic-Wagner/vaultwarden-bf_user-enum` | `vaultwarden_failed_auth`, distinct usernames | 5 (was 20) | 30m | 4h | Multiple distinct emails from one IP, enumeration pattern. |
 
 Legit user impact: 1–2 typos drains within minutes; never trips a ban.
+
+#### **Scenario**, `crowdsec/scenarios/modsec-high-anomaly.yaml`
+
+A custom `type: trigger` scenario: bans an IP the instant ModSecurity scores a request as an attack. It keys on CRS rule **949110** (the inbound anomaly-score verdict) and fires at score **≥ 10** (read from the rule's operator-match `Value`, since the `[msg]` field is empty once the engine is blocking). One hit = a 4h ban enforced by both bouncers.
+
+Used **instead of** the upstream `crowdsecurity/modsecurity` collection, whose scenario bans on a single CRITICAL-severity rule (too aggressive). We install only the parser (`PARSERS: "crowdsecurity/modsecurity"` on the crowdsec service); `error.log` reaches it via the second `type: modsecurity` document in `acquis.d/bunkerweb.yaml`. The threshold of 10 is data-driven: with the engine `On`, legitimate traffic never reaches score 5, so 10 keeps a 2x margin while still catching lower-scoring / future "quiet" attacks.
 
 #### **Whitelist**, `crowdsec/whitelists/admin-diagnostics.yaml`
 
@@ -920,7 +929,7 @@ A map of every log this stack writes, what each one captures, and what consumes 
 | `/srv/vw-logs/vaultwarden.log` | Vaultwarden app log: failed logins, failed admin auth, failed 2FA (TOTP + email), app errors. Enabled via `EXTENDED_LOGGING=true` + `LOG_FILE` in compose. | CrowdSec (custom parsers in `crowdsec/parsers/vaultwarden-logs.yaml`, scenarios in `crowdsec/scenarios/vaultwarden-bf.yaml`) | Wazuh (planned, see [ideas.md](ideas.md) #7 Phase B) |
 | `/srv/bw-logs/access.log` | Every BunkerWeb HTTP request, 200s, 4xx, 5xx, all of it. The full request log. | CrowdSec (hub-installed parsers for nginx access patterns) | Wazuh (planned) |
 | `/srv/bw-logs/error.log` | Nginx errors at the proxy layer (upstream timeouts, config issues, etc.). | CrowdSec (hub-installed parsers) | Wazuh (planned) |
-| `/srv/bw-logs/modsec_audit.log` | **Only WAF-triggered events** (`SecAuditLogParts ABCFHJKZ` with `RelevantOnly` selector): every CRS rule match with full request context. Currently detection-only, see [ModSecurity / OWASP CRS](#-modsecurity--owasp-crs-detection-only--work-in-progress). | Operator (manual review during exclusion tuning), CrowdSec (via error.log inline), **`modsec-tail.py` sidecar** (flattens each transaction to `/var/log/modsec-events/events.log` for Wazuh) | , |
+| `/srv/bw-logs/modsec_audit.log` | **Only WAF-triggered events** (`SecAuditLogParts ABCFHJKZ` with `RelevantOnly` selector): every CRS rule match with full request context. Engine is `On`/blocking as of 2026-06-16, see [ModSecurity / OWASP CRS](#-modsecurity--owasp-crs-blocking-tuned). | Operator (manual review during exclusion tuning), CrowdSec (via error.log inline), **`modsec-tail.py` sidecar** (flattens each transaction to `/var/log/modsec-events/events.log` for Wazuh) | , |
 | `/var/log/modsec-events/events.log` | Flattened ModSecurity events from the `modsec-tail.py` sidecar: one clean JSON line per CRS-matched transaction (`srcip / method / path / http_code / engine / rule_ids / anomaly_score / band`). Sidecar runs as the dedicated `modsectail` user. | Wazuh agent (tails as JSON; manager rules 100300-100303 in [`wazuh-home/modsec/manager-modsec-rules.xml`](./wazuh-home/modsec/manager-modsec-rules.xml); `band=high` → #modsec Discord) | n/a |
 | `/var/log/fail2ban.log` | fail2ban's own log: sshd-jail bans / unbans / jail lifecycle. Present on every host running the jail. | fail2ban itself, Wazuh agent (tails as syslog; manager `fail2ban-file` decoder + rule 100401; ban → #fail2ban Discord) | n/a |
 | `/srv/bw-logs/bunkerweb.log`, `redis.log`, `scheduler.log`, `ui.log` | BW's own internal logs: scheduler runs, Redis state, web UI activity, top-level container output. | Operator (debugging) |, |
