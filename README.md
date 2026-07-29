@@ -108,8 +108,9 @@ Homelab/
 * **Features**
 
   * Network-wide ad and tracker blocking
-  * DNS-over-HTTPS (DoH) to Cloudflare Family via `adguard/dnsproxy`
+  * DNS-over-HTTPS (DoH) to Cloudflare Family via `adguard/dnsproxy`, bound to loopback only so it can't be reached off-box
   * HTTPS-only web interface on port 443
+  * Fully env-configured through `FTLCONF_*`: local DNS records, reverse servers (conditional forwarding) back to OPNsense Unbound, wpad sinkholing, `bogusPriv`, and the reply-host settings that make `pi.hole` resolve over Tailscale
   * Custom blocklists, manual domain blocking, and a cookie-consent platform whitelist to prevent banner breakage
 * **Scripts**
 
