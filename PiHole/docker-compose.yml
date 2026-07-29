@@ -1,4 +1,5 @@
 services:
+  # DNS-over-HTTPS forwarder, sits between Pi-hole and Cloudflare
   dnsproxy:
     image: adguard/dnsproxy:latest
     container_name: dnsproxy
@@ -10,6 +11,11 @@ services:
       -b 1.1.1.1:53
       -b 1.0.0.1:53
       --cache
+    # -l 127.0.0.1  bound to loopback only, so nothing off-box can reach it
+    # -p 5335       non-standard port, keeps it clear of Pi-hole on 53
+    # -u            upstream DoH endpoint, Cloudflare family filtering
+    # -b            plain DNS bootstrap servers, only used to resolve the DoH hostname itself
+    # --cache       local cache, cuts repeat round trips to Cloudflare
     restart: unless-stopped
 
   pihole:
@@ -19,20 +25,79 @@ services:
     environment:
       TZ: 'Europe/Luxembourg'
       FTLCONF_webserver_api_password: ${FTLCONF_webserver_api_password}
+
+      # Local DNS domain
+      FTLCONF_dns_domain_name: 'localdomain'
+
+      # Local DNS Records, format: "IP HOSTNAME [HOSTNAME ...]"
+      # NOTE: this array REPLACES the web UI list and makes that page read-only.
+      # Every record you want must be listed here.
+      # EXAMPLE VALUES, replace with your own.
+      # The wpad entries are generic hardening, keep them: they sinkhole
+      # Web Proxy Auto-Discovery so a hostile network cannot serve a PAC file.
+      FTLCONF_dns_hosts: |-
+        192.168.173.1 router.localdomain router
+        192.168.173.3 switch1.localdomain switch1
+        192.168.173.20 nas.localdomain nas
+        192.168.173.30 proxy.localdomain proxy
+        0.0.0.0 wpad
+        :: wpad
+        0.0.0.0 wpad.localdomain
+        :: wpad.localdomain
+
+      # Reverse servers, formerly conditional forwarding.
+      # Sends PTR lookups for these ranges to the server that knows the names
+      # (here OPNsense Unbound, which is also the DHCP server).
+      # Format: "<enabled>,<ip-range>[/<prefix>],<server>[#<port>][,<domain>]"
+      # EXAMPLE VALUES, replace with your own
+      FTLCONF_dns_revServers: |-
+        true,192.168.173.0/24,192.168.173.1,localdomain
+        true,192.168.50.0/24,192.168.173.1,localdomain
+        true,100.64.0.0/10,100.100.100.100,example.ts.net
+
+      # Answer private-range reverse lookups locally with NXDOMAIN instead of
+      # forwarding them upstream, so internal network layout never leaks.
+      # revServers above takes precedence for the ranges it covers.
+      FTLCONF_dns_bogusPriv: 'true'
+
+      # Hide from Top Domains and Query Log WITHOUT blocking. Regex, one per line.
+      # Backslashes are doubled here because FTL's env parser strips one level;
+      # in the web UI textarea you write single backslashes instead.
+      # Line 1: wpad noise picked up on untrusted networks.
+      # Line 2: b/db/r/dr/lb._dns-sd._udp Bonjour service discovery queries.
+      FTLCONF_webserver_api_excludeDomains: |-
+        ^wpad\\.
+        \\._dns-sd\\._udp\\.
+
+      # Rate limiting off because OPNsense Unbound forwards to Pi-hole,
+      # so every query arrives from one source IP and would trip the limit.
+      FTLCONF_dns_rateLimit_count: '0'
+      FTLCONF_dns_rateLimit_interval: '0'
+
+      # These three make pi.hole resolve reliably over Tailscale,
+      # together with network_mode: host
       FTLCONF_dns_listeningMode: 'all'
-      FTLCONF_dns_reply_host_ipv4: '192.168.173.2'
+      FTLCONF_dns_reply_host_IPv4: '192.168.173.2'
       FTLCONF_dns_reply_host_force4: 'true'
+
+      # Do not block iCloud Private Relay, avoids the persistent dashboard warning
       FTLCONF_dns_specialDomains_iCloudPrivateRelay: 'false'
+
+      # OPNsense NTP server
       FTLCONF_ntp_sync_server: '192.168.173.1'
+
+      # adguard/dnsproxy listener, loopback only
       FTLCONF_dns_upstreams: '127.0.0.1#5335'
+
+      # Web interface served only on 443 over HTTPS
       FTLCONF_webserver_port: '443s'
     volumes:
       - /home/pi/pihole/data/etc-pihole:/etc/pihole
     cap_add:
-      - SYS_TIME
-      - CHOWN
-      - NET_BIND_SERVICE
-      - SYS_NICE
+      - SYS_TIME          # lets FTL set system time as NTP client
+      - CHOWN             # fixes ownership on /etc/pihole at startup
+      - NET_BIND_SERVICE  # binds privileged ports 53 and 443
+      - SYS_NICE          # raises FTL scheduling priority
     depends_on:
       - dnsproxy
     restart: unless-stopped
