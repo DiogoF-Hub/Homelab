@@ -352,7 +352,16 @@ Subnets are pinned in the compose file so the aardvark-dns gateway IPs (`10.89.0
 
 [BunkerWeb](https://www.bunkerweb.io/) is an nginx-based all-in-one reverse proxy that bundles ACME, security headers, country/UA blacklists, rate limiting, ModSecurity (CRS), and CrowdSec bouncer plugins behind a single configuration surface. It replaces the previous Caddy + Certbot + Cloudflare Worker bouncer combination.
 
-The image used in both compose flavors is the **`bunkerity/bunkerweb-all-in-one`** flavor (single container; no separate scheduler/UI/db).
+The image used in all three compose flavors is the **`bunkerity/bunkerweb-all-in-one`** flavor (single container; no separate scheduler/UI/db), tracking **`:latest`**.
+
+#### Why `:latest`, and what it costs
+
+Deliberate: security fixes land without a manual version bump, which for an internet-facing WAF matters more here than reproducibility does. Currently resolves to **BunkerWeb 1.6.13** (image built 2026-07-16), shipping **OWASP CRS 4.27.0**. Two consequences worth having written down:
+
+* **CRS can change version on any pull, with no changelog gate.** `paranoia.conf` depends on the CRS **v4** variable names `tx.blocking_paranoia_level` and `tx.detection_paranoia_level`. Those were already renamed once, from `tx.paranoia_level` / `tx.executing_paranoia_level` in CRS 3.3.x, with no back-compatibility mapping in either direction. If a future CRS renames them again, `paranoia.conf` silently becomes a no-op: detection drops to PL1, every PL2 exclusion becomes dead weight, and nothing errors. The audit log simply goes quiet, which under the promotion gate below reads as success. This is the single most important reason the post-pull check exists.
+* **`:latest` only moves when you pull.** `podman-compose down` followed by `up -d` reuses the local image, so the tag by itself guarantees nothing about freshness. The nightly `docker-update.sh` is what actually advances it.
+
+Post-pull verification commands (BunkerWeb version, CRS version, and proof that paranoia is genuinely at PL2) are in `MONITORING.local.md` § "Post-pull image check". Run it after any image bump.
 
 ### **Built-in features used**
 
@@ -365,6 +374,7 @@ The image used in both compose flavors is the **`bunkerity/bunkerweb-all-in-one`
 | **Country blacklist** | `BLACKLIST_COUNTRY: CN RU KP IR SY CU VE BY` | Geo-blocks at the proxy. |
 | **UA blacklist** | `BLACKLIST_USER_AGENT: python-requests python-urllib python-httpx httpx wget go-http-client libwww-perl masscan` (plus BW's own auto-fetched list) | Blocks scripted clients and known bad UAs. |
 | **DNSBL** | `USE_DNSBL: yes`, `DNSBL_LIST: bl.blocklist.de dnsbl.dronebl.org` | Checks source IPs against public abuse lists. |
+| **BunkerNet** | `USE_BUNKERNET` **not set**, so BW's default of `yes` applies | **Deliberately left on**, recorded here because an unset default is otherwise the only undocumented decision in this stack. Two-way: pulls roughly 100 shared bad IPs during `init()`, and reports attacks upstream to bunkerity tagged with this instance's ID. Largely redundant with CrowdSec's CAPI blocklist, which is far larger, so it is kept as an independent second opinion rather than as primary protection. **Known benign behaviour:** `bunkernet:init_worker()` intermittently times out against the bunkerity API (4 of 7 calls in one proxy-log sample). That is the *reporting* leg, not the blocklist; `init()` still succeeds and the IPs still load. Confirmed third-party latency rather than an egress problem: the Squid access log shows `TCP_TUNNEL/200` on every one of those calls with zero `DENIED`, and one call completed in 144 ms while others took 15 s. Set `USE_BUNKERNET: "no"` if the upstream reporting is ever unwanted. |
 | **Rate limit** | `USE_LIMIT_REQ: yes`, `LIMIT_REQ_RATE: 5r/s`, `LIMIT_REQ_BURST: 15` | Per-IP nginx-level throttle. Burst of 15 absorbs parallel asset fetches on normal page loads. |
 | **bad_behavior** | `USE_BAD_BEHAVIOR: no` | **Disabled**, naive non-200 counter false-positives on Vaultwarden's `/admin/diagnostics`. CrowdSec's scenario-based detection covers this surface instead. |
 | **ModSecurity / CRS** | `USE_MODSECURITY: yes`, `USE_MODSECURITY_CRS: yes`, `MODSECURITY_SEC_RULE_ENGINE: On` | Engine is **On** (actively blocking) as of 2026-06-16; a request crossing the CRS blocking threshold is rejected (403). Every rule match is still written to `modsec_audit.log`. Exclusions for Vaultwarden's API were tuned + verified against live traffic before the flip; rollback to `DetectionOnly` is trivial if a false positive surfaces. Full detail in the [ModSecurity / OWASP CRS section](#-modsecurity--owasp-crs-blocking-tuned). |
@@ -401,7 +411,7 @@ Three custom configs in `bunkerweb/custom-configs/` carry the CRS tuning:
 
 | File | Type / scope | Purpose |
 |------|--------------|---------|
-| `modsec-crs/paranoia.conf` | modsec-crs | Sets CRS's `tx.detection_paranoia_level` and `tx.blocking_paranoia_level`. Detection at **PL2**, blocking at **PL1** to start. `blocking_paranoia_level` gets bumped to PL2 once exclusions are stable at PL2 detection. |
+| `modsec-crs/paranoia.conf` | modsec-crs | Sets CRS's `tx.detection_paranoia_level` and `tx.blocking_paranoia_level`. Detection at **PL2**, blocking at **PL1**, held there deliberately (see [Paranoia levels](#paranoia-levels-detection-pl2-blocking-pl1-a-deliberate-hold) for the reasoning and the preconditions for changing it). |
 | `modsec-crs/exclusions-before-crs.conf` | modsec-crs (phase 1) | **Preferred location** for request-side exclusions (rule IDs <950). Sets `tx.allowed_methods` to include PUT/PATCH/DELETE; a layered fallback at the ModSec layer. The actual upstream method gate is BunkerWeb's own `ALLOWED_METHODS` env-var (set in compose); this exclusion ensures that once `MODSECURITY_SEC_RULE_ENGINE` flips from `DetectionOnly` to `On`, CRS rule 911100 doesn't re-introduce a block on Vaultwarden's PUT/PATCH/DELETE traffic. |
 | `modsec/exclusions-after-crs.conf` | modsec (phase 3) | Response-side exclusions (rule IDs 95x / 98x). Files ship with commented templates for the common Vaultwarden false positives, uncomment them only after the matching rule actually fires in `modsec_audit.log`. |
 
@@ -417,20 +427,57 @@ Three custom configs in `bunkerweb/custom-configs/` carry the CRS tuning:
     podman-compose -f docker-compose.public-dns01.yml restart bunkerweb
     ```
 5. Repeat the action that triggered the false positive. Confirm the rule no longer fires.
-6. **Done (2026-06-16):** after nearly two months in `DetectionOnly` (with `modsec_audit.log`'s 7-day retention window consistently showing only external scanners crossing the blocking threshold) and the exclusions verified against live `/api/ciphers` + `/admin/config` traffic, `MODSECURITY_SEC_RULE_ENGINE` was flipped from `DetectionOnly` to `On` in all three compose files. Rollback to `DetectionOnly` + recreate stays available if a legit FP surfaces. **Remaining future step:** bump `blocking_paranoia_level` from PL1 to PL2 in `paranoia.conf` (separate later change).
+6. **Done (2026-06-16):** after nearly two months in `DetectionOnly` (with `modsec_audit.log`'s 7-day retention window consistently showing only external scanners crossing the blocking threshold) and the exclusions verified against live `/api/ciphers` + `/admin/config` traffic, `MODSECURITY_SEC_RULE_ENGINE` was flipped from `DetectionOnly` to `On` in all three compose files. Rollback to `DetectionOnly` + recreate stays available if a legit FP surfaces.
+
+### Paranoia levels: detection PL2, blocking PL1 (a deliberate hold)
+
+`paranoia.conf` sets `tx.detection_paranoia_level=2` and `tx.blocking_paranoia_level=1`. That is the current state and it is **staying that way for now**. This is a hold with stated preconditions, not an open TODO.
+
+**What PL2 blocking would add:** 90 rules on top of PL1's 214, concentrated in exactly the two categories that already produce every false positive in this stack, SQLi (31 of the 90) and RCE (19). Those are the rules that trip on encrypted blobs, base64 `==` padding, JWTs and argon2id hashes, which is to say on ordinary Vaultwarden traffic.
+
+**Why it is on hold:**
+
+* The PL2 exclusions have **never run under blocking conditions**. They contribute 0 to the score today, so a silently wrong scope looks identical to a working one. Nine of the ten pre-existing exclusions target PL2 rules, so flipping would move a large and entirely unproven set into the blocking path in one step.
+* That nine-of-ten figure means the sandbox tuning is largely *done*, which is an argument for eventually flipping, not for flipping now. It makes the change cheap when we choose to make it; it does not make the exclusions validated.
+
+**What is explicitly not the reason:** CPU cost. Upstream CRS documents that raising the detection level costs the same as raising the blocking level, so this stack already pays the full PL2 compute bill and currently gets no blocking value back for it. The hold is about confidence in the exclusions, not performance.
+
+**This is an indefinite hold, not a timer.** The two risks behave differently, and only one of them responds to waiting:
+
+* **New false positives. Observation works here, and longer is genuinely better.** Watching `modsec_audit.log` for PL2 rule IDs firing on real Vaultwarden endpoints is ongoing background monitoring, via `MONITORING.local.md` § 1. One catch: `modsec_audit.log` retention is 7 days, so a long observation window only *accumulates* if the weekly snapshots from § 1 are actually being written somewhere persistent. If they are not, "months of watching" is the same rolling 7-day window over and over.
+* **Existing PL2 exclusion scope. Observation cannot help here at all.** Those exclusions contribute 0 to the blocking score today, so a wrong scope and a correct scope produce identical silence. No observation period distinguishes them, and no amount of clean audit log is evidence either way. The only thing that tests them is flipping to PL2 and exercising the client surface.
+
+So the flip is not gated on a waiting period. It is gated on choosing to run a short controlled test, whenever suits:
+
+1. Pick a low-traffic hour.
+2. Set `tx.blocking_paranoia_level=2` in `paranoia.conf` and restart the proxy.
+3. Exercise the client surface: login, cipher edit, folder add, master-password change, admin login, admin config save, an icon lookup, and a web vault load.
+4. Sweep `modsec_audit.log` and re-run the exclusion-verification loop in `MONITORING.local.md` § 2.
+5. Revert immediately if anything 403s.
+
+Reverting is one line plus a restart, so the test is low-commitment and low-risk. That is the point: this particular uncertainty is only resolvable by trying it, and trying it is cheap and reversible.
 
 ### Known exclusions list
 
 This section will grow as false positives are identified and exclusions land. Each entry should explain **what triggered it**, **what client behaviour the rule mistook for an attack**, and **the rule ID + phase**.
 
+Every rule below is **actively excluded** today. Sorted by rule ID. All of them live in `exclusions-before-crs.conf` unless noted.
+
 | Rule ID | Phase | Trigger | Reason kept |
 |---------|-------|---------|-------------|
 | 911100 | 1 (request) | Vaultwarden API uses `PUT` / `PATCH` / `DELETE` for vault edits and item deletes; CRS default `tx.allowed_methods` is `GET HEAD POST OPTIONS`. | Preemptive: BW's `ALLOWED_METHODS` plugin is today's upstream method gate (set in compose, returns 405 if violated). This ModSec-layer exclusion ensures that once the engine flips from `DetectionOnly` to `On`, rule 911100 doesn't re-introduce a 403 block on PUT/PATCH/DELETE. |
-| 942120 | 2 (request body) | Base64 padding `==` in encrypted cipher fields (`ARGS:json.login.password`, `json.login.username`, `json.login.fido2Credentials.*.counter`, etc.) on `POST/PUT /api/ciphers[/<uuid>]` is matched as a SQL operator. | Verified from `modsec_audit.log` (7 hits / 4 days). Without this, every cipher add/edit emits an `SQL Injection Attack: SQL Operator Detected` warning. Scoped narrowly to `/api/ciphers`. |
-| 942430 | 2 (request body) | JWT `access_token` query arg on `/notifications/hub` (Bitwarden WebSocket live-sync) contains many `.`, `-`, `_`, `=` chars, exceeding the rule's 12-special-character threshold. | Verified from `modsec_audit.log` (10 hits / 4 days). Fires on every client connect/refresh. Scoped to `/notifications/hub`. |
+| 920230 | 2 (request args) | **Two separate scopes, two root causes.** On `POST /admin/config`: the log format string at `ARGS:json.log_timestamp_format` (default `%Y-%m-%d %H:%M:%S.%3f%z`) has strftime tokens that match CRS's `%[0-9a-fA-F]{2}` multi-encoding heuristic. On `/icons/change-password-uri?uri=<url>`: a saved login URL that already contains a percent escape arrives double-encoded (`%253A`). | Both kept as separate exclusion IDs (100056 / 100058) so each rationale is independently documented and revertible. **Neither is proven yet:** 920230 is PL2 and `blocking_paranoia_level` is 1, so it scores 0 today. Re-verify both against `modsec_audit.log` immediately after the PL2 bump. The icon-path one is target-scoped (`ARGS:uri`) rather than a whole-rule removal, so 920230 stays armed on every other argument. |
+| 930130 (+930140) | 1 (request URI) | `@pmFromFile restricted-files.data` is an unanchored substring match against `REQUEST_FILENAME` with no path-boundary awareness, and Vaultwarden's only icon route puts a saved login's **domain** straight into the URL path (`/icons/<host>/icon.png`). Real TLDs collide with the dot-directory entries (`.tools/`, `.wine/`, `.aws/`, `.azure/`, `.java/`), and the entries with no trailing slash collide *mid-label*, which is worse: `api.envoy.com` hits `.env`, `www.cvs.com` hits `.cvs`. | Verified 2026-07-22: a `.tools` icon lookup from a legitimate client returned **403**. PL1 + CRITICAL is +5 on its own and the threshold is 5, so this rule blocks single-handedly with nothing else contributing. Scoped to a fully-anchored icon-route regex whose first label can't start with a dot, so `/icons/.git/icon.png` and `/icons/.env/icon.png` still score; `/` and `%` are outside the character class, so traversal and double-encoded probes don't get the exclusion either. 930100 / 930110 (path traversal) untouched. 930140 is folded in because it's the same rule shape on the same variable against a newer, still-growing data file (`.crush` matches `www.crush.com`). |
+| 931100 / 931130 | 2 (request args) | `/icons/change-password-uri?uri=<url>` takes a URL as a lookup **key**. 931130 (off-domain reference) and 931100 (RFI URL pattern) both fire because there's a URL in a param. | No remote inclusion happens: the endpoint has no route in Vaultwarden at all (it 404s), and `DISABLE_ICON_DOWNLOAD=true` kills the server-side fetcher regardless. Other 931xxx rules still apply on other paths. |
+| 932200 | 2 (request body) | Same argon2id admin_token as 932240; the rule's whitespace-class operator runs over the `$argon2id$...` hash content. Confirmed in the audit log matching `ARGS:json.admin_token`. | Scoped to `/admin/config`, same as 932240. |
 | 932240 | 2 (request body) | Argon2id-hashed admin_token (`$argon2id$v=19$m=...$<base64>$<base64>`) trips the rule's digit/quote/digit pattern on `POST /admin/config`. | Verified from `modsec_audit.log` (4 hits / 4 days). Scoped narrowly to `/admin/config`; other 932xxx RCE rules still apply on the same endpoint. |
-| 953101 | 4 (response body) | Vaultwarden's English `/locales/<lang>/messages.json` legitimately contains the literal phrase "file size is" in i18n error messages, which 953101 looks for as a PHP error-string signature. | Verified from `modsec_audit.log` (4 hits / 4 days). Vaultwarden is Rust, not PHP, so the rule is structurally an FP for this app. Scoped to `/locales/`. Lives in `exclusions-after-crs.conf`. |
-| _(more to come)_ | | | |
+| 942120 | 2 (request body) | Base64 padding `==` in encrypted cipher fields (`ARGS:json.login.password`, `json.login.username`, `json.login.fido2Credentials.*.counter`, etc.) on `POST/PUT /api/ciphers[/<uuid>]` is matched as a SQL operator. | Verified from `modsec_audit.log` (7 hits / 4 days). Without this, every cipher add/edit emits an `SQL Injection Attack: SQL Operator Detected` warning. Scoped to `/api/ciphers`, `/api/folders`, `/api/accounts/password` (the master-password change POSTs the same `==`-padded re-encrypted key blob). |
+| 942131 | 2 (request args) | The `/admin` login form submits `ARGS:token=<plaintext>`; complex passwords containing `$`, `%`, `^` etc. trip the SQL operator detector. | The token is only compared against the argon2id hash in `ADMIN_TOKEN`, never used in a SQL query, so the rule is structurally an FP here. Scoped to the bare `/admin` endpoint (`^/admin/?$`); other 942xxx rules still apply. |
+| 942200 | 2 (request body) | Login / token / credential payloads on `/identity/connect/*`, `/identity/accounts/*` and `/api/accounts/*` trip the SQL-injection detector. Observed firing 2026-05-17 during a master-password-change + re-login wave. | Path regex is deliberately `^/(identity/connect\|identity/accounts\|api/accounts)(/\|\?\|$)`. An earlier draft used `(identity\|api\|connect)(/\|$)`, which both covered a non-existent `/connect/*` and was far too broad. The `(/\|\?\|$)` trailing match (rather than a bare `/`) is load-bearing: `DELETE /api/accounts` is a real route on the bare path carrying the same `masterPasswordHash` body as the covered `POST /api/accounts/delete`, and `\?` is needed because `REQUEST_URI` includes the query string. Removal is deliberately wholesale rather than target-scoped, because the audit-log review recorded the rule ID but not which of 942200's eight targets matched. |
+| 942430 | 2 (request body) | Special-char-heavy payloads exceed the rule's 12-character threshold: the JWT `access_token` query arg on `/notifications/hub` (Bitwarden WebSocket live-sync), the OAuth-style `/identity/connect/token` login + refresh, and the whole-URL param on `/icons/change-password-uri`. | Verified from `modsec_audit.log` (10 hits / 4 days). Fires on every client connect/refresh. The PL3/PL4 siblings 942431 / 942432 are pre-staged commented in the same file with the same three-path scope. |
+| 953101 | 4 (response body) | Vaultwarden's English `/locales/<lang>/messages.json` legitimately contains the literal phrase "file size is" in i18n error messages, which 953101 looks for as a PHP error-string signature. | Verified from `modsec_audit.log` (4 hits / 4 days). Vaultwarden is Rust, not PHP, so the rule is structurally an FP for this app. Scoped to `/locales/`. Lives in **`exclusions-after-crs.conf`**. |
+
+Both exclusion files also carry a set of **commented pre-stage stubs** for false positives that are either community-reported but unobserved here, or that only start scoring at PL3/PL4. Uncomment when the matching rule ID actually shows up in `modsec_audit.log`, never preemptively.
 
 ### When the audit log is too noisy
 

@@ -261,9 +261,12 @@ services:
       # robots.txt and security.txt are served via custom Nginx configs (see custom-configs/)
 
       # WAF
-      # 1.6.9 dropped MODSECURITY_SEC_AUDIT_LOG (path is fixed internally) and
-      # MODSECURITY_CRS_PARANOIA_LEVEL (paranoia is now tuned via CRS plugin
-      # configs in custom-configs/modsec-crs/).
+      # 1.6.9 dropped MODSECURITY_SEC_AUDIT_LOG (path is fixed internally).
+      # MODSECURITY_CRS_PARANOIA_LEVEL is NOT a BunkerWeb setting and never was
+      # at any version (verified against bunkerweb's git history); an earlier
+      # note here wrongly called it "dropped in 1.6.9". Paranoia is set through
+      # CRS's own SecAction + setvar mechanism, see
+      # custom-configs/modsec-crs/paranoia.conf.
       USE_MODSECURITY: "yes"
       USE_MODSECURITY_CRS: "yes"
       # Flipped to "On" 2026-06-16 after nearly two months in DetectionOnly
