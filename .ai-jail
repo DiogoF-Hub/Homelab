@@ -1,0 +1,16 @@
+# ai-jail sandbox configuration
+# https://github.com/akitaonrails/ai-jail
+# Edit freely. Regenerate with: ai-jail --clean --init
+
+command = ["claude"]
+hide_dotdirs = [
+    ".azure",
+    ".vscode-server",
+]
+mask = [
+    ".env",
+    ".env.local",
+]
+no_gpu = true
+no_display = true
+terminal_passthrough = true

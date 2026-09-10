@@ -392,6 +392,31 @@ Mounted at `/data/configs/` inside the container, BunkerWeb's native ingest path
 | `server-http/headers-passthrough-apply.conf` | server-http | **Owns all outbound security headers** (HSTS, COOP, Referrer-Policy, Permissions-Policy, X-Content-Type-Options) using `more_set_headers`. Bypasses BW's env-var headers plugin to insulate against version-to-version drift in BW's emission rules. |
 | `http/headers-upstream-passthrough.conf` | http | http-scope `map` directives that capture Vaultwarden's `X-Frame-Options` and `Content-Security-Policy` from upstream so the apply file can pass them through (preserving Vaultwarden's per-endpoint control, e.g., the Duo iframe on `/2fa-connector.html`). |
 | `server-http/security-txt-lang.conf` | server-http | nginx `location` blocks for `/.well-known/security.txt` and `/robots.txt`; redirects `/security.txt` to the canonical path; re-applies headers (nginx `add_header` in a `location` replaces parent headers, so they must be repeated). |
+| `server-http/ipcheck.conf` | server-http | `/__ipcheck` debug endpoint returning the caller's `$remote_addr` as JSON. Bookmark it to verify the PROXY-protocol → realip chain end to end; an RFC1918 address in the response means `REAL_IP_FROM` has stopped covering the bridge podman is SNAT'ing from. |
+
+#### Phase gotcha: never serve a `location` with a bare `return`
+
+nginx runs each request through ordered phases, and **`return` fires in the `REWRITE` phase**, which finalizes the request and skips everything after it:
+
+```
+POST_READ      <- realip (PROXY protocol -> $remote_addr)
+SERVER_REWRITE
+FIND_CONFIG
+REWRITE        <- `return` finalizes HERE, all later phases skipped
+POST_REWRITE
+PREACCESS      <- limit_req (LIMIT_REQ_RATE)
+ACCESS         <- access_by_lua: ALL of BunkerWeb's blocking
+POST_ACCESS
+PRECONTENT
+CONTENT        <- alias / proxy_pass / content_by_lua_block serve HERE
+LOG
+```
+
+So a location whose body is `return 200 '...'` or `return 301 /elsewhere` bypasses the country / user-agent / rDNS blacklists, the in-stack CrowdSec bouncer, ModSecurity/CRS, DNSBL, `ALLOWED_METHODS`, **and** `limit_req` — it answers 200 to clients every other route denies.
+
+Found on 2026-08-09 while confirming a new `BLACKLIST_COUNTRY` entry: the same blocked client got 403 on `/robots.txt` and 200 on `/__ipcheck`. Both `/__ipcheck` and the `/security.txt` redirect now use `content_by_lua_block` (a **content**-phase handler) so they inherit every control. Routes served by `alias` or `proxy_pass` are content-phase already and were never affected.
+
+The edge CrowdSec firewall bouncer on the VPS was never bypassed either way — it drops banned IPs in nftables before the packets reach nginx at all. The country blacklist has no such edge equivalent, which is why geo-blocked clients were the ones reaching `/__ipcheck`.
 
 ModSecurity-specific custom configs (`modsec-crs/paranoia.conf`, `modsec-crs/exclusions-before-crs.conf`, `modsec/exclusions-after-crs.conf`) are documented in the dedicated [ModSecurity / OWASP CRS section](#-modsecurity--owasp-crs-blocking-tuned) below.
 
