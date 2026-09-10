@@ -5,6 +5,7 @@ claude.txt
 generator.conf
 .DS_Store
 *.local.md
+TEMP.txt
 
 # Minecraft: secrets stay local, only the .example templates get committed
 Minecraft-Server/.env
