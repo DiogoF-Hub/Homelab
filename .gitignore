@@ -6,6 +6,7 @@ generator.conf
 .DS_Store
 *.local.md
 TEMP.txt
+temp_*.sh
 
 # Minecraft: secrets stay local, only the .example templates get committed
 Minecraft-Server/.env
