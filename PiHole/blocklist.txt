@@ -68,3 +68,10 @@ https://winhelp2002.mvps.org/hosts.txt
 https://raw.githubusercontent.com/chadmayfield/my-pihole-blocklists/master/lists/pi_blocklist_porn_top1m.list
 https://v.firebog.net/hosts/Prigent-Adult.txt
 https://raw.githubusercontent.com/Turtlecute33/Toolz/master/src/d3host.txt
+https://gitlab.com/hagezi/mirror/-/raw/main/dns-blocklists/adblock/ultimate.txt
+https://gitlab.com/hagezi/mirror/-/raw/main/dns-blocklists/adblock/popupads.txt
+https://gitlab.com/hagezi/mirror/-/raw/main/dns-blocklists/adblock/pro.plus.txt
+https://media.githubusercontent.com/media/zachlagden/Pi-hole-Optimized-Blocklists/main/lists/all_domains.txt
+https://media.githubusercontent.com/media/zachlagden/Pi-hole-Optimized-Blocklists/main/lists/nsfw.txt
+https://raw.githubusercontent.com/curbengh/phishing-filter/master/dist/phishing-filter-domains.txt
+https://dl.red.flag.domains/pihole/red.flag.domains.txt
