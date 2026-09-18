@@ -220,7 +220,9 @@ services:
       # BunkerWeb already fetches the nginx-ultimate-bad-bot-blocker list by default
       # which includes sqlmap, nikto, nmap, zgrab, havij, dirbuster, etc.
       # We add extra patterns not in the default list:
-      BLACKLIST_USER_AGENT: "python-requests python-urllib python-httpx httpx wget go-http-client libwww-perl masscan"
+      # CensysInspect is Censys's own scanner UA (about.censys.io), on top of
+      # the rDNS/ASN/IP blocks below, belt-and-suspenders per the usual policy.
+      BLACKLIST_USER_AGENT: "python-requests python-urllib python-httpx httpx wget go-http-client libwww-perl masscan CensysInspect"
 
       # rDNS blacklist: deny IPs whose PTR matches these patterns.
       # Three buckets, all worth blocking on a password manager:
