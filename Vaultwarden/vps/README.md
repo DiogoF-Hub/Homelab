@@ -164,12 +164,21 @@ DNS provider role.
 
 ### DNS records (in your registrar's NS, Cloudflare in this stack)
 
-Two records, both proxied OFF (grey cloud):
+Four records, all proxied OFF (grey cloud):
 
 | Type | Name | Value | Proxy | TTL |
 |------|------|-------|-------|-----|
 | A | `vault.example.com` | `<vps_public_ipv4>` | DNS only | Auto |
 | AAAA | `vault.example.com` | `<vps_public_ipv6>` | DNS only | Auto |
+| A | `example.com` (apex, `@`) | `<vps_public_ipv4>` | DNS only | Auto |
+| AAAA | `example.com` (apex, `@`) | `<vps_public_ipv6>` | DNS only | Auto |
+
+The apex records exist only for HSTS preload: hstspreload.org requires
+the bare domain itself to serve HTTPS with the HSTS header, and drops
+the entry if it can't connect. BunkerWeb answers the apex with a tiny
+JSON status on `/` and 404 everywhere else (see the main README,
+§ Apex domain). The VPS needs no change for it: the stream proxy
+forwards 80/443 without looking at SNI, and BunkerWeb picks the vhost.
 
 The grey cloud is critical. See the "Cloudflare = DNS only" decision
 above; the password-manager threat model rejects any third-party TLS

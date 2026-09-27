@@ -65,6 +65,12 @@ services:
       - "7000:7000/tcp"
     environment:
       TZ: "${TZ}"
+      # Space-separated: the vault hostname AND the bare apex domain (the
+      # apex must answer on HTTPS to stay on the HSTS preload list). Both
+      # share this server block, cert and every control below; the apex
+      # only ever gets a tiny JSON status, never Vaultwarden (see
+      # REVERSE_PROXY_INCLUDES below and
+      # bunkerweb/custom-configs/http/apex.conf).
       SERVER_NAME: "${SERVER_NAME}"
       # Refuse unknown-vhost connections at both layers: STRICT_SNI aborts
       # the TLS handshake on unknown/missing SNI (no cert presented),
@@ -76,6 +82,10 @@ services:
       REVERSE_PROXY_HOST: "http://vaultwarden:8080"
       # Vaultwarden uses websockets for live sync (/notifications/hub).
       REVERSE_PROXY_WS: "yes"
+      # Included inside the generated `location /`: for apex-domain
+      # requests, swaps the proxy backend from Vaultwarden to a loopback
+      # JSON server (bunkerweb/custom-configs/http/apex.conf).
+      REVERSE_PROXY_INCLUDES: "/etc/bunkerweb/apex-dispatch.conf"
 
       # PROXY protocol from an upstream sender. KEEP ONLY IF you're running
       # this flavor behind an edge VPS that does TCP passthrough WITH
@@ -256,6 +266,9 @@ services:
       - /srv/bw-logs:/var/log/bunkerweb
       - ./bunkerweb/security.txt:/etc/bunkerweb/security.txt:ro
       - ./bunkerweb/robots.txt:/etc/bunkerweb/robots.txt:ro
+      # Apex dispatch, see REVERSE_PROXY_INCLUDES. Mounted on its own (not
+      # via custom-configs/) because it must only land inside `location /`.
+      - ./bunkerweb/apex-dispatch.conf:/etc/bunkerweb/apex-dispatch.conf:ro
       # Web UI TLS material (internal-CA leaf + key, see UI_SSL_* above). Host
       # dir lives OUTSIDE the git tree (private key) and its files are chown'd
       # to the container's mapped uid so the rootless container can read them.

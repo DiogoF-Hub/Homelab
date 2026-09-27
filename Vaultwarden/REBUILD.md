@@ -1432,8 +1432,9 @@ Tick all of these before declaring the rebuild done:
       not contain `default`). OPNsense shows the WG peer connected
       and the pass rules for `10.10.10.1 → 192.168.50.3:{80,443,8080}`
       are in place (8080 = VPS bouncer to home CrowdSec LAPI). DNS
-      records (A + AAAA) at the registrar point at the VPS's IPs
-      with Cloudflare proxy DISABLED (grey cloud). PTR records at
+      records (A + AAAA, for BOTH the vault hostname and the bare
+      apex) at the registrar point at the VPS's IPs with Cloudflare
+      proxy DISABLED (grey cloud). PTR records at
       Hetzner Cloud Console are set to your public hostname for
       both IPv4 and IPv6.
 - [ ] **If running the VPS-side CrowdSec bouncer**:

@@ -47,12 +47,15 @@ vaultwarden/
 ├── bunkerweb/                                 # Mounted into the BunkerWeb container
 │   ├── security.txt                           # Vulnerability-reporting contact (served at /.well-known/security.txt)
 │   ├── robots.txt                             # Disallows bots from indexing
+│   ├── apex-dispatch.conf                     # Included inside the proxy `location /` (REVERSE_PROXY_INCLUDES): apex -> loopback JSON backend
 │   └── custom-configs/                        # Mounted into BunkerWeb at /data/configs/ (its native ingest path)
 │       ├── http/
-│       │   └── headers-upstream-passthrough.conf  # http-scope map for upstream XFO/CSP passthrough
+│       │   ├── headers-upstream-passthrough.conf  # http-scope map for upstream XFO/CSP passthrough
+│       │   └── apex.conf                          # Bare-apex detection map + loopback JSON server (HSTS preload)
 │       ├── server-http/
 │       │   ├── headers-passthrough-apply.conf     # Owns ALL outbound security headers (HSTS, CSP, COOP, ...)
-│       │   └── security-txt-lang.conf             # Per-path overrides for /robots.txt, /security.txt
+│       │   ├── security-txt-lang.conf             # Per-path overrides for /robots.txt, /security.txt
+│       │   └── ipcheck.conf                       # /__ipcheck debug endpoint (caller's real IP as JSON)
 │       ├── modsec/
 │       │   └── exclusions-after-crs.conf          # Phase-3 (response-side) exclusions
 │       └── modsec-crs/
@@ -393,6 +396,34 @@ Mounted at `/data/configs/` inside the container, BunkerWeb's native ingest path
 | `http/headers-upstream-passthrough.conf` | http | http-scope `map` directives that capture Vaultwarden's `X-Frame-Options` and `Content-Security-Policy` from upstream so the apply file can pass them through (preserving Vaultwarden's per-endpoint control, e.g., the Duo iframe on `/2fa-connector.html`). |
 | `server-http/security-txt-lang.conf` | server-http | nginx `location` blocks for `/.well-known/security.txt` and `/robots.txt`; redirects `/security.txt` to the canonical path; re-applies headers (nginx `add_header` in a `location` replaces parent headers, so they must be repeated). |
 | `server-http/ipcheck.conf` | server-http | `/__ipcheck` debug endpoint returning the caller's `$remote_addr` as JSON. Bookmark it to verify the PROXY-protocol → realip chain end to end; an RFC1918 address in the response means `REAL_IP_FROM` has stopped covering the bridge podman is SNAT'ing from. |
+| `http/apex.conf` | http | Bare-apex support: `map $host $bw_apex_backend` (the apex is the only served name with exactly one dot) plus a loopback-only `server` on `127.0.0.1:18080` returning `{"status": "ok"}` on `/` and a JSON 404 elsewhere. See [Apex domain](#apex-domain-hsts-preload) below. |
+
+`bunkerweb/apex-dispatch.conf` sits **outside** `custom-configs/` on purpose: it is mounted on its own and included **inside** BunkerWeb's generated `location /` through `REVERSE_PROXY_INCLUDES`. Anything in `custom-configs/server-http/` lands at server level, where it must not run.
+
+#### Apex domain (HSTS preload)
+
+The domain is submitted to [hstspreload.org](https://hstspreload.org/), which requires the **bare apex** (not just the vault subdomain) to redirect HTTP to HTTPS on the same host and to answer on HTTPS with a valid cert and `Strict-Transport-Security` with `max-age>=31536000; includeSubDomains; preload`. If the apex doesn't resolve or doesn't answer, the check fails with `domain.tls.cannot_connect` and the entry is dropped from the list.
+
+The real domain appears **nowhere in the repo**, only in `.env`:
+
+* **`SERVER_NAME` lists both names**, e.g. `SERVER_NAME="vault.example.com example.com"`. BunkerWeb serves both from one server block with one cert (both SANs, DNS-01), so every apex request goes through exactly the same pipeline as a vault request: HTTP→HTTPS redirect, country / UA / rDNS blacklists, DNSBL, CrowdSec bouncer, ModSecurity, rate limiting, and the headers from `headers-passthrough-apply.conf`.
+* **Only the proxy backend differs.** `http/apex.conf` maps `$host` to a backend by shape, not by name: exactly one dot means the apex. Only names in `SERVER_NAME` reach this server block (`DISABLE_DEFAULT_SERVER`), so that can only be the apex; the vault must therefore stay on a subdomain. `apex-dispatch.conf`, included inside the proxy `location /`, then does `set $backend0 …` so `proxy_pass` goes to `127.0.0.1:18080` instead of Vaultwarden.
+* **The backend** is a loopback-only `server` in the same file: `/` returns `{"status": "ok"}`, anything else a JSON 404. It has `access_log off` and `modsecurity off` because the front server already logged and inspected the request; otherwise every apex hit would also be logged as coming from `127.0.0.1`.
+* **Why not a `rewrite` to a dedicated location** (the first attempt): `rewrite … last` marks the request *internal*, and BunkerWeb's `access_by_lua` skips internal requests entirely. On 2026-09-27 that let `http://` on the apex serve 200 instead of 301, and a blacklisted `python-requests` UA got 200 on the apex versus 403 on the vault. Swapping only the backend keeps it an ordinary proxied request.
+* **Coupling to watch:** `$backend0` is the variable BunkerWeb's reverse-proxy template uses (`set $backend0 …; proxy_pass $backend0;`). If an upgrade renames it, the apex silently falls through to Vaultwarden; the first curl below catches that.
+* Explicit locations that match before `location /` (`/robots.txt`, `/.well-known/security.txt`, `/__ipcheck`, BunkerWeb's ACME challenge path) are served on the apex too, which is harmless and keeps HTTP-01 working on the `public-http01` flavor.
+* **DNS:** `A` + `AAAA` for the apex point at the edge VPS, grey cloud, same as the vault hostname. Nothing changes on the VPS or OPNsense: the stream proxy forwards 80/443 without reading SNI. On the `cf-tunnel` flavor the apex would also need its own Public Hostname in the tunnel config.
+
+Verify after deploying (substitute your domain):
+
+```bash
+curl -sI https://example.com/ | grep -i strict-transport         # HSTS present
+curl -s  https://example.com/                                     # {"status": "ok"}
+curl -s -o /dev/null -w '%{http_code}\n' https://example.com/x   # 404
+curl -s -o /dev/null -w '%{http_code}\n' http://example.com/     # 301 to https
+curl -s -o /dev/null -w '%{http_code}\n' -A python-requests/2 https://example.com/   # 403 (blacklists apply)
+curl -s 'https://hstspreload.org/api/v2/preloadable?domain=example.com'  # no errors
+```
 
 #### Phase gotcha: never serve a `location` with a bare `return`
 
@@ -1280,7 +1311,7 @@ and diff the response headers against the table below. Any unexpected drop, addi
 
 | Header | Value | Source | Purpose |
 |--------|-------|--------|---------|
-| **`Strict-Transport-Security`** | `max-age=31536000; includeSubDomains; preload` | BW custom config | Enforces HTTPS for 1 year, including all subdomains. Domain is [HSTS preloaded](https://hstspreload.org/) in browsers. |
+| **`Strict-Transport-Security`** | `max-age=31536000; includeSubDomains; preload` (HTTPS responses only) | BW custom config | Enforces HTTPS for 1 year, including all subdomains. Domain is [HSTS preloaded](https://hstspreload.org/) in browsers. Sent only over HTTPS via the `$bw_hsts` map on `$scheme` (browsers ignore it over HTTP, and hstspreload.org warns about it on the port-80 redirect). |
 | **`Content-Security-Policy`** | Passes through Vaultwarden's per-endpoint CSP via the http-scope `$bw_csp_out` map | Vaultwarden upstream → BW passthrough | Vaultwarden sets a comprehensive CSP that varies per endpoint (e.g., the Duo iframe on `/2fa-connector.html` needs different rules). The map captures the upstream value and re-emits it. |
 | **`X-Frame-Options`** | Passes through Vaultwarden's value via `$bw_xfo_out` map | Vaultwarden upstream → BW passthrough | Same passthrough mechanism as CSP. |
 | **`X-Content-Type-Options`** | `nosniff` | BW custom config | Prevents MIME type sniffing. |
@@ -1319,7 +1350,7 @@ Password managers are high-value targets. These headers provide defense-in-depth
 #### Active today (DNS-side, works regardless of proxy mode)
 
 * **DNS CAA records enforced** to restrict certificate issuance to only trusted Certificate Authorities, preventing unauthorized SSL/TLS certificates for the domain
-* **HSTS Preload enabled**: submitted the domain to [hstspreload.org](https://hstspreload.org/) so browsers enforce HSTS-by-default on first visit. The HSTS response header itself is now set by **BunkerWeb at home** (see `bunkerweb/custom-configs/server-http/headers-passthrough-apply.conf`); Cloudflare doesn't add it any more since it's grey-cloud
+* **HSTS Preload enabled**: submitted the domain to [hstspreload.org](https://hstspreload.org/) so browsers enforce HSTS-by-default on first visit. The HSTS response header itself is now set by **BunkerWeb at home** (see `bunkerweb/custom-configs/server-http/headers-passthrough-apply.conf`); Cloudflare doesn't add it any more since it's grey-cloud. Preload also requires the bare apex to serve HTTPS, which BunkerWeb handles as a second service (see [Apex domain](#apex-domain-hsts-preload))
 * **DNSSEC enabled**: the domain uses DNSSEC (Domain Name System Security Extensions) to cryptographically sign DNS records, protecting against DNS spoofing and ensuring the authenticity of DNS responses
 * **Certificate Transparency Monitoring** at Cloudflare to receive alerts on new certificate issuance for the zone (works regardless of proxy mode)
 * **Cloudflare API token (DNS-01 ACME)**: scoped token with `Zone:Read` + `DNS:Edit` permissions on the zone, consumed by BunkerWeb for Let's Encrypt cert issuance/renewal via DNS-01
