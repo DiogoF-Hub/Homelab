@@ -181,6 +181,19 @@ services:
       # peer address, so the check still resolves to the scanner's network.
       BLACKLIST_RDNS: ".shodan.io .censys.io .censys-scanner.com .binaryedge.ninja .rapid7.com .leakix.net .onyphe.io .stretchoid.com .google.com .googlebot.com .yandex.ru .yandex.net .yandex.com .search.msn.com .baidu.com .baidu.jp .crawl.yahoo.net .fwd.linkedin.com .twitter.com .twttr.com .discord.com"
 
+      # Whitelist OFF. BunkerWeb ships USE_WHITELIST=yes with a default
+      # WHITELIST_RDNS of almost exactly the crawler list above (google,
+      # googlebot, yandex, msn, baidu, yahoo, linkedin, twitter, discord),
+      # and a whitelisted client skips the security checks. It only trusts
+      # an rDNS match after a forward lookup confirms it; the Vault VM's
+      # Pi-hole default-deny blocks that lookup, so today it whitelists
+      # nobody, but that's the DNS deny carrying the policy by accident. And
+      # every blocked confirmation fired a Wazuh 100252 DNS alert (first one
+      # from Googlebot on the bare apex, 2026-09-28). We whitelist nothing
+      # on purpose, so off is the honest setting: no lookups, no alerts,
+      # crawlers still 403 via BLACKLIST_RDNS.
+      USE_WHITELIST: "no"
+
       # Rate limiting (tuned for ~5 users). BunkerWeb 1.6.x dropped the
       # standalone LIMIT_REQ_BURST setting; whatever default burst the
       # limit plugin applies internally is fine for current traffic
