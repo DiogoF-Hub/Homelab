@@ -139,10 +139,15 @@ vaultwarden/
 
 ## 🖥️ Infrastructure Setup
 
-The stack lives on two machines, in this request-flow order:
+The stack lives on four machines. Two sit on the inbound request path, in this order:
 
 1. **Edge VPS** (Hetzner Cloud, Falkenstein): the public-facing entry point doing TCP passthrough back home over WireGuard
 2. **Home BunkerWeb VM** (Proxmox, VLAN-tagged onto VLAN-DMZ): where TLS actually terminates and the Vaultwarden + BunkerWeb + CrowdSec containers run
+
+Two more on the home LAN support it:
+
+3. **LAN Pi-hole VM** (Proxmox, `192.168.173.2`): the Vault VM's **two egress chokepoints**: Pi-hole for DNS and Squid for HTTP/HTTPS, both locked to the Vault VM's allowlists (the only other ways out are SMTP to Mailjet and NTP, see the firewall table). Until October 2026 these were two separate Ubuntu VMs (Pi-hole and `proxy-home`); they now share one Debian 13 VM
+4. **`wazuh-home` VM** (Proxmox, `192.168.173.10`): the Wazuh manager that receives the agents of the Vault VM and the Pi-hole VM and posts the Discord alerts
 
 ### **Edge VPS (Hetzner Cloud CX23, Falkenstein)**
 
@@ -220,6 +225,26 @@ echo "net.core.wmem_max=7500000" | tee -a /etc/sysctl.d/99-udp-buffer.conf
 ```
 
 This is a host-level kernel setting, it applies to all containers running on the VM.
+
+### **LAN Pi-hole VM (Pi-hole + Squid)**
+
+Both of the Vault VM's outbound chokepoints run on this one VM. It used to be two: an Ubuntu Server VM for Pi-hole and an Ubuntu `proxy-home` VM for Squid. In October 2026 they were merged into **one Debian 13 VM** that took over the Pi-hole's IP, to free a VM's worth of RAM on the Proxmox host. The trade-off is that both egress gates now sit on one box, so its hardening and its Wazuh agent matter twice.
+
+#### **VM Configuration**
+* **OS**: Debian 13, 2 vCPU, 2 GB RAM, 32 GB disk, on the LAN VLAN (VLAN tag 10 on the VLAN-aware bridge)
+* **Address**: `192.168.173.2` by DHCP, pinned through a static mapping in OPNsense; also on the tailnet as `pihole` (`100.126.60.47`)
+* **Own resolver**: `/etc/resolv.conf` pinned to `1.1.1.3` (dhcpcd `nohook resolv.conf`), not to its own Pi-hole, so the host, apt and Squid keep resolving while the Pi-hole container is down
+
+#### **What runs on it**
+| Component | Role for the Vault VM | Config |
+|---|---|---|
+| **Pi-hole** + `dnsproxy` (Docker, host network) | DNS chokepoint: strict `vaultwarden-vm` allowlist group, DoH upstream to Cloudflare Family | [`../PiHole/`](../PiHole/), [`vault_domains_allow_dns.txt`](vault_domains_allow_dns.txt) |
+| **Squid** (`apt install squid`, port 3128) | HTTP/HTTPS chokepoint: domain allowlist, and only `192.168.50.3` may use it | [`squid/`](squid/) |
+| **`pihole-ftl-tail`** sidecar (systemd) | Turns every Vault VM DNS query into a JSON event for Wazuh | [`wazuh-home/sidecar/pihole/`](wazuh-home/sidecar/pihole/) |
+| **Wazuh agent** (`pihole-home`) | Ships the sidecar's events, Squid's `access.log` and `fail2ban.log` to `wazuh-home` | [`wazuh-home/`](wazuh-home/) |
+| **fail2ban** | Host protection (sshd jail: 3 tries in 10 min, 1 h ban) | |
+
+The nightly `main.sh` (gravity update, image + system update, reboot) runs at 04:15; Squid and DNS are briefly down during that reboot. The details for each piece are in [Outbound HTTP/HTTPS proxy](#-outbound-httphttps-proxy-squid-on-the-lan-pi-hole-vm) and [Outbound DNS](#-outbound-dns-via-the-lan-pi-hole--wazuh-visibility) below.
 
 ---
 
