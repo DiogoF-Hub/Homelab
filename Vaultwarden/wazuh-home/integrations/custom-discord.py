@@ -454,6 +454,21 @@ def _fw_is_noise(ip):
         return False
     return a.is_multicast or (a.version == 4 and str(a).endswith(".255"))
 
+def _fw_is_out_of_state(full_log):
+    """A TCP block that isn't a new connection (no SYN, or SYN+ACK): the
+    tail of a connection the firewall already forgot, e.g. FIN/RST/ACK
+    packets when containers are killed mid-connection. The default deny
+    logs those, but nothing was actually refused. IPv4 filterlog CSV:
+    field 9 = IP version, 17 = protocol, 24 = TCP flags."""
+    try:
+        f = full_log.split("]: ", 1)[1].split(",")
+        if f[8] != "4" or f[16] != "tcp":
+            return False
+        flags = f[23]
+    except (IndexError, AttributeError):
+        return False
+    return "S" not in flags or "A" in flags
+
 def _filterlog_iface_dir(full_log):
     """Interface + direction from filterlog's CSV (fields 5 and 8), which
     the built-in pf decoder doesn't extract."""
@@ -628,9 +643,12 @@ def main():
         deliver("fail2ban", format_fail2ban(alert))
 
     # --- firewall: OPNsense blocks to/from the Vault VM (100700 / 100701),
-    #     minus broadcast/multicast, once per connection per 3 min. ---
+    #     minus broadcast/multicast and out-of-state TCP leftovers, once
+    #     per connection per 3 min. ---
     elif rule.get("id") in ("100700", "100701"):
-        if not _fw_is_noise(data.get("dstip", "")) and _fw_first_in_window(_fw_key(data)):
+        if (not _fw_is_noise(data.get("dstip", ""))
+                and not _fw_is_out_of_state(alert.get("full_log", ""))
+                and _fw_first_in_window(_fw_key(data))):
             deliver("firewall", format_firewall(alert))
 
     # --- maintenance: nightly run summary. 100501 = ok (quiet heartbeat),

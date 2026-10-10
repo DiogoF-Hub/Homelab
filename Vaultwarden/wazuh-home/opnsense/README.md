@@ -16,7 +16,7 @@ OPNsense filterlog ──UDP 514──> rsyslog on wazuh-home
                                   │
                  100700 blocked FROM the Vault VM / 100701 blocked TO it
                                   ▼
-                   custom-discord ──> #firewall (once per connection per 3 min)
+                   custom-discord ──> #firewall (new connections only, once per 3 min)
 ```
 
 The filter sits in **rsyslog, in front of Wazuh**, on purpose. Every syslog line Wazuh itself receives is stored in its archive, whatever the rules say. So if Wazuh listened on 514, the whole network's firewall traffic would end up in it.
@@ -125,5 +125,6 @@ nc -vz -w 3 192.168.50.3 22                     # or: Test-NetConnection 192.168
 
 - **One message per source → destination:port/protocol per 3 minutes.** A blocked TCP connect logs several lines (SYN retries) and a port scan logs hundreds. The Wazuh dashboard still keeps every line.
 - **Broadcast and multicast destinations are skipped** (DHCP, mDNS, ...). The default deny logs them, but they aren't connection attempts.
+- **Out-of-state TCP is skipped.** Only a new connection (SYN without ACK) creates a firewall state, so when a connection dies abruptly (e.g. `podman-compose down` killing containers mid-connection to Squid), its last FIN / RST / ACK packets match no state and the default deny logs them as blocks. Nothing was refused, so no message; they're still in the archive.
 - **Allowed traffic to and from the Vault VM is kept too.** The rsyslog filter keeps every line with the VM's IP, pass or block. It's archived in Wazuh with no alert.
 - **The Vault VM IP is hardcoded** in `rsyslog-opnsense.conf` and in rules 100700 / 100701, the same as in the DNS rules.

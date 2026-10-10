@@ -18,8 +18,9 @@
 
   Each blocked TCP connect logs several lines (SYN retries), so
   custom-discord posts one message per src -> dst:port/proto per 3
-  minutes, and skips broadcast / multicast. The dashboard still has every
-  line.
+  minutes, and skips broadcast / multicast and out-of-state TCP (FIN /
+  RST / ACK of a connection the firewall already closed). The dashboard
+  still has every line.
 
   Rule-ID block 100700-100701 (DNS 100250-100253, modsec 100300-100303,
   fail2ban 100400-100401, maintenance 100500-100502, dpkg 100600-100601

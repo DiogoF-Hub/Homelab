@@ -24,7 +24,8 @@
                decoder; the rule already filters to f2b_action=Ban)
     - firewall: rules 100700 + 100701 (OPNsense blocked traffic from / to
                the Vault VM, via syslog). The script skips broadcast /
-               multicast and posts one message per connection per 3 min.
+               multicast and out-of-state TCP, and posts one message per
+               connection per 3 min.
     - conffile: rule 100601 (dpkg kept a locally edited config file during
                an upgrade, new default saved as .dpkg-dist). Any agent;
                posted to the #maintenance channel with an @.

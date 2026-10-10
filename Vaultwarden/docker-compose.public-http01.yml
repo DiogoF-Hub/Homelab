@@ -215,6 +215,12 @@ services:
       USE_DNSBL: "yes"
       DNSBL_LIST: "bl.blocklist.de dnsbl.dronebl.org"
 
+      # BunkerNet off. Its nginx workers ping api.bunkerweb.io on every
+      # start/reload straight from Lua (resty.http, no proxy support), so
+      # the call skips Squid and the firewall blocks it. CrowdSec's far
+      # larger blocklist already covers BunkerNet's ~100 shared IPs.
+      USE_BUNKERNET: "no"
+
       # badbehavior: naive per-IP non-200 counter (400/401/403/404/405/429/444,
       # threshold 10 → 24h ban). Triggers false-positive cascades on Vaultwarden
       # since admin /diagnostics + normal login flow emits bursts of 401/403/404
