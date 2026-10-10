@@ -1,0 +1,14 @@
+# wazuh-home: /etc/logrotate.d/opnsense
+# The Vault VM's firewall lines written by rsyslog-opnsense.conf. Wazuh
+# keeps its own copy in the archive, so a week here is plenty.
+/var/log/opnsense/vault-filter.log {
+    daily
+    rotate 7
+    compress
+    delaycompress
+    missingok
+    notifempty
+    postrotate
+        /usr/lib/rsyslog/rsyslog-rotate
+    endscript
+}

@@ -495,8 +495,13 @@ LAN Pi-hole VM + `wazuh-home` itself), enrolled with a dedicated
   manager rules 100500-100502 turn the nightly run summary into a
   #maintenance Discord report (green OK, @ on degraded/fail or updated images). Wire this
   after the first `main.sh` run (Phase 14), since the log is born then.
+- **OPNsense**, no agent: it sends its `filterlog` over syslog (UDP 514)
+  to rsyslog on the manager host, which keeps only the Vault VM's lines in
+  a file the manager tails; Wazuh's built-in pf decoder + rule 87701 catch
+  every block, and manager rules 100700-100701 keep the ones from / to the
+  Vault VM (#firewall Discord, once per connection per 3 min).
 
-All six sources also fan out to per-channel Discord via one
+All seven sources also fan out to per-channel Discord via one
 `custom-discord` integrator (real webhook URLs live in a gitignored
 `discord-webhooks.json` side-file on the manager, not in the script).
 Decoders, rules, sidecars, localfiles, and the integrator all live in

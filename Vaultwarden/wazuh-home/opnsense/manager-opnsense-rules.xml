@@ -1,0 +1,40 @@
+<!--
+  wazuh-home (manager): OPNsense blocks to or from the Vault VM.
+  Append inside /var/ossec/etc/rules/local_rules.xml on the manager.
+  Validate + restart:
+      sudo /var/ossec/bin/wazuh-analysisd -t
+      sudo systemctl restart wazuh-manager
+
+  Source: OPNsense filterlog over syslog, already filtered by rsyslog to
+  the Vault VM's lines (rsyslog-opnsense.conf, manager-opnsense-
+  localfile.xml), decoded by Wazuh's built-in pf decoder. Built-in rule
+  87701 fires on every action=block; these two children keep the blocks
+  from and to the Vault VM:
+    100700 (level 8): blocked FROM 192.168.50.3. The VM tried to reach
+                      something its DMZ rules don't allow (direct
+                      internet instead of Squid, another VLAN, ...).
+    100701 (level 8): blocked TO 192.168.50.3. Something tried to reach
+                      the VM on a port nothing passes.
+
+  Each blocked TCP connect logs several lines (SYN retries), so
+  custom-discord posts one message per src -> dst:port/proto per 3
+  minutes, and skips broadcast / multicast. The dashboard still has every
+  line.
+
+  Rule-ID block 100700-100701 (DNS 100250-100253, modsec 100300-100303,
+  fail2ban 100400-100401, maintenance 100500-100502, dpkg 100600-100601
+  are taken). Vault VM IP is hardcoded, as in the DNS rules.
+-->
+<group name="opnsense,vault_fw,">
+  <rule id="100700" level="8">
+    <if_sid>87701</if_sid>
+    <srcip>192.168.50.3</srcip>
+    <description>OPNsense blocked the Vault VM: $(dstip):$(dstport)/$(protocol)</description>
+  </rule>
+
+  <rule id="100701" level="8">
+    <if_sid>87701</if_sid>
+    <dstip>192.168.50.3</dstip>
+    <description>OPNsense blocked traffic to the Vault VM from $(srcip) on $(dstport)/$(protocol)</description>
+  </rule>
+</group>

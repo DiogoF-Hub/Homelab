@@ -1,0 +1,21 @@
+<!--
+  wazuh-home (manager): read the Vault VM's firewall lines that rsyslog
+  filtered out of OPNsense's syslog (rsyslog-opnsense.conf).
+
+  Append to /var/ossec/etc/ossec.conf on the manager, then restart:
+      sudo /var/ossec/bin/wazuh-analysisd -t
+      sudo systemctl restart wazuh-manager
+      sudo grep vault-filter /var/ossec/logs/ossec.log | tail -2
+      # expect: Analyzing file: '/var/log/opnsense/vault-filter.log'
+
+  The lines keep the classic syslog header (program filterlog), so
+  Wazuh's built-in pf decoder parses them and built-in rule 87701 fires
+  on every block; manager-opnsense-rules.xml narrows that to the Vault VM.
+  They arrive as agent 000 (wazuh-home).
+-->
+<ossec_config>
+  <localfile>
+    <log_format>syslog</log_format>
+    <location>/var/log/opnsense/vault-filter.log</location>
+  </localfile>
+</ossec_config>

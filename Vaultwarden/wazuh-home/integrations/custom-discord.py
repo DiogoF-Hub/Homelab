@@ -48,6 +48,8 @@ stdlib only (urllib, json, datetime, zoneinfo), no pip, no requests.
 import sys
 import json
 import time
+import fcntl
+import ipaddress
 import urllib.request
 from datetime import datetime
 from zoneinfo import ZoneInfo
@@ -73,6 +75,7 @@ WEBHOOKS = {
     "squid":       "https://discord.com/api/webhooks/REPLACE_WITH_SQUID_WEBHOOK",
     "fail2ban":    "https://discord.com/api/webhooks/REPLACE_WITH_FAIL2BAN_WEBHOOK",
     "maintenance": "https://discord.com/api/webhooks/REPLACE_WITH_MAINTENANCE_WEBHOOK",
+    "firewall":    "https://discord.com/api/webhooks/REPLACE_WITH_FIREWALL_WEBHOOK",
 }
 try:
     with open("/var/ossec/integrations/discord-webhooks.json") as _wf:
@@ -405,6 +408,97 @@ def format_conffile(alert):
     }
 
 
+# --- firewall: OPNsense blocked traffic to/from the Vault VM (100700/100701)
+
+# One blocked TCP connect logs several lines (SYN retries) and a scan logs
+# hundreds, so each src -> dst:port/proto posts once per FW_MUTE_SECONDS.
+# The state file sits in a dir wazuh-integratord can write; any error with
+# it fails open (the message is posted, just not deduplicated).
+FW_SEEN_FILE = "/var/ossec/logs/custom-discord-fw-seen.json"
+FW_MUTE_SECONDS = 180
+
+def _fw_key(data):
+    return (f"{data.get('srcip', '')}>{data.get('dstip', '')}:"
+            f"{data.get('dstport', '')}/{data.get('protocol', '')}")
+
+def _fw_first_in_window(key):
+    """True if `key` wasn't posted in the last FW_MUTE_SECONDS; records it."""
+    now = time.time()
+    try:
+        with open(FW_SEEN_FILE, "a+") as f:
+            fcntl.flock(f, fcntl.LOCK_EX)
+            f.seek(0)
+            try:
+                seen = json.load(f)
+            except ValueError:
+                seen = {}
+            if not isinstance(seen, dict):
+                seen = {}
+            seen = {k: t for k, t in seen.items() if now - t < FW_MUTE_SECONDS}
+            if key in seen:
+                return False
+            seen[key] = now
+            f.seek(0)
+            f.truncate()
+            json.dump(seen, f)
+        return True
+    except OSError:
+        return True
+
+def _fw_is_noise(ip):
+    """Broadcast / multicast destinations (DHCP, mDNS, SSDP, ...): the
+    default block rule logs them, but they're not a connection attempt."""
+    try:
+        a = ipaddress.ip_address(ip)
+    except ValueError:
+        return False
+    return a.is_multicast or (a.version == 4 and str(a).endswith(".255"))
+
+def _filterlog_iface_dir(full_log):
+    """Interface + direction from filterlog's CSV (fields 5 and 8), which
+    the built-in pf decoder doesn't extract."""
+    try:
+        f = full_log.split("]: ", 1)[1].split(",")
+        return f[4], f[7]
+    except (IndexError, AttributeError):
+        return "N/A", "N/A"
+
+def format_firewall(alert):
+    """
+    Embed for an OPNsense block involving the Vault VM. 100700 = the VM
+    tried to reach something its DMZ rules don't allow (e.g. the internet
+    directly instead of through Squid); 100701 = something tried to reach
+    the VM on a port nothing passes.
+    """
+    data = alert.get("data", {})
+    rule_id = alert.get("rule", {}).get("id", "")
+    src = data.get("srcip", "N/A")
+    dst = data.get("dstip", "N/A")
+    proto = data.get("protocol", "N/A")
+    iface, direction = _filterlog_iface_dir(alert.get("full_log", ""))
+
+    outbound = rule_id == "100700"
+    remote = dst if outbound else src
+    country, _ = resolve_geo(remote, {})
+    title = ("🧱 Firewall blocked the Vault VM" if outbound
+             else "🛡️ Firewall blocked traffic to the Vault VM")
+
+    return {
+        "title": title,
+        "color": 15844367,  # amber
+        "fields": [
+            {"name": "From", "value": f"`{src}:{data.get('srcport', '?')}`", "inline": True},
+            {"name": "To", "value": f"`{dst}:{data.get('dstport', '?')}`", "inline": True},
+            {"name": "Protocol", "value": proto, "inline": True},
+            {"name": "Remote side", "value": country, "inline": True},
+            {"name": "Interface", "value": f"{iface} ({direction})", "inline": True},
+            {"name": "Repeats", "value": f"same connection muted for {FW_MUTE_SECONDS // 60} min",
+             "inline": True},
+        ],
+        "footer": {"text": format_timestamp(alert.get("timestamp", "N/A"))},
+    }
+
+
 # --- DORMANT templates for future sources. Not wired in main() yet; add a
 #     WEBHOOKS key + an <integration> block + un-comment the branch, and
 #     verify the real alert shape first (the way modsec was). ---
@@ -532,6 +626,12 @@ def main():
     #     decoder) already filters to f2b_action=Ban, so key on the rule. ---
     elif rule.get("id") == "100401":
         deliver("fail2ban", format_fail2ban(alert))
+
+    # --- firewall: OPNsense blocks to/from the Vault VM (100700 / 100701),
+    #     minus broadcast/multicast, once per connection per 3 min. ---
+    elif rule.get("id") in ("100700", "100701"):
+        if not _fw_is_noise(data.get("dstip", "")) and _fw_first_in_window(_fw_key(data)):
+            deliver("firewall", format_firewall(alert))
 
     # --- maintenance: nightly run summary. 100501 = ok (quiet heartbeat),
     #     100502 = degraded|fail. @ you when it's not ok, and also when a
