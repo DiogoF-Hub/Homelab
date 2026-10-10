@@ -996,9 +996,8 @@ config-management push.
   [`scripts/root_crontab.txt`](scripts/root_crontab.txt): nightly
   apt cycle + unconditional reboot, see "Automated maintenance + log
   fetcher" above for deploy procedure + the `fetcher` user setup
-- [`../proxy-home/`](../proxy-home/): for comparison, an
-  outbound-side proxy in the same stack (Squid for Vault VM
-  egress); same operational pattern (per-VM folder, configs +
-  README)
+- [`../squid/`](../squid/): for comparison, the outbound-side
+  proxy in the same stack (Squid for Vault VM egress, running on
+  the LAN Pi-hole VM)
 - [`../wazuh-home/`](../wazuh-home/): same convention for the
   Wazuh manager VM

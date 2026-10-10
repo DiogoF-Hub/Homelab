@@ -24,7 +24,8 @@ skip.
 This runbook describes how to bring up a stack **exactly equal to the
 reference setup** described across `README.md`, the compose files, and
 the scripts in this repo. If you want a 1:1 replica of that setup,
-same VM layout (Vaultwarden VM + `proxy-home` VM + `wazuh-home` VM),
+same VM layout (Vaultwarden VM + LAN Pi-hole VM running Squid +
+`wazuh-home` VM),
 same paths (`/srv/vw-data`, `/root/vault/`, `/home/poduser/vault/`),
 same users (`vwadmin`, `poduser`, `fetcher`), same hardening choices
 (Cloudflare Tunnel front-end, Squid for HTTP/HTTPS egress, LAN Pi-hole
@@ -47,7 +48,7 @@ concrete. Adapt freely if your situation differs:
 - **Different SMTP provider than Mailjet** → adjust `.env`'s `SMTP_*`
   group and the firewall rule for SMTP egress (rule 6 in the README's
   DMZ table). Make sure the new provider's hostname is in
-  `proxy-home/vault_domains_allow_proxy.txt` if SMTP runs through
+  `squid/vault_domains_allow_proxy.txt` if SMTP runs through
   Squid, or whitelist it as a direct bypass like Mailjet currently is.
 - **Different reverse proxy / WAF** → if you're not using BunkerWeb,
   you're rebuilding a different stack and most of the BunkerWeb-shaped
@@ -71,7 +72,7 @@ concrete. Adapt freely if your situation differs:
   VPS + WireGuard) instead of Phase 11 (Cloudflare Tunnel). Pair
   with `docker-compose.public-dns01.yml` for the home side.
 - **Different VLAN / IP / hostname conventions** → search-and-replace
-  `192.168.173.9` (proxy-home / Squid), `192.168.173.2` (LAN Pi-hole),
+  `192.168.173.2` (LAN Pi-hole VM: Pi-hole + Squid),
   `192.168.50.3` (Vault VM, used in `wazuh-home/dns/manager-rules.xml`),
   `vault.example.com` (the public hostname), `vaultwarden-prod` (the
   Cloudflare tunnel name), and any internal subnet references with your
@@ -134,8 +135,8 @@ can strip it (`sudo apt purge task-desktop task-gnome-desktop ...
 && sudo apt autoremove`) before continuing, but it's faster and
 cleaner to reinstall from a server image.
 
-The companion `proxy-home` VM (Phase 3) is also Debian server; same
-logic.
+The LAN Pi-hole VM that also hosts Squid (Phase 3) is Debian 13
+server too; same logic.
 
 ---
 
@@ -143,7 +144,7 @@ logic.
 
 - An **OPNsense** instance (or equivalent L3 firewall/router) acting as
   the gateway for every VLAN this stack uses (VLAN-DMZ for the
-  Vaultwarden VM, the VLAN that hosts `proxy-home`, the management
+  Vaultwarden VM, the LAN VLAN that hosts the Pi-hole VM, the management
   VLAN, etc.). OPNsense is where all the inter-VLAN rules from
   README §DMZ Firewall Rules actually live.
 - **VLANs created in OPNsense** and **trunked (802.1Q tagged) to your
@@ -165,9 +166,9 @@ logic.
   `cf-tunnel`). Not required for `public-http01`.
 - TrueNAS (or equivalent) for first-tier backup storage. Hetzner Storage
   Box (or equivalent) for second-tier off-site replication.
-- A **separate `proxy-home` VM** already running Squid (Phase 3
-  describes what must be true on it; if you're rebuilding both, do
-  proxy-home first).
+- The **LAN Pi-hole VM** already running Squid next to Pi-hole
+  (Phase 3 describes what must be true on it; if you're rebuilding
+  both, do that VM first).
 - A **DNS resolver reachable from VLAN-DMZ**, the reference setup uses
   the homelab's existing LAN Pi-hole (`192.168.173.2`); any encrypted-
   upstream resolver the firewall lets you reach works. Phase 3 covers
@@ -225,7 +226,7 @@ Secret inventory you must have on hand before Phase 10:
    OVMF/UEFI if you prefer secure boot, not required.
 2. **Single vNIC pinned to VLAN-DMZ.** No second NIC. The whole point
    is that this VM has exactly one routable path out, and it goes
-   through the `proxy-home` VM. Concretely, in the Proxmox VM's
+   through Squid on the LAN Pi-hole VM. Concretely, in the Proxmox VM's
    hardware tab:
    - Bridge: a VLAN-aware Linux bridge whose physical NIC is the
      trunked uplink to your switch (and therefore to OPNsense).
@@ -449,8 +450,8 @@ defence-in-depth):
 - Default-deny everything else.
 
 No further on-host firewalling is needed because egress control is
-enforced upstream: HTTP/HTTPS via Squid on the `proxy-home` VM, DNS via
-the LAN Pi-hole.
+enforced upstream on the LAN Pi-hole VM: HTTP/HTTPS via its Squid, DNS
+via its Pi-hole.
 
 ### QUIC UDP buffer tuning (host kernel)
 
@@ -472,20 +473,21 @@ This is a host-level kernel setting, applies to every container.
 ### Wazuh agent (if matching the reference setup)
 
 The reference setup runs the Wazuh agent on every VM (Vaultwarden VM +
-`proxy-home` VM + LAN Pi-hole VM + `wazuh-home` itself), enrolled with a
-dedicated `wazuh-home` manager. What each ships:
+LAN Pi-hole VM + `wazuh-home` itself), enrolled with a dedicated
+`wazuh-home` manager. What each ships:
 
 - **Vaultwarden VM**, a `modsec-tail.py` sidecar (runs as a dedicated
   unprivileged `modsectail` user) flattens BunkerWeb's `modsec_audit.log`
   into `/var/log/modsec-events/events.log`; the agent tails that; manager
   rules 100300-100303 tier WAF events by CRS anomaly score.
-- **`proxy-home` VM**, the agent installer auto-discovers Squid's
-  `/var/log/squid/access.log` (no manual config; built-in squid decoder).
-- **LAN Pi-hole VM**, a `pihole-ftl-tail.py` sidecar polls Pi-hole's FTL
-  SQLite DB and emits per-query JSON to `/var/log/vault-dns/events.log`;
-  manager rules 100250-100253.
-- **The four home VMs running the sshd jail** (vault, manager,
-  proxy-home, pihole) each tail `/var/log/fail2ban.log`; manager
+- **LAN Pi-hole VM**, two sources. A `pihole-ftl-tail.py` sidecar polls
+  Pi-hole's FTL SQLite DB and emits per-query JSON to
+  `/var/log/vault-dns/events.log` (manager rules 100250-100253). And the
+  agent installer auto-discovers Squid's `/var/log/squid/access.log` (no
+  manual config; built-in squid decoder), as long as Squid is installed
+  before the agent.
+- **The three home VMs running the sshd jail** (vault, manager,
+  pihole) each tail `/var/log/fail2ban.log`; manager
   `fail2ban-file` decoder + rule 100401 fire on a ban. The edge VPS runs
   fail2ban too but has no Wazuh agent, so its bans aren't shipped.
 - **Vaultwarden VM (maintenance)**, `main.sh` writes a JSON status log
@@ -510,7 +512,7 @@ sub-section entirely.
 
 Install the agent + apt repo (from Wazuh's official install guide for
 the version you're standardising on). Confirm `packages.wazuh.com` is
-in `proxy-home/vault_domains_allow_proxy.txt` so the apt fetch flows
+in `squid/vault_domains_allow_proxy.txt` so the apt fetch flows
 through Squid (Phase 4 wires Squid up; the agent install can wait until
 after Phase 4 if it's blocking on Squid availability). The Vaultwarden
 VM's `modsec-tail` sidecar can only go in after the BunkerWeb stack is
@@ -519,21 +521,35 @@ up (Phase 10+), since it tails `/srv/bw-logs/`.
 ## Phase 3, prerequisites on other hosts
 
 The Vaultwarden VM does no outbound itself; it relies on two upstream
-chokepoints that need to be in place **before** Phase 4 wires the VM up
-to use them.
+chokepoints, both on the LAN Pi-hole VM, that need to be in place
+**before** Phase 4 wires the VM up to use them.
 
-### `proxy-home` VM (HTTP/HTTPS egress)
+### Squid on the LAN Pi-hole VM (HTTP/HTTPS egress)
 
-Hosts **Squid** on port `3128`, allowlist-enforced by
-`proxy-home/squid.conf` (the canonical allowlist is
-`proxy-home/vault_domains_allow_proxy.txt`, deployed to
-`/etc/squid/allowed_domains.txt` on the proxy-home VM). The Vaultwarden
-VM uses this as its `http_proxy` / `https_proxy` for all egress.
+**Squid** listens on port `3128` on the same VM as the LAN Pi-hole
+(`192.168.173.2`). The block in `squid/squid.conf` goes at the **very
+top** of the distro's default `/etc/squid/squid.conf`, above the
+`acl localnet` lines, so it decides before any default rule; the rest
+of the file stays stock. The canonical allowlist is
+`squid/vault_domains_allow_proxy.txt`, deployed to
+`/etc/squid/vault_domains_allow_proxy.txt`. Only the Vault VM
+(`acl vault_vm src 192.168.50.3`) may use the proxy; any other LAN
+host gets a 403. The Vaultwarden VM uses it as its `http_proxy` /
+`https_proxy` for all egress.
 
-You almost certainly already have this VM running. Things to verify:
+Squid resolves destination names through the VM's own resolver, not
+through Pi-hole: `/etc/resolv.conf` is pinned to `1.1.1.3` (dhcpcd's
+`nohook resolv.conf` stops DHCP from rewriting it), so the host and
+Squid keep working while the Pi-hole container is down.
+
+Things to verify:
 
 - Squid running, allowlist applied, port 3128 reachable from VLAN-DMZ.
-- `ufw` allows port 3128/tcp from the VLAN-DMZ subnet only.
+- From any LAN host other than the Vault VM,
+  `curl -x http://192.168.173.2:3128 -I https://deb.debian.org`
+  returns 403 (the source filter works).
+- Squid was installed **before** the Wazuh agent, so the agent
+  installer picked up `/var/log/squid/access.log` by itself.
 
 ### LAN Pi-hole (DNS resolution + Wazuh visibility)
 
@@ -597,8 +613,8 @@ Things to verify on the LAN Pi-hole VM before continuing:
 ### Firewall (DMZ → both chokepoints)
 
 OPNsense (or equivalent), see README §DMZ Firewall Rules. The two
-relevant allows: rule 1 (`VLAN-DMZ → 192.168.173.9:3128`, Squid on the
-`proxy-home` VM) and rule 2 (`VLAN-DMZ → 192.168.173.2:53`, the LAN
+relevant allows: rule 1 (`VLAN-DMZ → 192.168.173.2:3128`, Squid on the
+LAN Pi-hole VM) and rule 2 (`VLAN-DMZ → 192.168.173.2:53`, the LAN
 Pi-hole). Rule 3 is the catch-all VLAN block, sitting **after** both
 allows.
 - Rule 6 (SMTP/587 direct to Mailjet) is in place so the Vaultwarden VM
@@ -607,27 +623,27 @@ allows.
 Smoke test from the Vaultwarden VM (will work once Phase 4 is done):
 
 ```bash
-http_proxy=http://192.168.173.9:3128 curl -I https://deb.debian.org   # expect 200
+http_proxy=http://192.168.173.2:3128 curl -I https://deb.debian.org   # expect 200
 nslookup deb.debian.org 192.168.173.2                                  # expect real answers
 ```
 
 ## Phase 4, Wire the Vaultwarden VM through its chokepoints
 
 The VM has **two** outbound paths to wire: HTTP/HTTPS via Squid on the
-`proxy-home` VM (`192.168.173.9:3128`), and DNS via the LAN Pi-hole
+LAN Pi-hole VM (`192.168.173.2:3128`), and DNS via the LAN Pi-hole
 (`192.168.173.2:53`).
 
 ### apt → Squid
 
 ```bash
-sudo nano /etc/apt/apt.conf.d/95proxy
+sudo nano /etc/apt/apt.conf.d/01proxy
 ```
 
 Paste:
 
 ```
-Acquire::http::Proxy "http://192.168.173.9:3128";
-Acquire::https::Proxy "http://192.168.173.9:3128";
+Acquire::http::Proxy "http://192.168.173.2:3128";
+Acquire::https::Proxy "http://192.168.173.2:3128";
 ```
 
 ### System-wide HTTP/HTTPS proxy (four files)
@@ -639,10 +655,10 @@ interactive shells don't always pick it up. Four files are needed.
 **1.** `/etc/environment`, global env for all programs launched normally:
 
 ```
-http_proxy="http://192.168.173.9:3128"
-https_proxy="http://192.168.173.9:3128"
-HTTP_PROXY="http://192.168.173.9:3128"
-HTTPS_PROXY="http://192.168.173.9:3128"
+http_proxy="http://192.168.173.2:3128"
+https_proxy="http://192.168.173.2:3128"
+HTTP_PROXY="http://192.168.173.2:3128"
+HTTPS_PROXY="http://192.168.173.2:3128"
 NO_PROXY="localhost,127.0.0.1,0.0.0.0,::1,bunkerweb,crowdsec,vaultwarden,cloudflared"
 no_proxy="localhost,127.0.0.1,0.0.0.0,::1,bunkerweb,crowdsec,vaultwarden,cloudflared"
 ```
@@ -652,10 +668,10 @@ no_proxy="localhost,127.0.0.1,0.0.0.0,::1,bunkerweb,crowdsec,vaultwarden,cloudfl
 
 ```ini
 [Manager]
-DefaultEnvironment="HTTP_PROXY=http://192.168.173.9:3128"
-DefaultEnvironment="http_proxy=http://192.168.173.9:3128"
-DefaultEnvironment="HTTPS_PROXY=http://192.168.173.9:3128"
-DefaultEnvironment="https_proxy=http://192.168.173.9:3128"
+DefaultEnvironment="HTTP_PROXY=http://192.168.173.2:3128"
+DefaultEnvironment="http_proxy=http://192.168.173.2:3128"
+DefaultEnvironment="HTTPS_PROXY=http://192.168.173.2:3128"
+DefaultEnvironment="https_proxy=http://192.168.173.2:3128"
 DefaultEnvironment="NO_PROXY=localhost,127.0.0.1,0.0.0.0,::1,bunkerweb,crowdsec,vaultwarden,cloudflared"
 DefaultEnvironment="no_proxy=localhost,127.0.0.1,0.0.0.0,::1,bunkerweb,crowdsec,vaultwarden,cloudflared"
 ```
@@ -663,8 +679,8 @@ DefaultEnvironment="no_proxy=localhost,127.0.0.1,0.0.0.0,::1,bunkerweb,crowdsec,
 **3.** `/etc/profile.d/proxy.sh`, for interactive SSH shells:
 
 ```bash
-export http_proxy="http://192.168.173.9:3128"
-export https_proxy="http://192.168.173.9:3128"
+export http_proxy="http://192.168.173.2:3128"
+export https_proxy="http://192.168.173.2:3128"
 export HTTP_PROXY="$http_proxy"
 export HTTPS_PROXY="$https_proxy"
 export no_proxy="localhost,127.0.0.1,0.0.0.0,::1,bunkerweb,crowdsec,vaultwarden,cloudflared"
@@ -733,7 +749,7 @@ you also chose static-on-VM in Phase 1.
 # Re-login or `source /etc/environment` first, then:
 sudo apt update                                        # expect: 200s, no 403s
 nslookup deb.debian.org                                # expect: real answers via 192.168.173.2
-http_proxy=http://192.168.173.9:3128 curl -I https://deb.debian.org   # expect: 200
+http_proxy=http://192.168.173.2:3128 curl -I https://deb.debian.org   # expect: 200
 ```
 
 If you applied the `wazuh-home/` config earlier, also confirm the alert
@@ -753,7 +769,7 @@ rule 100253 (upstream no-answer) for a Cloudflare-Family-blocked
 domain.
 
 If `apt update` 403s, the Squid allowlist is missing a Debian mirror,
-cross-check `proxy-home/vault_domains_allow_proxy.txt` against the
+cross-check `squid/vault_domains_allow_proxy.txt` against the
 mirror in `/etc/apt/sources.list`.
 
 ## Phase 5, Podman rootless as `poduser`
@@ -1207,7 +1223,7 @@ What to watch for on first boot, in order:
 1. **BunkerWeb** pulls the nginx-ultimate-bad-bot-blocker UA list, the
    DB-IP MMDB, and DNSBL data. First pull takes a minute. If it hangs,
    Squid is blocking one of: `github.com`, `raw.githubusercontent.com`,
-   `download.db-ip.com`. Cross-check `proxy-home/vault_domains_allow_proxy.txt`.
+   `download.db-ip.com`. Cross-check `squid/vault_domains_allow_proxy.txt`.
 2. **ACME challenge fires.** For DNS-01 it calls the Cloudflare API,
    failing here usually means `CLOUDFLARE_API_TOKEN` is wrong or
    scoped wrong. For HTTP-01 it needs ports 80/443 reachable from the

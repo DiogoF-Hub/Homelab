@@ -23,7 +23,7 @@ WIRED SOURCES (the three pipelines configured today):
   - dns    : Pi-hole FTL events from the Vault VM (manager-rules.xml).
              Pings on blocked=true EXCEPT status=blocked-external-null-reply
              (upstream NULL-reply noise), matching the dashboard filter.
-  - squid  : Squid access log on proxy-home (Wazuh built-in squid
+  - squid  : Squid access log on the LAN Pi-hole VM (Wazuh built-in squid
              decoder). Pings on action=TCP_DENIED, an egress-allowlist
              denial from the locked-down Vault VM.
 

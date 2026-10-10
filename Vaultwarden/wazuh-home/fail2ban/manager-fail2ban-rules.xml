@@ -7,8 +7,8 @@
       sudo /var/ossec/bin/wazuh-analysisd -t
       sudo systemctl restart wazuh-manager
 
-  Source: /var/log/fail2ban.log on the four home hosts running fail2ban
-  (vault, manager, proxy-home, pihole; localfile in
+  Source: /var/log/fail2ban.log on the three home hosts running fail2ban
+  (vault, manager, pihole; localfile in
   fail2ban-agent.localfile.xml). The edge VPS runs fail2ban too but has
   no Wazuh agent, so its bans are not covered. The fail2ban-file
   decoder extracts jail / f2b_action / srcip; srcip is auto-promoted to

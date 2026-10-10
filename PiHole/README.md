@@ -1,6 +1,8 @@
 # Pi-hole Setup
 
-This folder contains my **Docker-based Pi-hole configuration and automation scripts**, running on a dedicated **Ubuntu Server VM in Proxmox** on the LAN.
+This folder contains my **Docker-based Pi-hole configuration and automation scripts**, running on a dedicated **Debian 13 VM in Proxmox** on the LAN.
+
+Until October 2026 this was an Ubuntu Server VM, and Squid ran on a second Ubuntu VM (`proxy-home`). Both were merged into this one Debian 13 VM to save RAM on the Proxmox host; the Pi-hole configuration in this folder carried over unchanged.
 
 It is a **two-container stack**, not just Pi-hole:
 
@@ -9,7 +11,7 @@ It is a **two-container stack**, not just Pi-hole:
 
 Both run with `network_mode: host`, so nothing leaves the box as plaintext DNS except the two bootstrap lookups that resolve the DoH endpoint itself.
 
-This Pi-hole is also the **DNS chokepoint for the Vaultwarden VM** (see [`../Vaultwarden/README.md`](../Vaultwarden/README.md)), with every query from that VM shipped into Wazuh as an alert.
+This Pi-hole is also the **DNS chokepoint for the Vaultwarden VM** (see [`../Vaultwarden/README.md`](../Vaultwarden/README.md)), with every query from that VM shipped into Wazuh as an alert. The same VM also runs **Squid**, the Vault VM's HTTP/HTTPS egress chokepoint (config in [`../Vaultwarden/squid/`](../Vaultwarden/squid/)), plus the Wazuh agent and the DNS sidecar from [`../Vaultwarden/wazuh-home/`](../Vaultwarden/wazuh-home/).
 
 Everything here is public for transparency and to help others learn, but you **must adapt the configuration to your own environment** before using it. The IPs, hostnames, and tailnet name in `docker-compose.yml` are **example values**.
 
@@ -174,7 +176,7 @@ There is **no `ports:` block**. `network_mode: host` means the containers bind h
 * **123** udp, NTP
 * **5335** tcp+udp on loopback, dnsproxy
 
-Because of that, the VM must have nothing else on 53 or 443. On Ubuntu that means **disabling the `systemd-resolved` stub listener** before the first `up`, or the Pi-hole container will fail to bind.
+Because of that, the VM must have nothing else on 53 or 443, or the Pi-hole container will fail to bind. Debian 13 doesn't run `systemd-resolved`, so 53 is free out of the box; on distros that do (Ubuntu), **disable its stub listener** before the first `up`.
 
 ---
 
@@ -237,7 +239,18 @@ Both entries must be in **root's** crontab. `main.sh` runs `apt-get` and `reboot
    sudo mkdir -p /home/pi/pihole/data/etc-pihole
    ```
 
-   Free up port 53 by disabling the `systemd-resolved` stub listener, and make sure nothing else holds 443. Mount `/mnt/truenas-logs` (or edit `LOG_DIR` in `main.sh`).
+   Make sure nothing holds port 53 or 443 (see Ports above). Mount `/mnt/truenas-logs` (or edit `LOG_DIR` in `main.sh`).
+
+   Point the **VM's own resolver** at a public one, not at its own Pi-hole, so the host (apt, Docker pulls, Squid, the Wazuh agent) keeps resolving while the container is down or restarting:
+
+   ```
+   # /etc/resolv.conf
+   nameserver 1.1.1.3
+   options edns0 trust-ad
+   search localdomain
+   ```
+
+   The VM gets its IP by DHCP (static mapping in OPNsense), so also add `nohook resolv.conf` to `/etc/dhcpcd.conf`, otherwise dhcpcd rewrites the file with the DHCP-provided DNS. Verify after a reboot that the file still has these three lines.
 
 2. **Adapt `docker-compose.yml` to your network**
 
@@ -302,7 +315,7 @@ Both entries must be in **root's** crontab. `main.sh` runs `apt-get` and `reboot
 Honest caveats:
 
 * **Rate limiting is off** (see above), because the guest network reaches Pi-hole through OPNsense Unbound and would otherwise trip the per-IP limit as one oversized client.
-* **Nightly DNS outage** during the maintenance window.
+* **Nightly DNS outage** during the maintenance window. The reboot also takes Squid down for a minute, so keep the Vault VM's own nightly run (which needs Squid) at a different time.
 * **`.env` is tracked in git.** Keep the committed value empty.
 
 ---
@@ -310,4 +323,5 @@ Honest caveats:
 ## 🔗 Related
 
 * [`../Vaultwarden/README.md`](../Vaultwarden/README.md), the Vault VM uses this Pi-hole as its only DNS path, with a group-scoped allowlist (`vault_domains_allow_dns.txt`) and full per-query Wazuh visibility
+* [`../Vaultwarden/squid/`](../Vaultwarden/squid/), the Squid config and allowlist that run on this same VM (the Vault VM's HTTP/HTTPS egress, open to the Vault VM only)
 * [`../HTTPS Generator/README.md`](../HTTPS%20Generator/README.md), for issuing an internal-CA cert for the web interface

@@ -42,7 +42,7 @@ Homelab/
 │   │   ├── parsers/                          # custom Vaultwarden log parser
 │   │   ├── scenarios/                        # tightened bruteforce + user-enum scenarios
 │   │   └── whitelists/                       # admin-diagnostics false-positive drop
-│   ├── proxy-home/                           # targets the separate proxy-home VM (Squid HTTP/HTTPS egress only; DNS now via the LAN Pi-hole)
+│   ├── squid/                                # targets the LAN Pi-hole VM, which also runs Squid (Vault VM HTTP/HTTPS egress)
 │   │   ├── squid.conf
 │   │   └── vault_domains_allow_proxy.txt
 │   ├── vps/                                  # targets the public-facing edge VPS (Hetzner CX23 Falkenstein, TCP passthrough back home via WireGuard with PROXY protocol for real-IP preservation, no TLS termination on the VPS)
@@ -105,6 +105,8 @@ Homelab/
 
 ### **Pi-hole**
 
+Runs on a **dedicated Debian 13 VM in Proxmox** on the LAN. The same VM also runs **Squid**, the Vaultwarden VM's HTTP/HTTPS egress proxy. Until October 2026 these were **two separate Ubuntu Server VMs** (Pi-hole, and a `proxy-home` VM for Squid); they were merged into this one Debian 13 VM to save RAM on the Proxmox host.
+
 * **Features**
 
   * Network-wide ad and tracker blocking
@@ -112,6 +114,7 @@ Homelab/
   * HTTPS-only web interface on port 443
   * Fully env-configured through `FTLCONF_*`: local DNS records, reverse servers (conditional forwarding) back to OPNsense Unbound, wpad sinkholing, `bogusPriv`, and the reply-host settings that make `pi.hole` resolve over Tailscale
   * Custom blocklists, manual domain blocking, and a cookie-consent platform whitelist to prevent banner breakage
+  * DNS chokepoint for the Vaultwarden VM (strict per-client allowlist, every query shipped to Wazuh by a sidecar), with Squid next to it as the HTTP/HTTPS chokepoint
 * **Scripts**
 
   * `main.sh` for daily maintenance (gravity update → stop containers → image update → system update → reboot)
@@ -135,9 +138,9 @@ Self-hosted password manager running on a **dedicated Debian 13 VM in Proxmox**,
   * Bans enforced **inline at BunkerWeb** (returns 403), no separate Cloudflare Worker
 * **Outbound isolation**
 
-  * Egress is default-deny on the VM and routed through two upstream chokepoints:
+  * Egress is default-deny on the VM and routed through two upstream chokepoints, both on the LAN Pi-hole VM:
 
-    * **Squid** on the **`proxy-home` VM** for HTTP / HTTPS egress, enforced against a domain allowlist (`vault_domains_allow_proxy.txt`)
+    * **Squid** on the **LAN Pi-hole VM** for HTTP / HTTPS egress, enforced against a domain allowlist (`vault_domains_allow_proxy.txt`) and open to the Vault VM only
     * **The homelab's LAN Pi-hole** for DNS, with DoH-encrypted upstream to Cloudflare Family and full per-query visibility via Wazuh (custom decoder + rule chain in `Vaultwarden/wazuh-home/` elevates every Vault-VM-srcip query to a level-3 alert)
 * **Backups & redundancy**
 

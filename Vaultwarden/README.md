@@ -15,7 +15,7 @@ The setup is designed for **secure self-hosted password management**, with:
 * **Edge VPS doing TCP passthrough back home via WireGuard** as the public-facing edge today (CGNAT at home, plus a hard "no third-party TLS termination for a password manager" stance). A small Hetzner Cloud VPS runs nginx as a raw TCP stream proxy with PROXY protocol, forwarding ports 80/443 through an encrypted WG tunnel to the home BunkerWeb VM. **TLS terminates at home, not on the VPS**, the Let's Encrypt private key never leaves the BunkerWeb container. Full provisioning runbook in [`vps/README.md`](vps/README.md). Two other compose flavors (`cf-tunnel.yml` for Cloudflare Tunnel, `public-http01.yml` for direct exposure with HTTP-01 ACME) are kept in the repo as reference for anyone evaluating different deployment options for their own setup, but I'm not running them.
 * **[BunkerWeb reverse proxy + WAF](#%EF%B8%8F-bunkerweb-reverse-proxy--waf)** for HTTPS, security headers, ACME via DNS-01, CRS-based WAF, country/UA blacklists, rate limits, and the CrowdSec bouncer
 * **[Containerized CrowdSec](#%EF%B8%8F-crowdsec-integration)** with custom Vaultwarden parsers, scenarios, and whitelists; bans enforced at **two layers**, inline at BunkerWeb (HTTP 403) and at the edge VPS via `crowdsec-firewall-bouncer-nftables` (TCP drop), both pulling from the same home LAPI
-* **Outbound HTTP/HTTPS via [Squid on the `proxy-home` VM](#-outbound-httphttps-proxy--squid-on-the-proxy-home-vm)** (domain allowlist–enforced) and **[outbound DNS via the homelab's LAN Pi-hole](#-outbound-dns-via-the-lan-pi-hole--wazuh-visibility)**, with every Vault VM query shipped into Wazuh as a level-3 alert via a custom decoder + rule chain (see `wazuh-home/`)
+* **Outbound HTTP/HTTPS via [Squid on the LAN Pi-hole VM](#-outbound-httphttps-proxy-squid-on-the-lan-pi-hole-vm)** (domain allowlist–enforced) and **[outbound DNS via the homelab's LAN Pi-hole](#-outbound-dns-via-the-lan-pi-hole--wazuh-visibility)**, with every Vault VM query shipped into Wazuh as a level-3 alert via a custom decoder + rule chain (see `wazuh-home/`)
 * **[Daily automated maintenance](#-automation-scripts)** via `main.sh`: [age](https://github.com/FiloSottile/age)-encrypted backups [minisign](https://jedisct1.github.io/minisign/)-signed for tamper detection, image updates, full system update, and reboot
 * **[Automated off-site replication](#-automation-scripts)** to TrueNAS and Hetzner Storage Box
 * **Cloudflare DNS-side hardening** (CAA records, HSTS Preload, DNSSEC). Cloudflare is **DNS-only (grey cloud)** in this deployment, no proxying. The previous edge-side policies (Full SSL, Cloudflare Access on `/admin`, geo-blocking at edge, etc.) are kept in the [Cloudflare section](#cloudflare) for reference but aren't in use today. See that section for the full breakdown of what's currently active vs. reference-only
@@ -74,8 +74,8 @@ vaultwarden/
 │   └── whitelists/
 │       └── admin-diagnostics.yaml             # Drops Vaultwarden's intentional /admin/diagnostics 4xx probes
 │
-├── proxy-home/                                # Targets the proxy-home VM (HTTP/HTTPS egress chokepoint via Squid; DNS now uses the LAN Pi-hole instead, see wazuh-home/)
-│   ├── squid.conf                             # Squid proxy configuration for domain allowlisting
+├── squid/                                     # Targets the LAN Pi-hole VM, which also runs Squid (the Vault VM's HTTP/HTTPS egress chokepoint)
+│   ├── squid.conf                             # Block for the top of the VM's squid.conf: Vault VM only, allowlisted domains only
 │   └── vault_domains_allow_proxy.txt          # List of domains allowed for the Squid proxy
 │
 ├── vps/                                       # Targets the public-facing edge VPS (Hetzner CX23, Falkenstein/fsn1) doing TCP passthrough back to the home BunkerWeb VM via WireGuard, with PROXY protocol so the real client IP survives the chain
@@ -115,7 +115,7 @@ vaultwarden/
 │           ├── modsec-tail.py                 # flattens modsec_audit.log JSON into clean events
 │           └── modsec-tail.service            # systemd unit (dedicated modsectail user, hardened)
 │
-├── vault_domains_allow_dns.txt                # Pi-hole allowlist for the vaultwarden-vm group (mirror of proxy-home/vault_domains_allow_proxy.txt in gravity/ABP syntax)
+├── vault_domains_allow_dns.txt                # Pi-hole allowlist for the vaultwarden-vm group (mirror of squid/vault_domains_allow_proxy.txt in gravity/ABP syntax)
 │
 ├── scripts/                                   # Repo-side split by lifecycle / target user; all root_scripts/ + setups_scripts/ deploy to /root/vault/ on the VM
     ├── root_scripts/                          # Recurring scripts run by root nightly via cron
@@ -347,7 +347,7 @@ Subnets are pinned in the compose file so the aardvark-dns gateway IPs (`10.89.0
 * **`podman-compose`** handles compose-file orchestration: parsing (`config --services` to enumerate services in `docker-update.sh`), `up`/`down`/`restart` for lifecycle, and image pulls.
 * For interactive use, drop into a poduser login shell first (`sudo su - poduser`) then run `podman-compose ...` directly. The maintenance scripts use the non-interactive `sudo -u poduser podman-compose ...` form because they can't open a shell from within a script.
 * `poduser` has **no sudo privileges** and is not in any privileged group, so the only way to touch containers is through root user-switching. Clean privilege boundary between the orchestrator (root scripts) and the runtime (poduser).
-* No docker daemon installed on this VM. Earlier Ubuntu-based versions of this stack kept docker installed only because `podman-compose config --services` produced noisy header output on older podman; the Debian 13 + podman 5.x combination outputs cleanly and docker is no longer a dependency. (The PiHole VM, on Ubuntu Server, still uses `docker compose` because that's what its scripts were written against, separate stack, separate decision.)
+* No docker daemon installed on this VM. Earlier Ubuntu-based versions of this stack kept docker installed only because `podman-compose config --services` produced noisy header output on older podman; the Debian 13 + podman 5.x combination outputs cleanly and docker is no longer a dependency. (The PiHole VM, now on Debian 13 too, still uses `docker compose` because that's what its scripts were written against, separate stack, separate decision.)
 
 ---
 
@@ -741,19 +741,19 @@ The Vaultwarden service is isolated on its **own VLAN (VLAN-DMZ)** behind strict
 
 | # | Action | Protocol  | Source     | Destination                                                                                 | Port     | Description                        | Log |
 |---|--------|-----------|-----------|---------------------------------------------------------------------------------------------|----------|-------------------------------------|-----|
-| 1 | Pass   | TCP       | VLAN-DMZ  | 192.168.173.9 (`proxy-home` VM, Squid)                                                     | 3128     | Allow HTTP/HTTPS egress via Squid  | Yes |
+| 1 | Pass   | TCP       | VLAN-DMZ  | 192.168.173.2 (LAN Pi-hole VM, Squid)                                                      | 3128     | Allow HTTP/HTTPS egress via Squid  | Yes |
 | 2 | Pass   | TCP/UDP   | VLAN-DMZ  | 192.168.173.2 (LAN Pi-hole VM)                                                              | 53       | Allow DNS via Pi-hole              | Yes |
 | 3 | Block  | Any       | VLAN-DMZ  | (Any other VLANs)                                                                           | Any      | Block DMZ to other VLANs           | Yes |
 | 4 | Pass   | UDP       | VLAN-DMZ  | This Firewall                                                                              | 123      | Allow NTP                          | Yes |
 | 5 | Pass   | UDP       | VLAN-DMZ  | [Cloudflare_IPs](https://www.cloudflare.com/ips/)                                          | 7844 | Allow QUIC from Cloudflare (cf-tunnel reference flavor only; not used today) | Yes |
 | 6 | Pass   | TCP       | VLAN-DMZ  | Mailjet_SMTP (`in-v3.mailjet.com`)                                                          | 587      | Allow SMTP                         | Yes |
 
-Rules 1 and 2 are the two outbound chokepoints. Rule 1 points at the `proxy-home` VM (Squid for HTTP/HTTPS); rule 2 points at the homelab's LAN Pi-hole (DNS, with logging shipped into Wazuh, see [Outbound DNS via the LAN Pi-hole + Wazuh visibility](#-outbound-dns-via-the-lan-pi-hole--wazuh-visibility)). Both allows sit **above** the catch-all VLAN block (rule 3), so DMZ → chokepoint traffic is permitted before the catch-all denies everything else cross-VLAN.
+Rules 1 and 2 are the two outbound chokepoints, both on the LAN Pi-hole VM. Rule 1 points at its Squid (HTTP/HTTPS); rule 2 points at its Pi-hole (DNS, with logging shipped into Wazuh, see [Outbound DNS via the LAN Pi-hole + Wazuh visibility](#-outbound-dns-via-the-lan-pi-hole--wazuh-visibility)). Both allows sit **above** the catch-all VLAN block (rule 3), so DMZ → chokepoint traffic is permitted before the catch-all denies everything else cross-VLAN.
 
 Rule 5 (UDP/7844 to Cloudflare IPs) is only meaningful when running the `cf-tunnel` reference flavor: that's how `cloudflared` reaches Cloudflare's edge to establish the outbound tunnel. The current `public-dns01` + edge VPS setup doesn't need this rule, but it's kept in the table since deleting it would only matter on a clean rebuild and removing it doesn't break anything actively running.
 
 📄 **References**:
-- `proxy-home/vault_domains_allow_proxy.txt` contains all domain allowlists configured in the Squid proxy
+- `squid/vault_domains_allow_proxy.txt` contains all domain allowlists configured in the Squid proxy
 - [Cloudflare IP Ranges](https://www.cloudflare.com/ips/) are used to allow QUIC traffic when the `cf-tunnel` reference flavor is in use (rule 5 above)
 
 ### **Inbound from the edge VPS via WireGuard**
@@ -780,26 +780,28 @@ The BunkerWeb admin Web UI listens on `192.168.50.3:7000` (HTTPS, internal-CA ce
 
 ---
 
-## 🌐 Outbound HTTP/HTTPS proxy, Squid on the `proxy-home` VM
+## 🌐 Outbound HTTP/HTTPS proxy, Squid on the LAN Pi-hole VM
 
-> The Vaultwarden VM has **two outbound chokepoints** on different VMs:
-> - **HTTP/HTTPS** → Squid on the `proxy-home` VM, `192.168.173.9:3128` (this section)
-> - **DNS** → the homelab's LAN Pi-hole, `192.168.173.2:53` ([next section](#-outbound-dns-via-the-lan-pi-hole--wazuh-visibility))
+> The Vaultwarden VM has **two outbound chokepoints**, both on the LAN Pi-hole VM:
+> - **HTTP/HTTPS** → Squid, `192.168.173.2:3128` (this section)
+> - **DNS** → Pi-hole, `192.168.173.2:53` ([next section](#-outbound-dns-via-the-lan-pi-hole--wazuh-visibility))
 >
 > The Vault VM doesn't reach the public internet directly for either protocol. HTTP/HTTPS goes through Squid's domain allowlist; DNS goes through Pi-hole, which logs every query, ships the log to Wazuh, and forwards upstream over DoH to Cloudflare Family. Each chokepoint is configured independently.
 >
 > One important nuance: when an app on the Vault VM uses the system's `http_proxy` env vars (apt, etc.), **Squid does the DNS lookup**, not the Vault VM. So those specific queries don't appear in Pi-hole's Vault-VM-scoped stream; Squid's allowlist is the gate for that path. The split between what each layer covers is documented in detail under [Which DNS queries Pi-hole actually sees from the Vault VM](#which-dns-queries-pi-hole-actually-sees-from-the-vault-vm).
 
-Previously, domain access was restricted using firewall rules with domain allowlisting, but this approach was not reliable. I replaced it with a **dedicated Squid proxy** running in a separate VM on the Proxmox server.
+Previously, domain access was restricted using firewall rules with domain allowlisting, but this approach was not reliable. I replaced it with a **Squid proxy**. Until October 2026 that ran on its own Ubuntu `proxy-home` VM, next to a separate Ubuntu Pi-hole VM; the two were then merged into **one Debian 13 VM** that runs both Pi-hole and Squid (one VM less on the Proxmox host). The trade-off of the merge: both egress gates now live on one VM, so that VM's hardening and its Wazuh agent matter twice.
 
 ### **Proxy Architecture**
 
-* The Squid proxy VM is on a **different VLAN** than the Vaultwarden VM
-* The Vaultwarden VM communicates through Squid (`192.168.173.9:3128`) for outbound traffic
-* Domain allowlisting is managed via `proxy-home/vault_domains_allow_proxy.txt` and enforced by `proxy-home/squid.conf`
-* `proxy-home/squid.conf` implements a **whitelist-only** approach: allows access to listed domains, blocks everything else
+* Squid runs on the LAN Pi-hole VM (Debian 13, plain `apt install squid` from the distro), on a **different VLAN** than the Vaultwarden VM
+* The Vaultwarden VM communicates through Squid (`192.168.173.2:3128`) for outbound traffic
+* Only the Vault VM may use it: `acl vault_vm src 192.168.50.3` sits in both allow lines, so any other LAN host gets a 403
+* The rules in `squid/squid.conf` go at the **very top** of the distro's default `/etc/squid/squid.conf` (above the `acl localnet` lines), so they decide before any default rule; the rest of the file stays stock
+* Domain allowlisting is managed via `squid/vault_domains_allow_proxy.txt` and enforced by `squid/squid.conf`
+* `squid/squid.conf` implements a **whitelist-only** approach: allows access to listed domains, blocks everything else
 
-The allowlist covers Debian apt + container registries + Cloudflare + GitHub (for binary pinning) + BunkerWeb's blacklist feeds + DB-IP (country MMDB) + CrowdSec's hub & community blocklist + `icons.bitwarden.net` (Vaultwarden's icon redirect target) + Mailjet SMTP + Wazuh agent feeds. See `proxy-home/vault_domains_allow_proxy.txt` for the canonical list with rationale per entry.
+The allowlist covers Debian apt + container registries + Cloudflare + GitHub (for binary pinning) + BunkerWeb's blacklist feeds + DB-IP (country MMDB) + CrowdSec's hub & community blocklist + `icons.bitwarden.net` (Vaultwarden's icon redirect target) + Mailjet SMTP + Wazuh agent feeds. See `squid/vault_domains_allow_proxy.txt` for the canonical list with rationale per entry.
 
 ### **System-Wide Proxy Configuration**
 
@@ -809,10 +811,10 @@ To route all outbound traffic through the Squid proxy, four configuration files 
 Sets proxy variables for the entire system so all programs launched normally inherit them. Applies to both root and regular users, but **not** to systemd services.
 
 ```bash
-http_proxy="http://192.168.173.9:3128"
-https_proxy="http://192.168.173.9:3128"
-HTTP_PROXY="http://192.168.173.9:3128"
-HTTPS_PROXY="http://192.168.173.9:3128"
+http_proxy="http://192.168.173.2:3128"
+https_proxy="http://192.168.173.2:3128"
+HTTP_PROXY="http://192.168.173.2:3128"
+HTTPS_PROXY="http://192.168.173.2:3128"
 NO_PROXY="localhost,127.0.0.1,0.0.0.0,::1,bunkerweb,crowdsec,vaultwarden,cloudflared"
 no_proxy="localhost,127.0.0.1,0.0.0.0,::1,bunkerweb,crowdsec,vaultwarden,cloudflared"
 ```
@@ -822,11 +824,11 @@ Systemd does not read `/etc/environment`, so this file forces all systemd servic
 
 ```ini
 [Manager]
-DefaultEnvironment="HTTP_PROXY=http://192.168.173.9:3128"
-DefaultEnvironment="http_proxy=http://192.168.173.9:3128"
+DefaultEnvironment="HTTP_PROXY=http://192.168.173.2:3128"
+DefaultEnvironment="http_proxy=http://192.168.173.2:3128"
 
-DefaultEnvironment="HTTPS_PROXY=http://192.168.173.9:3128"
-DefaultEnvironment="https_proxy=http://192.168.173.9:3128"
+DefaultEnvironment="HTTPS_PROXY=http://192.168.173.2:3128"
+DefaultEnvironment="https_proxy=http://192.168.173.2:3128"
 
 DefaultEnvironment="NO_PROXY=localhost,127.0.0.1,0.0.0.0,::1,bunkerweb,crowdsec,vaultwarden,cloudflared"
 DefaultEnvironment="no_proxy=localhost,127.0.0.1,0.0.0.0,::1,bunkerweb,crowdsec,vaultwarden,cloudflared"
@@ -838,8 +840,8 @@ Loads the proxy variables for interactive shells (SSH sessions). Ensures proxy v
 ```bash
 # System-wide proxy settings for interactive shells
 
-export http_proxy="http://192.168.173.9:3128"
-export https_proxy="http://192.168.173.9:3128"
+export http_proxy="http://192.168.173.2:3128"
+export https_proxy="http://192.168.173.2:3128"
 
 export HTTP_PROXY="$http_proxy"
 export HTTPS_PROXY="$https_proxy"
@@ -884,7 +886,7 @@ Without these entries, container startup would fail with cryptic Squid `407` / `
 
 ### Why Pi-hole instead of a dedicated dnsproxy
 
-The earlier iteration ran `adguard/dnsproxy` directly on the `proxy-home` VM, with the Vault VM's `/etc/resolv.conf` pointing there. That worked, but had two costs: a second DoH stack to maintain just for one client, and DNS visibility limited to a `tail -f /srv/dnsproxy-logs/queries.log` on the proxy-home host (no SIEM integration at the time).
+The earlier iteration ran `adguard/dnsproxy` directly on the `proxy-home` VM (the former Squid VM), with the Vault VM's `/etc/resolv.conf` pointing there. That worked, but had two costs: a second DoH stack to maintain just for one client, and DNS visibility limited to a `tail -f /srv/dnsproxy-logs/queries.log` on the proxy-home host (no SIEM integration at the time).
 
 Reusing the existing LAN Pi-hole drops the duplicate stack and bolts the visibility piece directly onto Wazuh: every Vault VM query becomes an alert in the dashboard, scoped to the Vault VM's source IP, with full per-query metadata (qtype, query, status, blocked-or-not, upstream).
 
@@ -940,7 +942,7 @@ Quick summary of what's in `wazuh-home/`:
 
 The diagram above shows `/etc/resolv.conf -> 192.168.173.2`, but that's only half the story. The Vault VM uses **explicit proxy mode** for HTTP/HTTPS via Squid, which means a lot of name resolution doesn't happen on the Vault VM at all.
 
-When something on the Vault VM uses the system's `http_proxy` / `https_proxy` env vars (apt, BunkerWeb's blacklist downloads, CrowdSec hub fetches, Vaultwarden's icon redirects, etc.), the actual DNS lookup is done by **Squid on `proxy-home`**, not by the Vault VM:
+When something on the Vault VM uses the system's `http_proxy` / `https_proxy` env vars (apt, BunkerWeb's blacklist downloads, CrowdSec hub fetches, Vaultwarden's icon redirects, etc.), the actual DNS lookup is done by **Squid on the Pi-hole VM**, not by the Vault VM:
 
 1. The app sends `CONNECT example.com:443 HTTP/1.1` (or `GET http://example.com/...` for plain HTTP) to Squid.
 2. Squid receives the request, calls its own resolver to turn `example.com` into an IP, checks `example.com` against `vault_domains_allow_proxy.txt`, and either proxies the connection or returns 403.
@@ -952,7 +954,7 @@ So Pi-hole's strict allowlist for the Vault VM doesn't cover everything. It cove
 
 | Egress path | DNS gate | Connection gate |
 |---|---|---|
-| HTTP/HTTPS via `http_proxy` (apt, app SDKs, etc.) | proxy-home's resolver, NOT Pi-hole-filtered for Vault VM | **Squid** allowlist |
+| HTTP/HTTPS via `http_proxy` (apt, app SDKs, etc.) | the Pi-hole VM's own resolver (`1.1.1.3`), NOT Pi-hole-filtered | **Squid** allowlist |
 | Direct UDP/QUIC (e.g. `cloudflared` to Cloudflare edge, `cf-tunnel` reference flavor only; not used today) | **Pi-hole** (Vault-VM group) | OPNsense rule 5 (UDP/7844 to Cloudflare IPs only) |
 | Direct TCP outside Squid (e.g. SMTP to Mailjet `:587`) | **Pi-hole** (Vault-VM group) | OPNsense (specific allows; default-deny otherwise) |
 | DNS itself (potential exfiltration channel) | **Pi-hole** (Vault-VM group) | n/a |
@@ -962,19 +964,19 @@ Each row has at least one chokepoint enforcing the allowlist. No single layer is
 
 A malicious process on the Vault VM trying to phone home:
 
-- **Via HTTP/HTTPS proxy**: Squid's allowlist denies the CONNECT, even though proxy-home's DNS resolved the destination. The TCP connection to the C2 IP never opens.
+- **Via HTTP/HTTPS proxy**: Squid's allowlist denies the CONNECT, even though Squid's resolver looked up the destination. The TCP connection to the C2 IP never opens.
 - **Via raw TCP/UDP not through Squid**: Pi-hole's allowlist denies the DNS lookup, so the process can't get an IP. Even if it had a hardcoded IP, OPNsense default-denies the egress at L3/L4.
 - **Via DNS-tunneling exfiltration** (encoding data in subdomain names): Pi-hole's allowlist denies the lookup. This is the failure mode Squid alone wouldn't catch, which is why Pi-hole's role isn't redundant.
 
-#### proxy-home's own DNS, deliberately not strict
+#### Squid's own DNS, deliberately not strict
 
-The `proxy-home` VM itself isn't subject to the Vault-VM strict allowlist. It's in Pi-hole's `Default` group and can resolve any domain. That's intentional: proxy-home only resolves domains it's about to proxy traffic to, and Squid's allowlist gates that traffic. proxy-home is essentially a "resolve + connect on behalf of Vault VM" service whose actual policy gate is Squid. If proxy-home itself is compromised the entire egress story falls apart, but that's a higher-trust component protected by its own Wazuh agent, FIM, and host hardening, not by adding more DNS-layer rules.
+Squid doesn't resolve through Pi-hole at all. It uses the VM's own resolver, `/etc/resolv.conf` pinned to `1.1.1.3` (dhcpcd's `nohook resolv.conf` keeps DHCP from rewriting it), so the host and Squid keep resolving even while the Pi-hole container is down or restarting. Those lookups aren't subject to the Vault-VM strict allowlist, and that's intentional: Squid only resolves domains it's about to proxy traffic to, and its allowlist gates that traffic. Squid is essentially a "resolve + connect on behalf of the Vault VM" service whose actual policy gate is the allowlist. If the Pi-hole VM itself is compromised the entire egress story falls apart, but that's a higher-trust component protected by its own Wazuh agent and host hardening, not by adding more DNS-layer rules.
 
 ### Pi-hole groups + DNS-layer allowlist for the Vault VM
 
 **Pi-hole acts as a strict allowlist enforcer for the Vault VM**, on top of also being the visibility layer. The Vault VM can resolve only domains explicitly allowlisted; every other lookup is denied at the DNS layer (returns `0.0.0.0`) and surfaces as a Wazuh alert. Other LAN clients are unaffected, this configuration carves out an isolated zone for the Vault VM only.
 
-This is **defense-in-depth on top of Squid**. Squid (`proxy-home/squid.conf` + `vault_domains_allow_proxy.txt`) is the actual content gate for HTTP/HTTPS egress. The Pi-hole DNS allowlist gives a second enforcement layer, plus catches DNS-only reconnaissance (a compromised host resolving names to enumerate services without ever opening a connection). Both lists must stay in sync; see [`vault_domains_allow_dns.txt`](./vault_domains_allow_dns.txt) for the Pi-hole-format mirror of the Squid allowlist, and `ideas.md` for the planned single-source-of-truth automation.
+This is **defense-in-depth on top of Squid**. Squid (`squid/squid.conf` + `vault_domains_allow_proxy.txt`) is the actual content gate for HTTP/HTTPS egress. The Pi-hole DNS allowlist gives a second enforcement layer, plus catches DNS-only reconnaissance (a compromised host resolving names to enumerate services without ever opening a connection). Both lists must stay in sync; see [`vault_domains_allow_dns.txt`](./vault_domains_allow_dns.txt) for the Pi-hole-format mirror of the Squid allowlist, and `ideas.md` for the planned single-source-of-truth automation.
 
 `vault_domains_allow_dns.txt` is split into two sections: a **bulk** section of bare-domain exact-match entries (consumed by Pi-hole's "Add allowlist" URL feature) and an **apex** section listing regex entries for apex+subdomain matches that have to be added by hand. The apex section is necessary because Pi-hole 6's allowlist URL parser doesn't accept ABP syntax (`||apex^`), even though the same parser does accept it for blocklist URLs.
 
@@ -997,13 +999,13 @@ Net effect: full resolution for allowlisted domains via Pi-hole's DoH upstream; 
 
 - **Bulk section (step 4)**: edit the file in the repo, push, then **Tools → Update Gravity** in Pi-hole (or wait for the next scheduled gravity run, default daily). Pi-hole re-fetches the URL and reconciles the gravity DB; entries are added or removed to match the updated file. No need to re-add the list or restart anything.
 - **Apex section (step 5)**: add or remove via the UI by hand. Mirror the change in the file's APEX section so the source of truth stays in the repo. The apex section being commented out means it doesn't break gravity but stays diff-able.
-- **Squid mirror**: when you add a new outbound destination, also mirror in `proxy-home/vault_domains_allow_proxy.txt` and redeploy Squid.
+- **Squid mirror**: when you add a new outbound destination, also mirror in `squid/vault_domains_allow_proxy.txt` and redeploy Squid.
 
 #### Bootstrap / refinement workflow
 
 After deploying the allowlist + deny, expect a flurry of `100252` alerts during the first few days as edge cases (rDNS / `*.in-addr.arpa`, search-list expansions, glibc opportunistic lookups, missed apex domains) hit the deny. Each one is either:
 
-- **Legit Vault VM activity that's missing from the allowlist**: add the domain to both `proxy-home/vault_domains_allow_proxy.txt` and `vault_domains_allow_dns.txt`, push, redeploy Squid, run Update Gravity in Pi-hole.
+- **Legit Vault VM activity that's missing from the allowlist**: add the domain to both `squid/vault_domains_allow_proxy.txt` and `vault_domains_allow_dns.txt`, push, redeploy Squid, run Update Gravity in Pi-hole.
 - **DNS noise** (rDNS, search-list, etc.): for PTR queries on `*.in-addr.arpa` you'd need a wildcard match Pi-hole's gravity-format can't quite express, so add it as a manual Allow Regex like `(^|\.)in-addr\.arpa$` scoped to the `vaultwarden-vm` group, OR accept the failure (most apps degrade gracefully when rDNS fails).
 - **Genuinely unexpected**: that's the alert earning its keep.
 
@@ -1039,7 +1041,7 @@ sudo /var/ossec/bin/wazuh-analysisd -t
 
 ### Planned next step (not yet implemented)
 
-Right now every Vault VM DNS query alerts at level 3 (resolved) or level 6 (blocked). The next iteration adds **allowlist-anomaly detection**: extend the sidecar to read the Squid allowlist (`proxy-home/vault_domains_allow_proxy.txt`) and tag each event with an `allowed` boolean, then add a higher-level rule that fires only when a resolved query's domain is NOT on the allowlist. Sketch in [`wazuh-home/README.md`](./wazuh-home/README.md) under "Planned next step"; full design tracked in [ideas.md](ideas.md) #7 Phase C subsection "Allowlist-anomaly alert for the Vault VM".
+Right now every Vault VM DNS query alerts at level 3 (resolved) or level 6 (blocked). The next iteration adds **allowlist-anomaly detection**: extend the sidecar to read the Squid allowlist (`squid/vault_domains_allow_proxy.txt`) and tag each event with an `allowed` boolean, then add a higher-level rule that fires only when a resolved query's domain is NOT on the allowlist. Sketch in [`wazuh-home/README.md`](./wazuh-home/README.md) under "Planned next step"; full design tracked in [ideas.md](ideas.md) #7 Phase C subsection "Allowlist-anomaly alert for the Vault VM".
 
 ---
 
@@ -1071,16 +1073,15 @@ A map of every log this stack writes, what each one captures, and what consumes 
 
 ### Wazuh agent (current state)
 
-Wazuh agents are installed and enrolled across three VMs in the homelab, with very different scopes per VM:
+Wazuh agents are installed and enrolled across two VMs in this stack, with very different scopes per VM:
 
 | VM | Agent state | What's actually shipping |
 |----|-------------|--------------------------|
 | Vaultwarden VM | Installed, enrolled, **custom localfiles + sidecar** | `modsec-tail.py` sidecar (dedicated `modsectail` user) flattens BunkerWeb's `modsec_audit.log` to `/var/log/modsec-events/events.log`; agent ships it; manager rules 100300-100303 tier by CRS anomaly score (`band=high` → #modsec Discord). Plus the nightly `main.sh` JSON status log (`/srv/logs/status/*.jsonl`, single-file localfile) → manager rules 100500-100502 → #maintenance Discord. Still stock for `vw-logs/` / `bw-logs/` and FIM (see [ideas.md](ideas.md) #7). |
-| `proxy-home` VM | Installed, enrolled, **installer-auto-discovered localfile** | The Wazuh agent installer auto-detected Squid and added the `/var/log/squid/access.log` localfile itself (no manual config); Wazuh's built-in squid decoder handles it, `action=TCP_DENIED` → #squid Discord. |
-| LAN Pi-hole VM | Installed, enrolled, **custom localfile + sidecar daemon** | `pihole-ftl-tail.py` daemon polls Pi-hole's FTL SQLite DB and emits structured JSON events to `/var/log/vault-dns/events.log`; agent ships those; manager rules 100250-100253 produce per-query alerts (resolved L3, Pi-hole-policy block L6, upstream no-answer L4) using the built-in JSON decoder. Config in [`wazuh-home/`](./wazuh-home/). |
-| All four home VMs (not the VPS) | fail2ban localfile | Each tails `/var/log/fail2ban.log`; manager `fail2ban-file` decoder + rule 100401 fire on an sshd-jail ban (→ #fail2ban Discord). The edge VPS runs fail2ban but has no Wazuh agent, so its bans aren't shipped. |
+| LAN Pi-hole VM (agent `pihole-home`) | Installed, enrolled, **custom localfile + sidecar daemon + installer-auto-discovered localfile** | DNS: `pihole-ftl-tail.py` daemon polls Pi-hole's FTL SQLite DB and emits structured JSON events to `/var/log/vault-dns/events.log`; agent ships those; manager rules 100250-100253 produce per-query alerts (resolved L3, Pi-hole-policy block L6, upstream no-answer L4) using the built-in JSON decoder. Config in [`wazuh-home/`](./wazuh-home/). Squid: the agent installer auto-detected Squid (installed first) and added the `/var/log/squid/access.log` localfile itself; Wazuh's built-in squid decoder handles it, `action=TCP_DENIED` → #squid Discord. |
+| All three home VMs (vault, manager, Pi-hole; not the VPS) | fail2ban localfile | Each tails `/var/log/fail2ban.log`; manager `fail2ban-file` decoder + rule 100401 fire on an sshd-jail ban (→ #fail2ban Discord). The edge VPS runs fail2ban but has no Wazuh agent, so its bans aren't shipped. |
 
-The Wazuh apt repo (`packages.wazuh.com`) is configured on each VM so the agent gets pulled in by normal `apt upgrade` cycles, the nightly `system-update.sh` phase on the Vaultwarden VM, and standard unattended-upgrades elsewhere. `packages.wazuh.com` is on the Vaultwarden VM's Squid allowlist (`proxy-home/vault_domains_allow_proxy.txt`) for that reason. Upgrade procedure documented upstream: [Wazuh agent, Linux upgrade guide](https://documentation.wazuh.com/current/upgrade-guide/wazuh-agent/linux.html).
+The Wazuh apt repo (`packages.wazuh.com`) is configured on each VM so the agent gets pulled in by normal `apt upgrade` cycles, the nightly `system-update.sh` phase on the Vaultwarden VM, and standard unattended-upgrades elsewhere. `packages.wazuh.com` is on the Vaultwarden VM's Squid allowlist (`squid/vault_domains_allow_proxy.txt`) for that reason. Upgrade procedure documented upstream: [Wazuh agent, Linux upgrade guide](https://documentation.wazuh.com/current/upgrade-guide/wazuh-agent/linux.html).
 
 **Discord notifications are live** for five sources via one `custom-discord` integrator on the manager (per-channel webhooks; placeholders in the repo, real URLs in a gitignored `discord-webhooks.json` side-file on the manager): ModSecurity attacks (`band=high`), DNS allowlist denials, Squid `TCP_DENIED`, fail2ban bans, and the nightly maintenance run summary (green OK heartbeat, @ on degraded/fail). Decoders, rules, the integrator, and the `<integration>` blocks are all in [`wazuh-home/`](./wazuh-home/). Still ahead, tracked in [ideas.md](ideas.md) #7: shipping the Vault VM's own `bw-logs/` + `vw-logs/`, agent-down notifications, and FIM. `DEADMAN_URL` stays as the independent external net, the maintenance summary fires when a run completes, so it can't catch a run that never happened (VM dead / cron broken); that "no-run-in-25h" silence rule isn't built.
 
@@ -1093,7 +1094,7 @@ The Wazuh apt repo (`packages.wazuh.com`) is configured on each VM so the agent 
 
 - **CrowdSec**, tails `vaultwarden.log` + `access.log` + `error.log` + `modsec_audit.log` in real time, parses them, applies bouncer decisions back at BunkerWeb. The parser/scenario/whitelist files in `crowdsec/` are the contract between log format and detection rules.
 - **TrueNAS**, pulls the encrypted backup bundle + the four `/srv/logs/{main,backup,docker,system}/` phase logs via scp using the `fetcher` user (see [Off-site replication](#off-site-replication-truenas-via-cron)).
-- **Wazuh**, five live pipelines into `wazuh-home`, each with per-channel Discord via the `custom-discord` integrator: DNS (Pi-hole FTL sidecar → rules 100250-100253), ModSecurity (Vault VM `modsec-tail` sidecar → 100300-100303, `band=high` pings), Squid (proxy-home access.log → built-in squid decoder, `TCP_DENIED` pings), fail2ban (every host → custom `fail2ban-file` decoder + 100401), and maintenance (Vault VM `main.sh` JSON status log → 100500-100502, nightly #maintenance report). The Vault VM's own raw `vw-logs/` + `bw-logs/` are still not shipped (see [ideas.md](ideas.md) #7).
+- **Wazuh**, five live pipelines into `wazuh-home`, each with per-channel Discord via the `custom-discord` integrator: DNS (Pi-hole FTL sidecar → rules 100250-100253), ModSecurity (Vault VM `modsec-tail` sidecar → 100300-100303, `band=high` pings), Squid (Pi-hole VM access.log → built-in squid decoder, `TCP_DENIED` pings), fail2ban (every host → custom `fail2ban-file` decoder + 100401), and maintenance (Vault VM `main.sh` JSON status log → 100500-100502, nightly #maintenance report). The Vault VM's own raw `vw-logs/` + `bw-logs/` are still not shipped (see [ideas.md](ideas.md) #7).
 - **Operator**, `tail -f` for live debugging; log files are the source of truth for everything except the BW internal scheduler/UI/Redis logs (those are debug-only).
 
 ---

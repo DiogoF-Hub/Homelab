@@ -9,12 +9,12 @@ This folder holds the Wazuh-side configuration for the Vaultwarden stack: struct
 | **DNS** (Pi-hole FTL sidecar) | every Vault VM DNS query; allowlist denials | 100250-100253 | #dns, `status=blocked-regex` |
 | **ModSecurity** (BunkerWeb WAF) | CRS matches, tiered by anomaly score | 100300-100303 | #modsec, `band=high` (score ≥ 30) |
 | **fail2ban** (all hosts) | SSH brute-force bans | 100400-100401 | #fail2ban, every ban |
-| **Squid** (proxy-home) | egress-allowlist denials | built-in `squid` group | #squid, `action=TCP_DENIED` |
+| **Squid** (LAN Pi-hole VM) | egress-allowlist denials | built-in `squid` group | #squid, `action=TCP_DENIED` |
 | **maintenance** (Vault VM `main.sh`) | nightly run summary (backup / docker / apt / reboot) | 100500-100502 | #maintenance, every run (green OK; @ on degraded/fail) |
 
 One integrator, `integrations/custom-discord.py`, fans these out to per-channel Discord webhooks (the data-field filter lives in the script + a `discord-webhooks.json` side-file on the manager holds the real URLs; `integrations/manager-discord-integration.xml` has the `<integration>` blocks that decide which alerts reach it). Rule-ID map: DNS 100250-100253, ModSecurity 100300-100303, fail2ban 100400-100401, maintenance 100500-100502 (the retired text-log DNS pipeline used 100190-100210; keep new pipelines clear of those).
 
-Squid has no files in this folder beyond its `<integration>` block: the Wazuh agent installer auto-discovers `/var/log/squid/access.log` on proxy-home, and the squid decoder/rules are built into Wazuh, so there's nothing custom to deploy for it.
+Squid has no files in this folder beyond its `<integration>` block: the Wazuh agent installer auto-discovers `/var/log/squid/access.log` on the LAN Pi-hole VM (as long as Squid is installed before the agent), and the squid decoder/rules are built into Wazuh, so there's nothing custom to deploy for it.
 
 The **DNS pipeline is documented in full below** (it's the most involved, with a sidecar daemon). ModSecurity, fail2ban, maintenance, and Discord each get a short section further down pointing at their snippet files, whose header comments carry the detailed rationale.
 
@@ -51,7 +51,7 @@ This routes the VM's DNS through the homelab's existing LAN Pi-hole, tails Pi-ho
 
 It is the successor to two earlier iterations:
 
-1. The original "dnsproxy on the proxy-home VM" setup, retired when DNS visibility moved up the stack into Wazuh.
+1. The original "dnsproxy on the proxy-home VM" setup (the former Squid VM, since merged into the Pi-hole VM), retired when DNS visibility moved up the stack into Wazuh.
 2. The first "Wazuh on Pi-hole's text log" iteration, retired because Pi-hole's dnsmasq text log emits four-plus different syntactic patterns for "this query was blocked" depending on the source (gravity adlist, manual exact-deny, regex, blocked-upstream-NULL, externally-blocked NXDOMAIN, ...). Building decoder regex that catches them all and stays correct across Pi-hole versions was whack-a-mole. The current FTL-DB approach reads Pi-hole's normalized `status` integer column instead.
 
 ## Why this exists
@@ -311,7 +311,7 @@ Tiering is by **CRS anomaly score** (rule 949110's "Total Score: N"), NOT http_c
 
 ## fail2ban bans (all hosts)
 
-Every home VM running the sshd jail (vault, manager, proxy-home, pihole) tails its own `/var/log/fail2ban.log`; the manager decodes it and rule 100401 fires on a ban. The edge VPS runs fail2ban too but has no Wazuh agent, so its bans aren't shipped, the most internet-exposed host is the one gap in this picture.
+Every home VM running the sshd jail (vault, manager, pihole) tails its own `/var/log/fail2ban.log`; the manager decodes it and rule 100401 fires on a ban. The edge VPS runs fail2ban too but has no Wazuh agent, so its bans aren't shipped, the most internet-exposed host is the one gap in this picture.
 
 - `fail2ban/fail2ban-agent.localfile.xml` , the `<localfile>` (add to every agent).
 - `fail2ban/manager-fail2ban-decoder.xml` , custom `fail2ban-file` decoder. The **built-in** fail2ban decoder only handles syslog-delivered fail2ban (`program_name=fail2ban`); this stack tails the dedicated log, whose lines the built-in doesn't match (confirmed via `wazuh-logtest`). The prematch anchors on the `[pid]: LEVEL [jail]` structure, NOT the word "fail2ban", which the syslog pre-decoder strips as the program token. Captures jail / `f2b_action` / srcip (IPv4 + IPv6). It's `f2b_action` not `action` because `action` is a reserved Wazuh static field that a rule can't match with `<field>`.

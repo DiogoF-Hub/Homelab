@@ -89,7 +89,7 @@ gap at restore time, when it's already too late. A deadman's switch converts
    backup still ran; you just lose the monitoring signal for one day. Don't
    fail the whole backup on a monitoring-endpoint blip.
 
-4. Add the ping host to `proxy-home/vault_domains_allow_proxy.txt` so Squid doesn't block it:
+4. Add the ping host to `squid/vault_domains_allow_proxy.txt` so Squid doesn't block it:
    - SaaS: `hc-ping.com`
    - Self-hosted: your FQDN for the Healthchecks instance
 
@@ -164,7 +164,7 @@ touch starts failing.
    with the vault bundle, they're tiny and useful post-incident.
 
 4. Allowlist entries (mirror any new one in BOTH `vault_domains_allow_dns.txt`
-   and `proxy-home/vault_domains_allow_proxy.txt`, the usual lockstep
+   and `squid/vault_domains_allow_proxy.txt`, the usual lockstep
    convention):
    - **`lynis-latest-version.cisofy.com`**, REQUIRED regardless of install
      method. `lynis audit system` runs a version check against this host (a
@@ -216,7 +216,9 @@ piece moved up the stack: Pi-hole's `pihole.log` is shipped via
 wazuh-agent, with a custom decoder + rule chain on `wazuh-home` filtering
 Vault-VM-srcip queries to a level-3 alert in the dashboard. The
 dedicated dnsproxy compose was retired (`proxy-home/docker-compose.yml`
-no longer exists); proxy-home is now Squid-only.
+no longer exists); proxy-home became Squid-only, and in October 2026
+the proxy-home VM itself was merged into the LAN Pi-hole VM, which now
+runs Squid next to Pi-hole.
 
 See: `wazuh-home/README.md` for the current architecture and apply
 procedure; README §Outbound DNS via the LAN Pi-hole + Wazuh visibility.
@@ -605,9 +607,10 @@ tail-and-mail script.
 
 ### Phase B, Wazuh manager + agent deployment
 
-**Current state:** Wazuh agents are installed on the Vaultwarden VM, the
-`proxy-home` VM, and the LAN Pi-hole VM, all enrolled with `wazuh-home`.
-The Vault VM and proxy-home agents are at stock defaults. The **LAN
+**Current state:** Wazuh agents are installed on the Vaultwarden VM and
+the LAN Pi-hole VM (which since October 2026 also runs Squid, absorbing
+the former `proxy-home` VM and its agent), all enrolled with `wazuh-home`.
+The Vault VM agent started at stock defaults. The **LAN
 Pi-hole VM is the first agent with custom config**: a sidecar daemon
 (`wazuh-home/sidecar/pihole/pihole-ftl-tail.py`) polls Pi-hole's FTL SQLite DB
 and emits one structured JSON event per Vault VM DNS query to
@@ -641,7 +644,7 @@ What's left under Phase B:
 
 - ~~Dedicated VM for the Wazuh manager.~~ ✅ Done.
 - ~~Enrol agents with the manager.~~ ✅ Done (Vault VM, proxy-home,
-  Pi-hole).
+  Pi-hole; proxy-home later merged into the Pi-hole VM).
 - ~~First custom decoder + rule chain.~~ ✅ Done (`wazuh-home/` folder,
   DNS visibility).
 - Vaultwarden VM agent `<localfile>` sources for `/srv/logs/status/*.jsonl`
@@ -799,7 +802,7 @@ follow-on subsection below.
 
 Currently two manually-synced files in this repo encode the same
 intent in different formats:
-- `proxy-home/vault_domains_allow_proxy.txt`: Squid `dstdomain` syntax
+- `squid/vault_domains_allow_proxy.txt`: Squid `dstdomain` syntax
   (one host per line; leading dot = apex + subdomains)
 - `vault_domains_allow_dns.txt` (Vaultwarden root): two-section file.
   Bulk section: bare-domain exact-match entries, consumed by Pi-hole's
@@ -1120,7 +1123,7 @@ Cons:
 - **Adds `gh` to the VM** as a dependency (`apt install gh` after adding
   GitHub's apt repo, and a repo-line/key step in `REBUILD.md`). Also
   means `packages.github.com` (or wherever you source `gh`) gets added
-  to `proxy-home/vault_domains_allow_proxy.txt`.
+  to `squid/vault_domains_allow_proxy.txt`.
 - **Requires `gh auth status` to be authenticated** (or use
   `--bundle-from-oci` + a downloaded bundle file, possible but more
   verbose). Auth setup is a one-time step but it IS a step.

@@ -1,7 +1,7 @@
 # Pi-hole allowlist for the Vaultwarden VM
 #
 # Source of truth for what domains the Vault VM is allowed to resolve.
-# Mirrors proxy-home/vault_domains_allow_proxy.txt (Squid HTTP/HTTPS
+# Mirrors squid/vault_domains_allow_proxy.txt (Squid HTTP/HTTPS
 # allowlist) in a Pi-hole-compatible format.
 #
 # DEPLOY (three steps, all group-scoped to vaultwarden-vm):
@@ -45,7 +45,7 @@
 #   - Apex regex entries (step 2): add/remove via UI by hand. The list
 #     below is the source of truth, refer to it when adding new ones.
 #   - When you add a new outbound destination, mirror it in
-#     proxy-home/vault_domains_allow_proxy.txt as well.
+#     squid/vault_domains_allow_proxy.txt as well.
 #
 # Future improvement: a generator that emits BOTH this file (with
 # apex entries enumerated as exact subdomains, or pushed directly to

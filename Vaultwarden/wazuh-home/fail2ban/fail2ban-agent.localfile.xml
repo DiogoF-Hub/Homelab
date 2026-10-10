@@ -8,8 +8,8 @@
       sudo grep fail2ban.log /var/ossec/logs/ossec.log | tail
       # expect: Analyzing file: '/var/log/fail2ban.log'
 
-  In this stack that's the four home hosts (vault, manager, proxy-home,
-  pihole), each running the same sshd jail (jail.local: maxretry=3 /
+  In this stack that's the three home hosts (vault, manager, pihole),
+  each running the same sshd jail (jail.local: maxretry=3 /
   findtime=10m / bantime=1h). The edge VPS runs fail2ban too but has NO
   Wazuh agent, so its bans are not shipped here. fail2ban
   writes ban events to /var/log/fail2ban.log; the manager decodes them

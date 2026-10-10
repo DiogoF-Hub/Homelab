@@ -1,6 +1,6 @@
 #!/bin/bash
 
-# This script is used to do the maintenance tasks for a PiHole instance running on a Ubuntu Server VM in my Proxmox.
+# This script is used to do the maintenance tasks for a PiHole instance running on a Debian 13 VM in my Proxmox.
 # It updates the gravity database, updates the instances (docker images) and performs a full system update while logging all actions to 3 different log files.
 
 export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
