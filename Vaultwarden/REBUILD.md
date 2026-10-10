@@ -1370,13 +1370,17 @@ this instance with real secrets.
 
 The `CROWDSEC_ENROLL_KEY` from `.env` auto-enrols the instance on first
 start. Log into [app.crowdsec.net](https://app.crowdsec.net) → Security
-Engines → verify your instance is listed and reporting. Pull in any
-community blocklists you want from the console.
+Engines → verify your instance is listed and reporting.
+
+Then subscribe the engine to the blocklists listed in
+[`README.md` § Blocklists](README.md#blocklists) (Blocklists → Catalog,
+free tier). The subscriptions live only in the console, not in the
+compose file, so a re-enrolled engine starts with none of them.
 
 Sanity check: make 20 bad login attempts in a row from a test machine.
 CrowdSec should ban your IP within a minute, the BunkerWeb bouncer
-should pick it up on the next 15-second poll, and you should get a
-403. Unban via:
+applies it within 60 seconds (live mode, `CROWDSEC_CACHE_EXPIRATION`),
+and you should get a 403. Unban via:
 
 ```bash
 sudo su - poduser

@@ -312,8 +312,20 @@ services:
       USE_CROWDSEC: "yes"
       CROWDSEC_API: "http://crowdsec:8080"
       CROWDSEC_API_KEY: "${CROWDSEC_BOUNCER_KEY}"
-      CROWDSEC_MODE: "stream"
-      CROWDSEC_UPDATE_FREQUENCY: "15"
+      # live, not stream: each client IP is looked up in LAPI on demand
+      # and the verdict cached CROWDSEC_CACHE_EXPIRATION seconds. In stream mode the
+      # bouncer never left startup=true, so it re-downloaded the full
+      # decision list (~115k IPs with the CAPI + subscribed blocklists,
+      # ~17 MB, ~9s of LAPI work at 0.5 CPU) every poll: ~70 MB/min
+      # crowdsec -> bunkerweb, constant CPU, and memory spikes in the 192M
+      # crowdsec container. For a low-traffic vault, a per-IP lookup is
+      # cheaper anyway. The VPS nftables bouncer stays on stream (it pulls
+      # deltas correctly).
+      CROWDSEC_MODE: "live"
+      # 60s, not the 1s default: a client pays the lookup at most once a
+      # minute instead of on nearly every request. A new ban reaches
+      # BunkerWeb within 60s; the VPS nftables bouncer drops it within ~10s.
+      CROWDSEC_CACHE_EXPIRATION: "60"
 
       # --- Admin Web UI ---------------------------------------------------
       # Bundled in the all-in-one image and enabled via SERVICE_UI below,
@@ -394,7 +406,10 @@ services:
       resources:
         limits:
           memory: 192M
-          cpus: "0.5"
+          # 1.0, not 0.5: at 0.5 the CFS quota throttled crowdsec in ~1/3 of
+          # periods (log-parsing bursts on every proxied request), which made
+          # BunkerWeb's live LAPI lookups take 0.2-1s and hit its 1s timeout.
+          cpus: "1.0"
     ports:
       # Expose CrowdSec's LAPI on the host so an external bouncer (the VPS-side
       # crowdsec-firewall-bouncer-nftables; see ideas.md #10) can poll for

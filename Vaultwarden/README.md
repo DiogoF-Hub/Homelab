@@ -381,7 +381,7 @@ Post-pull verification commands (BunkerWeb version, CRS version, and proof that 
 | **Rate limit** | `USE_LIMIT_REQ: yes`, `LIMIT_REQ_RATE: 5r/s`, `LIMIT_REQ_BURST: 15` | Per-IP nginx-level throttle. Burst of 15 absorbs parallel asset fetches on normal page loads. |
 | **bad_behavior** | `USE_BAD_BEHAVIOR: no` | **Disabled**, naive non-200 counter false-positives on Vaultwarden's `/admin/diagnostics`. CrowdSec's scenario-based detection covers this surface instead. |
 | **ModSecurity / CRS** | `USE_MODSECURITY: yes`, `USE_MODSECURITY_CRS: yes`, `MODSECURITY_SEC_RULE_ENGINE: On` | Engine is **On** (actively blocking) as of 2026-06-16; a request crossing the CRS blocking threshold is rejected (403). Every rule match is still written to `modsec_audit.log`. Exclusions for Vaultwarden's API were tuned + verified against live traffic before the flip; rollback to `DetectionOnly` is trivial if a false positive surfaces. Full detail in the [ModSecurity / OWASP CRS section](#-modsecurity--owasp-crs-blocking-tuned). |
-| **CrowdSec bouncer** | `USE_CROWDSEC: yes`, `CROWDSEC_API: http://crowdsec:8080`, `CROWDSEC_MODE: stream`, `CROWDSEC_UPDATE_FREQUENCY: 15` | Polls CrowdSec LAPI every 15s for the active decisions list; enforces bans inline (returns 403). |
+| **CrowdSec bouncer** | `USE_CROWDSEC: yes`, `CROWDSEC_API: http://crowdsec:8080`, `CROWDSEC_MODE: live`, `CROWDSEC_CACHE_EXPIRATION: 60` | Looks up each client IP in CrowdSec LAPI on demand (verdict cached 60s); enforces bans inline (returns 403). Not `stream`: that mode re-downloaded the full ~115k-IP decision list on every 15s poll (~70 MB/min, memory spikes in the 192M crowdsec container). |
 | **Server header suppression** | `REMOVE_HEADERS: Server Via X-Powered-By X-AspNet-Version X-AspNetMvc-Version` | Removes server-identification headers. |
 | **Error-body passthrough** | `INTERCEPTED_ERROR_CODES: ""` | Empty override, BW does NOT replace upstream 4xx/5xx responses with branded HTML pages. Required so Vaultwarden's API JSON error bodies pass through to Bitwarden clients. |
 | **Allowed HTTP methods** | `ALLOWED_METHODS: "GET\|POST\|HEAD\|PUT\|PATCH\|DELETE\|OPTIONS"` | Override BW's default (`GET\|POST\|HEAD`). Vaultwarden's API uses PUT (cipher edit + soft-delete to trash via `/api/ciphers/<id>/delete`), PATCH, DELETE, and OPTIONS (CORS preflight from web vault + browser extensions). Without this override, every vault edit 405s at the nginx layer before ModSec or Vaultwarden ever sees the request. Pipe-separated (regex alternation, not commas/spaces). |
@@ -623,15 +623,37 @@ Used **instead of** the upstream `crowdsecurity/modsecurity` collection, whose s
 
 Drops Vaultwarden's intentional `/admin/diagnostics/*` and `/admin/does-not-exist` 4xx probes before the `crowdsecurity/http-admin-interface-probing` scenario sees them. Without this, opening the admin diagnostics page once self-locks you with a 4h ban.
 
+### **Blocklists**
+
+On top of the bans from the scenarios above, the engine pulls ready-made blocklists through its console enrolment (`ENROLL_KEY`). The subscriptions live **only in the console** ([app.crowdsec.net](https://app.crowdsec.net) → Blocklists, free tier: the community list plus 3 more), not in any file here, so this table is the record of what's subscribed. A re-enrolled engine (lost `crowdsec-db` volume) has to be subscribed again.
+
+| Blocklist | ~IPs | Category | Why it's here |
+|---|---|---|---|
+| CrowdSec Community Blocklist | 22k | Community | Automatic with enrolment; does most of the blocking (~14k packets dropped at the VPS in its first measured week). |
+| Firehol greensnow.co list | 4.6k | General | IPs caught brute-forcing and scanning; the console's top suggestion for this engine (-30% alerts). |
+| TOR Blocklist | 2.3k | Actors | Tor exit nodes. Nobody legitimately reaches this vault over Tor, but credential stuffers hide behind it, so it can't lock out a real user. |
+| Firehol cruzit.com list | 13.6k | Behaviors | Compromised hosts scanning for vulnerabilities. Weakest of the set (21 packets dropped in its first week); first candidate to swap. |
+
+**Why the list is kept small:** every IP is a row in CrowdSec's SQLite DB. BunkerWeb's live lookups (see Bouncers below) and the import after every start and blocklist refresh get slower as rows are added, so a list has to earn its slot. Keep the total around 40k and prefer lists aimed at what actually hits a login endpoint (brute force, scanners, anonymizers nobody here uses). Skip proxy/VPN lists: they never matched, and broad ones risk locking out family devices on hotel or work networks.
+
+**Re-evaluate** every few months, or before adding a list. The `dropped` column per origin shows what each list actually blocked at the VPS edge (counters reset when the VPS bouncer restarts, so compare lists over the same window):
+
+```bash
+sudo su - poduser
+podman exec crowdsec cscli metrics show bouncers
+podman exec crowdsec cscli decisions list -a --limit 0 -o raw | wc -l   # total rows, aim for ~40k
+exit
+```
+
 ### **Bouncers**
 
-CrowdSec bans are enforced at **two layers**, both consuming the same decision stream from the single home CrowdSec engine:
+CrowdSec bans are enforced at **two layers**, both fed by the single home CrowdSec engine:
 
-1. **In-stack at BunkerWeb** (always on): the built-in CrowdSec plugin (`USE_CROWDSEC: yes`, `CROWDSEC_API: http://crowdsec:8080`, `CROWDSEC_MODE: stream`, `CROWDSEC_UPDATE_FREQUENCY: 15`) polls LAPI every 15s and returns `403 Forbidden` at the nginx level for any matching IP, before the request reaches Vaultwarden. This is the inline / application-layer bouncer.
+1. **In-stack at BunkerWeb** (always on): the built-in CrowdSec plugin (`USE_CROWDSEC: yes`, `CROWDSEC_API: http://crowdsec:8080`, `CROWDSEC_MODE: live`, `CROWDSEC_CACHE_EXPIRATION: 60`) asks LAPI about each client IP on demand (verdict cached 60s) and returns `403 Forbidden` at the nginx level for any matching IP, before the request reaches Vaultwarden. This is the inline / application-layer bouncer.
 
 2. **At the edge VPS** (when the `public-dns01` + VPS topology is in use): `crowdsec-firewall-bouncer-nftables` on the VPS polls the same LAPI over the WG tunnel every 10s (auto-registered as `VPS_FW_BOUNCER` via the `BOUNCER_KEY_VPS_FW_BOUNCER` env var on the home crowdsec service in [`docker-compose.public-dns01.yml`](docker-compose.public-dns01.yml), keyed off `CROWDSEC_VPS_BOUNCER_KEY` in `.env`). It programs nftables drop rules on the VPS, so banned IPs get dropped at the network edge before crossing the WG tunnel into home at all. Configured with `set-only: false` so the drop applies on every destination port, not just 80/443. Full install + config: [`vps/README.md` § "CrowdSec bouncer (block banned IPs at the VPS edge)"](vps/README.md).
 
-The VPS layer is purely additive defense-in-depth on top of BunkerWeb's plugin: same engine making the decisions, two enforcement layers consuming them. If the VPS bouncer is ever down or absent, BunkerWeb still 403s; if BunkerWeb glitches mid-request, the VPS edge has already dropped most known-bad IPs. Both layers also activate within ~10–15s of any new decision.
+The VPS layer is purely additive defense-in-depth on top of BunkerWeb's plugin: same engine making the decisions, two enforcement layers consuming them. If the VPS bouncer is ever down or absent, BunkerWeb still 403s; if BunkerWeb glitches mid-request, the VPS edge has already dropped most known-bad IPs. A new decision applies at the VPS edge within ~10s (its stream poll) and at BunkerWeb within 60s (live lookup cache).
 
 This whole stack replaces the previous Cloudflare Workers bouncer (which enforced bans at Cloudflare's edge). The trade-off: bans now happen one hop later than the CF edge would, but the architecture works identically with or without Cloudflare in front, the engine + bouncers are operator-controlled, and there's no extra Worker to maintain or pay for.
 
