@@ -32,10 +32,11 @@
   $(status) interpolation in 100502's description.
 
   The custom-discord integrator hooks 100501 + 100502 (so it fires every
-  night, and @s only on degraded/fail). It reads the run event's
-  aggregated fields , backup_status / backup_size, images_updated,
+  night, and @s on degraded/fail or updated images). It reads the run
+  event's aggregated fields , backup_status / backup_size, images_updated,
+  images_detail,
   pull_failures, apt_upgraded / apt_count, reboot_status, age_update,
-  minisign_update , to build one embed. The external DEADMAN_URL stays as
+  minisign_update, wazuh_agent_update , to build one embed. The external DEADMAN_URL stays as
   the independent "did it run at all" net (idea #7 / #2); these rules only
   fire when a run DID happen.
 -->

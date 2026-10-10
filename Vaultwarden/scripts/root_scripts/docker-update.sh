@@ -48,6 +48,21 @@ write_block() {
     } | tee -a "$PHASE_LOG"
 }
 
+# image_version REF: best-effort release version of a local image, read from
+# the usual OCI / label-schema labels; empty when the image carries none
+# (the report then falls back to the short image ID).
+image_version() {
+    local ref="$1" key v
+    for key in org.opencontainers.image.version version org.label-schema.version; do
+        v=$(sudo -u "$USER_POD" podman image inspect "$ref" \
+            --format "{{index .Labels \"$key\"}}" 2>/dev/null || true)
+        if [[ -n "$v" && "$v" != "<no value>" ]]; then
+            printf '%s' "$v"
+            return 0
+        fi
+    done
+}
+
 # --- stop containers (idempotent) -----------------------------------------
 
 stop_containers
@@ -60,6 +75,7 @@ UPDATED=0
 PULL_FAILURES=0
 UPDATED_SERVICES=()
 UPDATED_NAMES=()
+UPDATED_DETAIL=()
 FAILED_NAMES=()
 SERVICES=$(sudo -u "$USER_POD" podman-compose config --services 2>/dev/null || true)
 
@@ -124,6 +140,19 @@ print(config.get('services', {}).get('$service', {}).get('image', ''))
             old_short="${old_full:0:12}"
             new_short="${new_full:0:12}"
 
+            # Human-readable "old -> new" for the Discord report. Read before
+            # the old image is removed below.
+            old_ver=""
+            [[ -n "$LOCAL_ID" ]] && old_ver=$(image_version "$LOCAL_ID")
+            new_ver=$(image_version "$LATEST_ID")
+            if [[ -z "$LOCAL_ID" ]]; then
+                UPDATED_DETAIL+=("$service: first pull, ${new_ver:-$new_short}")
+            elif [[ -n "$new_ver" && "$old_ver" == "$new_ver" ]]; then
+                UPDATED_DETAIL+=("$service: $new_ver (same version, rebuilt image)")
+            else
+                UPDATED_DETAIL+=("$service: ${old_ver:-$old_short} → ${new_ver:-$new_short}")
+            fi
+
             if [[ -z "$LOCAL_ID" ]]; then
                 write_block \
                     "========== UPDATED: $service ==========" \
@@ -168,6 +197,7 @@ fi
 (( PULL_FAILURES > 0 )) && PHASE_STATUS="degraded"
 PHASE_KV+=(
     "images_updated=$(IFS=,; echo "${UPDATED_NAMES[*]}")"
+    "images_detail=$(IFS=';'; echo "${UPDATED_DETAIL[*]}")"
     "pull_failures=$(IFS=,; echo "${FAILED_NAMES[*]}")"
     "images_updated_count=$UPDATED"
     "pull_failures_count=$PULL_FAILURES"

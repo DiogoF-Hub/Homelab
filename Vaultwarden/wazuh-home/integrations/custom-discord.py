@@ -53,7 +53,8 @@ from datetime import datetime
 from zoneinfo import ZoneInfo
 
 # Optional Discord mention prepended to every notification (a role or
-# user id like "<@&123...>" / "<@123...>"). Empty = no ping.
+# user id like "<@&123...>" / "<@123...>"). Empty = no ping. Set it in the
+# side-file below ("mention" key), not here.
 MENTION = ""
 
 LOCAL_TZ = "Europe/Luxembourg"
@@ -78,6 +79,9 @@ try:
         WEBHOOKS.update(json.load(_wf))
 except (FileNotFoundError, ValueError, OSError):
     pass    # no side-file (or unreadable) -> placeholders stay; deliver() skips them
+# The side-file may also hold the mention, e.g. "mention": "<@123456789>",
+# so it survives re-installing this script too.
+MENTION = WEBHOOKS.pop("mention", MENTION)
 
 
 # ---------------------------------------------------------------------------
@@ -279,19 +283,48 @@ def _maint_cap_list(csv, limit=20):
         return ", ".join(items)
     return ", ".join(items[:limit]) + f"  … (+{len(items) - limit} more)"
 
+# Release notes per compose service, linked when its image was updated.
+RELEASE_NOTES = {
+    "vaultwarden": "https://github.com/dani-garcia/vaultwarden/releases",
+    "bunkerweb":   "https://github.com/bunkerity/bunkerweb/releases",
+    "crowdsec":    "https://github.com/crowdsecurity/crowdsec/releases",
+    "cloudflared": "https://github.com/cloudflare/cloudflared/releases",
+}
+
+def _maint_images(data):
+    """'Docker images updated' value: one line per image with old -> new
+    version (images_detail, ';'-separated) and a release-notes link; falls
+    back to the plain name list from older runs."""
+    detail = data.get("images_detail", "")
+    names = data.get("images_updated", "")
+    if not detail:
+        return names.replace(",", ", ") if names else "none"
+    lines = []
+    for entry in detail.split(";"):
+        service = entry.split(":", 1)[0].strip()
+        link = RELEASE_NOTES.get(service)
+        lines.append(f"{entry.strip()} ([release notes]({link}))" if link else entry.strip())
+    return "\n".join(lines)[:1024]
+
+def images_were_updated(alert):
+    return bool(alert.get("data", {}).get("images_updated"))
+
 def format_maintenance(alert):
     """
     Discord embed from the nightly `run` summary event. main.sh rolls the
     per-phase status lines into one event with these data.* fields. Color +
-    icon track the overall status; the @ is decided by the caller (only on
-    degraded/fail), not here.
+    icon track the overall status; the @ is decided by the caller (on
+    degraded/fail, or when a container image was updated), not here.
     """
     data = alert.get("data", {})
     ts = alert.get("timestamp", "N/A")
     status = data.get("status", "unknown")
+    images_updated = images_were_updated(alert)
 
     color = {"ok": 3066993, "degraded": 15844367, "fail": 15158332}.get(status, 10070709)
     icon = {"ok": "🟢", "degraded": "🟠", "fail": "🔴"}.get(status, "⚪")
+    if status == "ok" and images_updated:
+        color, icon = 3447003, "🔵"    # clean run, but new images go live at this reboot
 
     backup = data.get("backup_status", "N/A")
     size = data.get("backup_size", "")
@@ -301,8 +334,14 @@ def format_maintenance(alert):
     fields = [
         {"name": "Backup", "value": backup_val, "inline": True},
         {"name": "Reboot", "value": data.get("reboot_status") or "scheduled", "inline": True},
-        {"name": "Docker images updated", "value": (images.replace(",", ", ") if images else "none"), "inline": False},
+        {"name": "Docker images updated", "value": _maint_images(data), "inline": False},
     ]
+    if images:
+        fields.append({
+            "name": "🐳 New images start at this reboot",
+            "value": "Check the vault loads and logins/sync work once the VM is back.",
+            "inline": False,
+        })
 
     pulls = data.get("pull_failures", "")
     if pulls:
@@ -314,20 +353,55 @@ def format_maintenance(alert):
         "inline": False,
     })
 
-    # the two pinned tools (age / minisign): only shown when a bump is available
+    # pinned / held software: only shown when a bump is available. age and
+    # minisign are pinned binaries; wazuh-agent is apt-held on every VM and
+    # upgraded by hand (manager first, then the agents).
     upd = []
     if data.get("age_update"):
         upd.append(f"age → {data['age_update']}")
     if data.get("minisign_update"):
         upd.append(f"minisign → {data['minisign_update']}")
+    if data.get("wazuh_agent_update"):
+        upd.append(f"wazuh-agent → {data['wazuh_agent_update']} (manager first, then all agents)")
     if upd:
         fields.append({"name": "🔧 Tool update available", "value": ", ".join(upd), "inline": False})
 
+    title = f"{icon} Vault maintenance: {status.upper()}"
+    if images_updated:
+        title += " · images updated"
     return {
-        "title": f"{icon} Vault maintenance: {status.upper()}",
+        "title": title,
         "color": color,
         "fields": fields,
         "footer": {"text": format_timestamp(ts)},
+    }
+
+
+# --- conffile: an upgrade kept a locally edited config file (rule 100601) ---
+
+def format_conffile(alert):
+    """
+    Embed for dpkg's 'conffile <file> keep' decision: the nightly upgrade
+    (force-confold) kept our edited file and saved the package's new
+    version next to it as <file>.dpkg-dist. Nothing is broken; it's a
+    nudge to look at what the new default changed.
+    """
+    data = alert.get("data", {})
+    path = data.get("dpkg_conffile", "N/A")
+    host = alert.get("agent", {}).get("name", "N/A")
+    return {
+        "title": "📝 Upgrade kept a local config file",
+        "color": 3447003,
+        "fields": [
+            {"name": "Host", "value": host, "inline": True},
+            {"name": "File", "value": f"`{path}`", "inline": True},
+            {"name": "New default saved as", "value": f"`{path}.dpkg-dist`", "inline": False},
+            {"name": "What to do",
+             "value": f"Compare: `sudo diff {path} {path}.dpkg-dist`. Merge anything you "
+                      "want into your file, then delete the `.dpkg-dist`.",
+             "inline": False},
+        ],
+        "footer": {"text": format_timestamp(alert.get("timestamp", "N/A"))},
     }
 
 
@@ -460,10 +534,18 @@ def main():
         deliver("fail2ban", format_fail2ban(alert))
 
     # --- maintenance: nightly run summary. 100501 = ok (quiet heartbeat),
-    #     100502 = degraded|fail. @ you only when it's not ok. ---
+    #     100502 = degraded|fail. @ you when it's not ok, and also when a
+    #     container image was updated: a new release goes live at the reboot
+    #     that follows, which is when something is most likely to break. ---
     elif rule.get("id") in ("100501", "100502"):
+        ping = data.get("status") != "ok" or images_were_updated(alert)
         deliver("maintenance", format_maintenance(alert),
-                mention=(MENTION if data.get("status") != "ok" else ""))
+                mention=(MENTION if ping else ""))
+
+    # --- conffile: an upgrade kept a locally edited config file (any
+    #     agent). Goes to #maintenance with an @, it wants a look. ---
+    elif rule.get("id") == "100601":
+        deliver("maintenance", format_conffile(alert))
 
     # --- FUTURE (add WEBHOOKS key + <integration> block, verify shape) ---
     # elif rule.get("id", "") in ("504", "506"):

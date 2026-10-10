@@ -5,6 +5,10 @@
 # security patches still land between manual runs. Preserves sshd_config
 # on openssh-server upgrades (UCF_FORCE_CONFFOLD=1) so an unattended run
 # cannot lock us out of the VM by overwriting hardened sshd settings.
+# Every upgrade keeps locally edited config files (dpkg --force-confold)
+# instead of stopping at dpkg's keep-or-replace prompt. Held packages
+# (wazuh-agent) are skipped; a newer wazuh-agent is reported instead, so
+# the agents can be upgraded by hand after the manager.
 #
 # Runnable standalone:   sudo /root/vault/system-update.sh
 # Called from main.sh:   /root/vault/system-update.sh
@@ -38,6 +42,13 @@ log "system-update starting"
 
 export DEBIAN_FRONTEND=noninteractive
 
+# Never stop at dpkg's "keep or replace this config file?" prompt. With no
+# terminal the prompt fails the package mid-install and leaves dpkg half
+# configured. confdef takes the maintainer's version only for files we never
+# edited; confold keeps ours for the rest (sudoers env_keep, etc.), and the
+# maintainer's new version is saved next to it as <file>.dpkg-dist.
+APT_CONF_OPTS=(-o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold)
+
 # --- dpkg state sanity ----------------------------------------------------
 
 log "fixing any pending dpkg state (dpkg --configure -a)"
@@ -55,9 +66,29 @@ apt-get update -y >> "$PHASE_LOG" 2>&1 \
 # refreshed and before any upgrade runs; on a successful run these are the
 # packages that get upgraded. grep '/' keeps only "name/repo …" lines and
 # drops apt's "Listing…" header.
-mapfile -t __upgradable < <(apt list --upgradable 2>/dev/null | grep '/' | cut -d/ -f1)
+# Held packages are listed as upgradable too but never upgraded, so they're
+# filtered out here.
+mapfile -t __held < <(apt-mark showhold 2>/dev/null)
+mapfile -t __upgradable < <(apt list --upgradable 2>/dev/null | grep '/' | cut -d/ -f1 \
+    | grep -vxF -f <(printf '%s\n' "${__held[@]}") || true)
 APT_UPGRADED_LIST=$(IFS=,; echo "${__upgradable[*]}")
 APT_UPGRADED_COUNT=${#__upgradable[@]}
+
+# wazuh-agent is held (apt-mark hold) on every VM: an agent must never be
+# newer than the manager, and an unattended agent upgrade once took every
+# agent down. Report a newer version instead; the agents all run the same
+# version from the same repo, so this one VM's notice covers all of them.
+# Upgrade order: wazuh-home first, then each agent with
+#   apt-get install --allow-change-held-packages wazuh-agent
+if dpkg -s wazuh-agent >/dev/null 2>&1; then
+    __wz_inst=$(dpkg-query -W -f='${Version}' wazuh-agent)
+    __wz_cand=$(apt-cache policy wazuh-agent 2>/dev/null | awk '/Candidate:/ {print $2}')
+    if [[ -n "$__wz_cand" && "$__wz_cand" != "(none)" ]] \
+        && dpkg --compare-versions "$__wz_cand" gt "$__wz_inst"; then
+        log "wazuh-agent $__wz_cand available (installed $__wz_inst, held)"
+        PHASE_KV+=("wazuh_agent_update=$__wz_cand")
+    fi
+fi
 
 # --- openssh-server special case (DO THIS FIRST) --------------------------
 # Upgrade openssh-server while keeping the existing hardened sshd_config.
@@ -74,7 +105,7 @@ APT_UPGRADED_COUNT=${#__upgradable[@]}
 # package regardless of any background apt activity that might follow.
 
 log "upgrading openssh-server (keeping existing config)"
-UCF_FORCE_CONFFOLD=1 apt-get install --only-upgrade openssh-server -y \
+UCF_FORCE_CONFFOLD=1 apt-get "${APT_CONF_OPTS[@]}" install --only-upgrade openssh-server -y \
     >> "$PHASE_LOG" 2>&1 \
     || warn "openssh-server upgrade had issues, review log"
 
@@ -92,11 +123,11 @@ systemctl enable --now unattended-upgrades.service apt-daily.timer apt-daily-upg
 # --- main upgrades --------------------------------------------------------
 
 log "apt-get upgrade"
-apt-get upgrade -y >> "$PHASE_LOG" 2>&1 \
+apt-get "${APT_CONF_OPTS[@]}" upgrade -y >> "$PHASE_LOG" 2>&1 \
     || fail "apt-get upgrade failed" 32
 
 log "apt-get dist-upgrade"
-apt-get dist-upgrade -y >> "$PHASE_LOG" 2>&1 \
+apt-get "${APT_CONF_OPTS[@]}" dist-upgrade -y >> "$PHASE_LOG" 2>&1 \
     || fail "apt-get dist-upgrade failed" 33
 
 # Record the upgraded package names for the status report. Only reached on

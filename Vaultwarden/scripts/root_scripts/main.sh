@@ -70,12 +70,14 @@ emit_run_summary() {
             "backup_status=$(_f backup status)"
             "backup_size=$(_f backup size)"
             "images_updated=$(_f docker-update images_updated)"
+            "images_detail=$(_f docker-update images_detail)"
             "pull_failures=$(_f docker-update pull_failures)"
             "apt_upgraded=$(_f system-update apt_upgraded)"
             "apt_count=$(_f system-update apt_upgraded_count)"
             "reboot_status=$(_f reboot status)"
             "age_update=$(_f backup age_update)"
             "minisign_update=$(_f backup minisign_update)"
+            "wazuh_agent_update=$(_f system-update wazuh_agent_update)"
         )
     else
         if   grep -q '"status":"fail"'     <<<"$lines"; then overall="fail"

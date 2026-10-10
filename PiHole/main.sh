@@ -38,15 +38,15 @@ echo "---------------------------------------------------------"
 echo "Gravity Update started at: $(date)"
 echo -e "---------------------------------------------------------\n"
 
-echo "[→] Starting Gravity update..."
+echo "[-->] Starting Gravity update..."
 docker compose exec pihole pihole -g || {
     echo "[ERROR] Gravity update failed."
     exit 2
 }
 
-echo -e "[✔] Gravity list update completed successfully.\n"
+echo -e "[OK] Gravity list update completed successfully.\n"
 
-echo -e "[→] Cleaning up logs older than $RETENTION_DAYS days...\n"
+echo -e "[-->] Cleaning up logs older than $RETENTION_DAYS days...\n"
 find "$GRAVITY_LOG_DIR" -type f -name "gravity-update-*.log" -mtime +$RETENTION_DAYS -exec rm -f {} \;
 
 echo "---------------------------------------------------------"
@@ -58,7 +58,7 @@ echo "---------------------------------------------------------"
 # ======================
 # 2. STOP CONTAINERS
 # ======================
-echo "[→] Stopping Pi-hole containers..." | tee -a "$DOCKER_LOG" "$SYSTEM_LOG"
+echo "[-->] Stopping Pi-hole containers..." | tee -a "$DOCKER_LOG" "$SYSTEM_LOG"
 docker compose down 2>&1 | tee -a "$DOCKER_LOG" "$SYSTEM_LOG"
 
 # Wait for all services to stop
@@ -75,7 +75,7 @@ while true; do
         fi
     done
     if $ALL_STOPPED; then
-        echo "[✔] All containers are stopped." | tee -a "$DOCKER_LOG" "$SYSTEM_LOG"
+        echo "[OK] All containers are stopped." | tee -a "$DOCKER_LOG" "$SYSTEM_LOG"
         break
     fi
     sleep 1
@@ -130,17 +130,17 @@ done
                 docker rmi -f "$LOCAL_ID" || echo "[WARN] Failed to remove old image $LOCAL_ID"
             fi
         else
-            echo -e "\n[✔] $service is up-to-date."
+            echo -e "\n[OK] $service is up-to-date."
         fi
 
         echo -e "[----- $service -----]"
     done
 
     if [ "$UPDATED" -eq 0 ]; then
-        echo -e "\n[✔✔✔] No updates needed."
+        echo -e "\n[OK] No updates needed."
     fi
 
-    echo -e "\n[→] Cleaning old logs..."
+    echo -e "\n[-->] Cleaning old logs..."
     find "$DOCKER_LOG_DIR" -name "*.log" -mtime +$RETENTION_DAYS -exec rm -f {} \;
 
     echo -e "\n---------------------------------------------------------"
@@ -159,27 +159,32 @@ echo "-----------------------------------------------------------"
 
 export DEBIAN_FRONTEND=noninteractive
 
-echo -e "\n[→] Fixing broken packages..."
+# Keep locally edited config files (squid.conf, ...) instead of stopping at
+# dpkg's keep-or-replace prompt, which fails the package when nobody can
+# answer. The maintainer's new version is saved as <file>.dpkg-dist.
+APT_CONF_OPTS=(-o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold)
+
+echo -e "\n[-->] Fixing broken packages..."
 dpkg --configure -a
 
-echo -e "\n[→] Updating package lists..."
+echo -e "\n[-->] Updating package lists..."
 apt-get update -y
 
 # upgrade openssh-server while keeping existing configuration
-echo -e "\n[→] Reinstalling openssh-server..."
-UCF_FORCE_CONFFOLD=1 apt-get install --only-upgrade openssh-server -y
+echo -e "\n[-->] Reinstalling openssh-server..."
+UCF_FORCE_CONFFOLD=1 apt-get "${APT_CONF_OPTS[@]}" install --only-upgrade openssh-server -y
 
-echo -e "\n[→] Upgrading packages..."
-apt-get upgrade -y
+echo -e "\n[-->] Upgrading packages..."
+apt-get "${APT_CONF_OPTS[@]}" upgrade -y
 
-echo -e "\n[→] Full upgrade (dist-upgrade)..."
-apt-get full-upgrade -y
+echo -e "\n[-->] Full upgrade (dist-upgrade)..."
+apt-get "${APT_CONF_OPTS[@]}" full-upgrade -y
 
-echo -e "\n[→] Cleaning up..."
+echo -e "\n[-->] Cleaning up..."
 apt-get autoremove --purge -y
 apt-get clean
 
-echo -e "\n[→] Cleaning old system logs..."
+echo -e "\n[-->] Cleaning old system logs..."
 find "$SYSTEM_LOG_DIR" -type f -name "system-autoupdate-*.log" -mtime +$RETENTION_DAYS -exec rm -f {} \;
 
 echo -e "\n-----------------------------------------------------------"
@@ -190,5 +195,5 @@ echo "-----------------------------------------------------------"
 # ======================
 # 5. FINAL REBOOT
 # ======================
-echo "[→] Maintenance complete. Rebooting..." | tee -a "$SYSTEM_LOG"
+echo "[-->] Maintenance complete. Rebooting..." | tee -a "$SYSTEM_LOG"
 reboot -h now

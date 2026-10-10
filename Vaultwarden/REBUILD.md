@@ -493,10 +493,10 @@ LAN Pi-hole VM + `wazuh-home` itself), enrolled with a dedicated
 - **Vaultwarden VM (maintenance)**, `main.sh` writes a JSON status log
   (`/srv/logs/status/*.jsonl`) that the agent tails (single-file localfile);
   manager rules 100500-100502 turn the nightly run summary into a
-  #maintenance Discord report (green OK, @ on degraded/fail). Wire this
+  #maintenance Discord report (green OK, @ on degraded/fail or updated images). Wire this
   after the first `main.sh` run (Phase 14), since the log is born then.
 
-All five sources also fan out to per-channel Discord via one
+All six sources also fan out to per-channel Discord via one
 `custom-discord` integrator (real webhook URLs live in a gitignored
 `discord-webhooks.json` side-file on the manager, not in the script).
 Decoders, rules, sidecars, localfiles, and the integrator all live in
@@ -511,7 +511,15 @@ If you don't have a Wazuh manager and don't plan to add one, skip this
 sub-section entirely.
 
 Install the agent + apt repo (from Wazuh's official install guide for
-the version you're standardising on). Confirm `packages.wazuh.com` is
+the version you're standardising on), then hold it so the nightly
+updates never upgrade it unattended (the agent must never get ahead of
+the manager; README §Wazuh agent has the upgrade procedure):
+
+```bash
+sudo apt-mark hold wazuh-agent
+```
+
+Confirm `packages.wazuh.com` is
 in `squid/vault_domains_allow_proxy.txt` so the apt fetch flows
 through Squid (Phase 4 wires Squid up; the agent install can wait until
 after Phase 4 if it's blocking on Squid availability). The Vaultwarden
@@ -1303,7 +1311,9 @@ Expected sequence:
    failure.
 3. `system-update.sh`, `apt-get update / upgrade / dist-upgrade /
    autoremove`, ensures `unattended-upgrades` is enabled, preserves
-   `sshd_config` via `UCF_FORCE_CONFFOLD=1`. Logs to
+   `sshd_config` via `UCF_FORCE_CONFFOLD=1`, keeps every locally edited
+   config file (`--force-confold`), skips held packages and reports a
+   newer `wazuh-agent` instead. Logs to
    `/srv/logs/system/system-autoupdate-YYYY-MM-DD.log`. Exit codes
    30–33.
 4. `reboot.sh`, safety gates (containers stopped + apt/dpkg lock free),

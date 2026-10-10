@@ -205,7 +205,7 @@ Because of that, the VM must have nothing else on 53 or 443, or the Pi-hole cont
 1. **Gravity update**: `docker compose exec pihole pihole -g`
 2. **Stop the stack**: `docker compose down`, then polls up to 30s for every service to actually be stopped
 3. **Image update**: for each service, compares local vs pulled image ID, pulls with 3 retries, `docker rmi -f` on the superseded image. It **does not bring the stack back up.**
-4. **System update**: `dpkg --configure -a`, `apt-get update`, `openssh-server` upgraded with `UCF_FORCE_CONFFOLD=1` (keeps existing config), `upgrade`, `full-upgrade`, `autoremove --purge`, `clean`
+4. **System update**: `dpkg --configure -a`, `apt-get update`, `openssh-server` upgraded with `UCF_FORCE_CONFFOLD=1` (keeps existing config), `upgrade`, `full-upgrade` (all with `--force-confdef --force-confold`, so an edited config like `squid.conf` is kept instead of stalling on dpkg's prompt; the new default lands as `<file>.dpkg-dist`; held packages such as `wazuh-agent` are skipped), `autoremove --purge`, `clean`
 5. **`reboot -h now`** unconditionally
 
 > ⚠️ Two things worth knowing before you copy this:
