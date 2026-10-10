@@ -31,6 +31,7 @@ wazuh-home/
 ├── maintenance/   manager-maint-rules.xml + vault-maint-agent.localfile.xml
 ├── manager/       manager-global.snippet.xml          (logall_json; manager-wide, not pipeline-specific)
 ├── integrations/  custom-discord.py + manager-discord-integration.xml
+├── retention/     ism-delete-30d.json + ism-delete-180d.json + wazuh-log-cleanup.{sh,service,timer}   (manager host)
 └── sidecar/
     ├── pihole/    pihole-ftl-tail.py + .service        (installs on the LAN Pi-hole VM)
     └── vault/     modsec-tail.py + .service            (installs on the Vault VM)
@@ -292,7 +293,7 @@ sudo systemctl restart wazuh-manager
 
 - **Start-from-now on first run**: the sidecar's first invocation skips the FTL DB's historical backlog (could be weeks of queries) by starting from `MAX(id)`. Subsequent runs use the persisted `last_seen_id` from `/var/lib/pihole-ftl-tail/last_seen_id`. If you ever want to backfill a chunk of history, stop the daemon, edit the state file to a lower id, restart.
 - **logall_json disk usage**: `archives.json` grows fast (one line per decoded event, all clients on the LAN if you have other localfiles tailing). The default `/etc/logrotate.d/wazuh` config handles it, but worth a `du -sh /var/ossec/logs/archives/` after the first week to confirm.
-- **wazuh-archives-* index growth**: with archives ingestion enabled (step 5), the indexer also accumulates a parallel index for every decoded event. No automatic ILM by default; check disk on the indexer node periodically and either set up an ILM policy or manually prune old daily indices. See Wazuh's docs on index lifecycle management for the standard approach.
+- **wazuh-archives-* index growth**: with archives ingestion enabled (step 5), the indexer also accumulates a parallel index for every decoded event. Wazuh deletes nothing by default; the retention policies in [Retention and indexer sizing](#retention-and-indexer-sizing-manager-host) cap archives at 30 days.
 - **Vault VM IP is hardcoded** in two places: `CLIENT_FILTER` near the top of `pihole-ftl-tail.py` (filters at SQL level so non-Vault events don't even hit the JSON log), and `<srcip>` in rules 100251 / 100252 / 100253 (defense-in-depth; catches a misconfiguration where the SQL filter got changed). Pin a static lease in DHCP or set a static IP on the VM to avoid drift.
 - **Pi-hole groups**: this stack relies on the LAN Pi-hole serving the Vault VM **without applying any blocklists** (Squid is the actual content gate). In Pi-hole's web UI, the Vault VM should be in a `vaultwarden-vm` group with **no adlists ticked**. See `Vaultwarden/README.md` § "Pi-hole groups, no DNS-layer blocking for the Vault VM".
 - **Status code → label drift**: Pi-hole's FTL enum (`STATUS_LABELS` in the script) can shift across major versions. If you see events with `status=status-N` (raw integer fallback), Pi-hole emitted a code we don't have a label for; add it to the dict and restart the sidecar. The data is never lost: `status_code` is always the raw integer.
@@ -338,6 +339,77 @@ The run rules match a **derived `vw_sev`** field (`info`/`warn`), NOT `status`: 
 - `integrations/manager-discord-integration.xml` , the `<integration>` blocks (one per source, scoped by group / rule_id / level) for the manager's `ossec.conf`.
 
 Gotcha baked into the script: Discord's API is Cloudflare-fronted and **403s the default `Python-urllib` User-Agent**, so `send_discord` sets a `DiscordBot (...)` UA. The manager needs egress to `discord.com:443`.
+
+## Retention and indexer sizing (manager host)
+
+**Why this exists.** Out of the box Wazuh keeps everything forever. Each daily index costs 3 shards, so on 2026-10-10 the single-node indexer sat at OpenSearch's hard limit of **1000/1000 shards** and its 2 GB heap was full. Two symptoms followed, both misleading:
+
+- **Dashboard login said "Invalid username or password"** with the right password. Logins are checked by the security plugin inside the indexer, and the full heap refused them (`circuit_breaking_exception ... Data too large` in the dashboard log).
+- **The dashboard showed 0 new alerts.** Filebeat couldn't create the next daily index (`this action would add [3] total shards, but this cluster currently has [1000]/[1000] maximum shards open`). The manager keeps writing its own dated files under `/var/ossec/logs/alerts/` regardless, so those stay the source to re-ingest from if the indexer ever refuses events again.
+
+A restart only helps for minutes, since the shards that fill the heap are still on disk. The fix was retention plus a bigger heap.
+
+**What's in place on `wazuh-home`** (8 GB RAM, all-in-one manager + indexer + dashboard):
+
+| Piece | Setting | Where |
+|---|---|---|
+| Indexer heap | `-Xms3g` / `-Xmx3g` (was 2g, originally 1g; keep both equal, at most about half of RAM) | `/etc/wazuh-indexer/jvm.options` (previous versions kept as `jvm.options.bak` = 1g, `jvm.options.2g.bak`) |
+| Archive indices `wazuh-archives-*` | deleted after **30 days** | ISM policy `wazuh-delete-30d`, [`retention/ism-delete-30d.json`](retention/ism-delete-30d.json) |
+| Alert, monitoring, statistics indices | deleted after **180 days** | ISM policy `wazuh-delete-180d`, [`retention/ism-delete-180d.json`](retention/ism-delete-180d.json) |
+| Manager files `/var/ossec/logs/archives/` | deleted after **30 days** | daily timer, [`retention/wazuh-log-cleanup.sh`](retention/wazuh-log-cleanup.sh) |
+| Manager files `/var/ossec/logs/alerts/` | deleted after **180 days** | same timer |
+
+The `ism_template` in each policy makes it apply to every **future** index automatically. `wazuh-states-*` (vulnerability and inventory) have no policy on purpose, they always show the current state. At steady state this is roughly 31 archive + 180 alert indices, about 650 shards, under the 1000 limit with room to spare. Deletion is permanent; the only way back is a Proxmox backup of the VM.
+
+**Apply** (on `wazuh-home`, from the `wazuh-home/` folder of a repo copy; the indexer listens on `127.0.0.1:9200` only, and the admin certificate works even when logins are broken):
+
+```bash
+CERT="--cert /etc/wazuh-indexer/certs/admin.pem --key /etc/wazuh-indexer/certs/admin-key.pem"
+IDX="https://127.0.0.1:9200"
+
+# 1. Heap: stop dashboard, manager, indexer; set -Xms3g/-Xmx3g in /etc/wazuh-indexer/jvm.options;
+#    start the indexer alone, wait ~90s, then dashboard + manager. Agents queue events meanwhile.
+
+# 2. Create the two policies (also cover all future indices)
+sudo curl -sk $CERT -X PUT "$IDX/_plugins/_ism/policies/wazuh-delete-30d"  -H "Content-Type: application/json" -d @retention/ism-delete-30d.json
+sudo curl -sk $CERT -X PUT "$IDX/_plugins/_ism/policies/wazuh-delete-180d" -H "Content-Type: application/json" -d @retention/ism-delete-180d.json
+
+# 3. Attach them to the indices that already exist
+sudo curl -sk $CERT -X POST "$IDX/_plugins/_ism/add/wazuh-archives-*" -H "Content-Type: application/json" -d '{"policy_id":"wazuh-delete-30d"}'
+for p in wazuh-alerts-* wazuh-monitoring-* wazuh-statistics-*; do
+  sudo curl -sk $CERT -X POST "$IDX/_plugins/_ism/add/$p" -H "Content-Type: application/json" -d '{"policy_id":"wazuh-delete-180d"}'
+done
+
+# 4. Manager file cleanup
+sudo install -m 0755 retention/wazuh-log-cleanup.sh      /usr/local/bin/wazuh-log-cleanup.sh
+sudo install -m 0644 retention/wazuh-log-cleanup.service /etc/systemd/system/wazuh-log-cleanup.service
+sudo install -m 0644 retention/wazuh-log-cleanup.timer   /etc/systemd/system/wazuh-log-cleanup.timer
+sudo systemctl daemon-reload && sudo systemctl enable --now wazuh-log-cleanup.timer
+```
+
+ISM runs about every 5 minutes and needs two cycles before it deletes, so expect 10-15 minutes before the shard count drops. A policy can't be edited in place for indices already using it: to change a retention period, create a new policy (higher `priority`), move the indices with `_plugins/_ism/change_policy/<pattern>`, then delete the old policy. That's how the alerts went from 90 to 180 days.
+
+**Monthly check** (read-only):
+
+```bash
+sudo curl -sk $CERT "$IDX/_cat/nodes?v&h=heap.percent,heap.current,heap.max"            # heap.percent under ~75
+sudo curl -sk $CERT "$IDX/_cluster/health?pretty" | grep active_shards                   # under ~700
+sudo curl -sk $CERT "$IDX/_cat/indices/wazuh-alerts-*?s=index:desc&h=index" | head -n 1  # today's date
+sudo curl -sk $CERT "$IDX/_plugins/_ism/policies?pretty" | grep policy_id               # both policies exist
+systemctl list-timers | grep wazuh-log                                                   # next run at 00:00
+sudo grep -c "maximum shards open" /var/log/filebeat/filebeat                            # 0
+df -h /
+```
+
+Cluster health shows **yellow**, not green: three `.opendistro-*` system indices want a replica, and a single node has nowhere to put one. Harmless (optionally set their replicas to 0). Proxmox showing memory above 100% for this VM is page cache, not pressure: judge by `free -m` (available), `vmstat` (`si`/`so` at 0) and the kernel log (no OOM kills).
+
+| Symptom | Likely cause | Fix |
+|---|---|---|
+| "Invalid username or password" with the right password | Indexer heap full (`circuit_breaking_exception` in `journalctl -u wazuh-dashboard`) | Restart indexer, wait, restart dashboard; then check shards and that both policies exist |
+| 0 new alerts, Filebeat log says "maximum shards open" | 1000-shard limit | Check the policies exist and are attached; delete old indices |
+| `curl 192.168.173.10:9200` returns HTTP 000 | Indexer bound to loopback | Use `https://127.0.0.1:9200` |
+
+Leave `/var/ossec/queue/vd` alone (about 11 GB): it's the CVE database for vulnerability detection. If more than 180 days of alerts are ever wanted, change the Wazuh index template from 3 shards to 1 per index first; not done yet.
 
 ## What's still ahead
 

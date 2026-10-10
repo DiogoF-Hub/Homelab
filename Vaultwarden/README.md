@@ -147,7 +147,7 @@ The stack lives on four machines. Two sit on the inbound request path, in this o
 Two more on the home LAN support it:
 
 3. **LAN Pi-hole VM** (Proxmox, `192.168.173.2`): the Vault VM's **two egress chokepoints**: Pi-hole for DNS and Squid for HTTP/HTTPS, both locked to the Vault VM's allowlists (the only other ways out are SMTP to Mailjet and NTP, see the firewall table). Until October 2026 these were two separate Ubuntu VMs (Pi-hole and `proxy-home`); they now share one Debian 13 VM
-4. **`wazuh-home` VM** (Proxmox, `192.168.173.10`): the Wazuh manager that receives the agents of the Vault VM and the Pi-hole VM and posts the Discord alerts
+4. **`wazuh-home` VM** (Proxmox, `192.168.173.10`, Debian 13, 8 GB RAM): the Wazuh manager + indexer + dashboard that receives the agents of the Vault VM and the Pi-hole VM and posts the Discord alerts. Alerts are kept 180 days and archives 30 days ([retention setup](wazuh-home/README.md#retention-and-indexer-sizing-manager-host))
 
 ### **Edge VPS (Hetzner Cloud CX23, Falkenstein)**
 

@@ -1,0 +1,6 @@
+[Unit]
+Description=Delete old Wazuh manager log files
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/wazuh-log-cleanup.sh
