@@ -714,6 +714,23 @@ not the WG tunnel IP, because rootless Podman SNATs inbound
 connections to its bridge gateway. The API key auth still works
 fine; the IP shown is purely informational.
 
+That address can change when the containers are recreated (nightly
+reboot). CrowdSec then registers the same key again as
+`VPS_FW_BOUNCER@10.89.x.y` (likewise `PROXY@...` for BunkerWeb's
+bouncer), and the old row stops pulling but stays in the list and in
+the CrowdSec console. Harmless: those rows never pull again and change
+nothing for the live bouncers, so they're left alone.
+
+They can't be deleted on their own (`cscli bouncers delete
+'VPS_FW_BOUNCER@10.89.1.46'` refuses: "auto-created and cannot be
+deleted, delete parent bouncer instead"). Deleting the parent
+`VPS_FW_BOUNCER` / `PROXY` row removes its `@` rows too, but also its
+key, so both bouncers stay locked out until the crowdsec container is
+recreated and re-registers the keys from the compose env vars; not
+worth it for a tidier list. CrowdSec's `bouncers_autodelete` isn't
+used for the same reason: it would also delete the parent rows if a
+bouncer were offline for a while.
+
 ### End-to-end test
 
 From the home VM, push a fake ban:
