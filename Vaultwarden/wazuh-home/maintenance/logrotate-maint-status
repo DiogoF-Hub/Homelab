@@ -1,0 +1,12 @@
+# /etc/logrotate.d/maint-status on the Pi-hole VM, wazuh-home and the VPS.
+# One JSON line per night, so monthly is plenty. copytruncate keeps the
+# file's inode, so the Wazuh agent's open read position stays valid.
+/var/log/maint-status.jsonl {
+    monthly
+    rotate 6
+    compress
+    delaycompress
+    missingok
+    notifempty
+    copytruncate
+}

@@ -37,7 +37,7 @@ quiet instead of erroring).
 
 FUTURE SOURCES (not configured yet; add a WEBHOOKS key + an <integration>
 block + un-comment the branch in main(), and verify the real alert shape
-first, the way modsec was): fail2ban bans, Wazuh agent-down (504/506).
+first, the way modsec was). Agent-down (504) and fail2ban are wired now.
 CrowdSec is a bigger lift, it doesn't ship to Wazuh in this stack at all
 (feeds the BunkerWeb plugin + VPS firewall bouncer), so that's a whole
 separate pipeline, not just a formatter.
@@ -76,6 +76,13 @@ WEBHOOKS = {
     "fail2ban":    "https://discord.com/api/webhooks/REPLACE_WITH_FAIL2BAN_WEBHOOK",
     "maintenance": "https://discord.com/api/webhooks/REPLACE_WITH_MAINTENANCE_WEBHOOK",
     "firewall":    "https://discord.com/api/webhooks/REPLACE_WITH_FIREWALL_WEBHOOK",
+    "conffile":    "https://discord.com/api/webhooks/REPLACE_WITH_CONFFILE_WEBHOOK",
+    "agents":      "https://discord.com/api/webhooks/REPLACE_WITH_AGENTS_WEBHOOK",
+    # Nightly report of the other hosts, one #maintenance per Discord
+    # category (the plain "maintenance" key is the Vault VM's).
+    "maintenance-pihole": "https://discord.com/api/webhooks/REPLACE_WITH_PIHOLE_MAINTENANCE_WEBHOOK",
+    "maintenance-wazuh":  "https://discord.com/api/webhooks/REPLACE_WITH_WAZUH_MAINTENANCE_WEBHOOK",
+    "maintenance-vps":    "https://discord.com/api/webhooks/REPLACE_WITH_VPS_MAINTENANCE_WEBHOOK",
 }
 try:
     with open("/var/ossec/integrations/discord-webhooks.json") as _wf:
@@ -380,6 +387,63 @@ def format_maintenance(alert):
     }
 
 
+# --- host maintenance: Pi-hole VM / wazuh-home / VPS (rules 100511/100512) -
+
+MAINT_HOST_TITLES = {"pihole": "Pi-hole VM", "wazuh": "wazuh-home", "vps": "Edge VPS"}
+
+def format_host_maintenance(alert):
+    """
+    Embed for the one-line nightly status a host's main.sh writes
+    (event_type=host_maint). Same colours as the Vault VM's report; the @
+    is decided by the caller (degraded/fail, or updated Pi-hole images).
+    """
+    data = alert.get("data", {})
+    role = data.get("role", "")
+    status = data.get("status", "unknown")
+    images = data.get("images_updated", "")
+
+    color = {"ok": 3066993, "degraded": 15844367, "fail": 15158332}.get(status, 10070709)
+    icon = {"ok": "🟢", "degraded": "🟠", "fail": "🔴"}.get(status, "⚪")
+    if status == "ok" and images:
+        color, icon = 3447003, "🔵"    # clean run, new images went live
+
+    fields = [
+        {"name": "Host", "value": data.get("host") or "N/A", "inline": True},
+        {"name": "Reboot", "value": data.get("reboot") or "N/A", "inline": True},
+    ]
+    if role == "pihole":
+        fields.append({"name": "Containers", "value": data.get("containers") or "N/A", "inline": True})
+        fields.append({"name": "Docker images updated",
+                       "value": images.replace(",", ", ") if images else "none", "inline": False})
+
+    errors = data.get("errors", "")
+    if errors:
+        fields.append({"name": "⚠️ Problems",
+                       "value": "\n".join(f"• {e}" for e in errors.split(";") if e)[:1024],
+                       "inline": False})
+
+    if "apt_count" in data:
+        fields.append({"name": f"APT upgraded ({data.get('apt_count', '0')})",
+                       "value": _maint_cap_list(data.get("apt_upgraded", "")), "inline": False})
+
+    held = data.get("held_updates", "")
+    if held:
+        value = ", ".join(held.split(","))
+        if "wazuh" in held:
+            value += "\nUpgrade by hand with wazuh-home/UPGRADE.md: manager first, then the agents."
+        fields.append({"name": "🔧 Held packages with an update", "value": value[:1024], "inline": False})
+
+    title = f"{icon} {MAINT_HOST_TITLES.get(role, role or 'Host')} maintenance: {status.upper()}"
+    if images:
+        title += " · images updated"
+    return {
+        "title": title,
+        "color": color,
+        "fields": fields,
+        "footer": {"text": format_timestamp(alert.get("timestamp", "N/A"))},
+    }
+
+
 # --- conffile: an upgrade kept a locally edited config file (rule 100601) ---
 
 def format_conffile(alert):
@@ -538,20 +602,33 @@ def format_fail2ban(alert):
     }
 
 
+# --- agents: a Wazuh agent went quiet (rule 504) -----------------------------
+
 def format_agent_down(alert):
+    """
+    Embed for rule 504: the manager hasn't heard from this agent for
+    agents_disconnection_time (15 min). A normal reboot comes back well
+    within that (506 stopped + 503 started, neither is posted), so this
+    means the VM is down, hung, or cut off from the manager.
+    """
     agent = alert.get("agent", {})
-    rule = alert.get("rule", {})
-    timestamp = alert.get("timestamp", "N/A")
     return {
-        "title": "🔴 Wazuh agent down",
-        "color": 15158332,
+        "title": "🔴 Wazuh agent disconnected",
+        "color": 15158332,  # red
         "fields": [
-            {"name": "Agent name", "value": agent.get("name", "N/A"), "inline": True},
-            {"name": "Agent ID",   "value": agent.get("id", "N/A"),   "inline": True},
-            {"name": "Agent IP",   "value": agent.get("ip", "N/A"),   "inline": True},
-            {"name": "Event",      "value": f"{rule.get('id','N/A')} - {rule.get('description','N/A')}", "inline": False},
+            {"name": "Agent",    "value": agent.get("name", "N/A"), "inline": True},
+            {"name": "ID",       "value": agent.get("id", "N/A"),   "inline": True},
+            {"name": "IP",       "value": agent.get("ip", "N/A"),   "inline": True},
+            {"name": "Meaning",
+             "value": "No contact for 15 min: VM down or hung, agent stopped, or network / "
+                      "firewall cutting it off from wazuh-home. Its logs aren't reaching Wazuh.",
+             "inline": False},
+            {"name": "Check",
+             "value": "Is the VM up in Proxmox? Then on it: `systemctl status wazuh-agent` and "
+                      "`tail /var/ossec/logs/ossec.log`.",
+             "inline": False},
         ],
-        "footer": {"text": format_timestamp(timestamp)},
+        "footer": {"text": format_timestamp(alert.get("timestamp", "N/A"))},
     }
 
 
@@ -660,14 +737,33 @@ def main():
         deliver("maintenance", format_maintenance(alert),
                 mention=(MENTION if ping else ""))
 
-    # --- conffile: an upgrade kept a locally edited config file (any
-    #     agent). Goes to #maintenance with an @, it wants a look. ---
-    elif rule.get("id") == "100601":
-        deliver("maintenance", format_conffile(alert))
+    # --- host maintenance: nightly report of the Pi-hole VM, wazuh-home
+    #     and the VPS, to the #maintenance of the host's Discord category
+    #     (falls back to the Vault VM's #maintenance while that webhook
+    #     isn't configured). @ on degraded/fail and when Pi-hole images
+    #     were updated, like the Vault VM's report. ---
+    elif rule.get("id") in ("100511", "100512"):
+        channel = f"maintenance-{data.get('role', '')}"
+        if "REPLACE_WITH" in WEBHOOKS.get(channel, "REPLACE_WITH"):
+            channel = "maintenance"
+        ping = data.get("status") != "ok" or bool(data.get("images_updated"))
+        deliver(channel, format_host_maintenance(alert),
+                mention=(MENTION if ping else ""))
 
-    # --- FUTURE (add WEBHOOKS key + <integration> block, verify shape) ---
-    # elif rule.get("id", "") in ("504", "506"):
-    #     deliver("agent", format_agent_down(alert))
+    # --- conffile: an upgrade kept a locally edited config file (any
+    #     agent). Own channel with an @, it wants a look; falls back to
+    #     #maintenance while no "conffile" webhook is configured. ---
+    elif rule.get("id") == "100601":
+        channel = "conffile"
+        if "REPLACE_WITH" in WEBHOOKS.get(channel, "REPLACE_WITH"):
+            channel = "maintenance"
+        deliver(channel, format_conffile(alert))
+
+    # --- agents: no contact for agents_disconnection_time (rule 504). The
+    #     nightly reboots' clean stop/start (506/503) are deliberately not
+    #     posted, they'd ping every night for nothing. ---
+    elif rule.get("id") == "504":
+        deliver("agents", format_agent_down(alert))
 
 
 if __name__ == "__main__":

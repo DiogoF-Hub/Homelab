@@ -758,37 +758,65 @@ Within 10s the VPS bouncer pulls the deletion and the set empties.
 ## Automated maintenance + log fetcher
 
 Nightly cycle on the VPS: `apt update / upgrade / dist-upgrade /
-autoremove`, then an unconditional reboot. Logs land in a
+autoremove`, then a reboot **only if the update needs it**. Logs land in a
 world-readable directory so an unprivileged `fetcher` account can SCP
 them off to the home TrueNAS daily (same pattern as the Vault VM's
 [`fetcher` setup](../REBUILD.md), but minus the backup-bundle pull,
 the VPS has no Vaultwarden data to ship).
 
+Every upgrade runs with `--force-confdef --force-confold`, like the
+home VMs' update scripts: a locally edited config file (nginx
+`streams.d`, fail2ban `jail.local`, the bouncer yaml) is kept instead of
+failing the package at dpkg's keep-or-replace prompt, and the package's
+new default lands next to it as `<file>.dpkg-dist`.
+
 Single script, no orchestrator. The VPS has no containers and no
 data to coordinate, so the multi-phase pattern from
 [`scripts/root_scripts/`](../scripts/root_scripts/) on the Vault VM
-doesn't earn its keep. needrestart is deliberately NOT installed:
-its job is "avoid full reboots by restarting only what needs it",
-which is the opposite of the policy here.
+doesn't earn its keep.
+
+**Reboot only when needed.** The VPS is the public edge, so every
+reboot takes the vault offline for about a minute. The script reboots
+when a package wrote `/var/run/reboot-required`, or when `needrestart
+-b -k` reports a newer kernel installed than the one running
+(`NEEDRESTART-KSTA` 2 or 3); on Debian a kernel update doesn't reliably
+write the flag file, so the flag alone isn't enough. **needrestart must
+be installed** (`sudo apt install needrestart`): with
+`NEEDRESTART_MODE=a` it also restarts, right after each apt run, every
+service still running an old library (an OpenSSL update → nginx,
+fail2ban, the CrowdSec bouncer, sshd), which is what makes skipping the
+reboot safe. Without it the script falls back to the flag file only.
+Same policy as the Pi-hole VM and `wazuh-home`.
+
+Like those two, every run ends with one JSON status line in
+`/var/log/maint-status.jsonl` (ok / degraded / fail, what failed, apt
+packages, reboot). On the home hosts the Wazuh agent ships it to the
+nightly Discord report; the VPS has no agent yet, so for now the line
+only stays local. Once the agent is in, add
+[`host-maint.localfile.xml`](../wazuh-home/maintenance/host-maint.localfile.xml)
+and [`logrotate-maint-status`](../wazuh-home/maintenance/logrotate-maint-status)
+and the report shows up in **#maintenance of the VPS category**.
 
 ### Deploying the script
 
 ```bash
 sudo mkdir -p /root/vps
-sudo cp /path/to/repo/Vaultwarden/vps/scripts/auto-update.sh /root/vps/auto-update.sh
-sudo chmod 755 /root/vps/auto-update.sh
+sudo cp /path/to/repo/Vaultwarden/vps/scripts/main.sh /root/vps/main.sh
+sudo chmod 700 /root/vps/main.sh
 ```
 
-Sanity check it runs (it WILL reboot at the end, so do this once you
-are ready for a reboot):
+Install needrestart, then sanity check it runs (it reboots at the end
+if a reboot is pending, so do this once you are ready for one):
 
 ```bash
-sudo /root/vps/auto-update.sh
+sudo apt install needrestart
+sudo needrestart -b -k        # NEEDRESTART-KSTA: 1 = running the newest kernel
+sudo /root/vps/main.sh
 ```
 
 The script is self-contained: env vars, paths, helpers, lock, apt
 flow, retention, reboot, all in one file. See header comment in
-[`scripts/auto-update.sh`](scripts/auto-update.sh) for the full
+[`scripts/main.sh`](scripts/main.sh) for the full
 phase list and policy notes.
 
 ### Cron entry
@@ -797,11 +825,11 @@ Install in root's crontab (`sudo crontab -e`), pasting the line from
 [`scripts/root_crontab.txt`](scripts/root_crontab.txt):
 
 ```
-0 5 * * * /bin/bash -lc '/root/vps/auto-update.sh' > /dev/null 2>&1
+0 5 * * * /bin/bash -lc '/root/vps/main.sh' > /dev/null 2>&1
 ```
 
 Time choice: 5:00 AM, 35 min before the Vault VM's nightly run at
-5:35 AM. VPS is the lighter cycle (apt + reboot, ~2-3 min), it
+5:35 AM. VPS is the lighter cycle (apt + reboot if needed, ~2-3 min), it
 finishes well before the home stack starts its longer cycle. If the
 VPS run fails for any reason there's a 30 min window to notice
 before the home cycle compounds.
@@ -858,7 +886,7 @@ sudo systemctl restart ssh
 
 ### Log permissions
 
-`/srv/logs/system/` is created by `auto-update.sh` on first run via
+`/srv/logs/system/` is created by `main.sh` on first run via
 `mkdir -p`. Default umask (022) makes it world-readable, which is
 fine on the VPS, the only real users are `admin` and `fetcher` and
 the log contents are non-secret apt output. The fetcher account can
@@ -1009,9 +1037,9 @@ config-management push.
 - [`crowdsec/crowdsec-firewall-bouncer.yaml`](crowdsec/crowdsec-firewall-bouncer.yaml):
   bouncer config to deploy at `/etc/crowdsec/bouncers/crowdsec-firewall-bouncer.yaml`
   on the VPS (only `api_url` + `api_key` need editing from this template)
-- [`scripts/auto-update.sh`](scripts/auto-update.sh) +
+- [`scripts/main.sh`](scripts/main.sh) +
   [`scripts/root_crontab.txt`](scripts/root_crontab.txt): nightly
-  apt cycle + unconditional reboot, see "Automated maintenance + log
+  apt cycle + reboot only when needed, see "Automated maintenance + log
   fetcher" above for deploy procedure + the `fetcher` user setup
 - [`../squid/`](../squid/): for comparison, the outbound-side
   proxy in the same stack (Squid for Vault VM egress, running on

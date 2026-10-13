@@ -501,7 +501,7 @@ LAN Pi-hole VM + `wazuh-home` itself), enrolled with a dedicated
   every block, and manager rules 100700-100701 keep the ones from / to the
   Vault VM (#firewall Discord, once per connection per 3 min).
 
-All seven sources also fan out to per-channel Discord via one
+All eight sources also fan out to per-channel Discord via one
 `custom-discord` integrator (real webhook URLs live in a gitignored
 `discord-webhooks.json` side-file on the manager, not in the script).
 Decoders, rules, sidecars, localfiles, and the integrator all live in

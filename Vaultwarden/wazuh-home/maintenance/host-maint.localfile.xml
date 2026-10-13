@@ -1,0 +1,27 @@
+<!--
+  Wazuh <localfile> for the nightly maintenance status line written by
+  main.sh on the Pi-hole VM, wazuh-home and (once it has an agent) the
+  edge VPS. Not for the Vault VM, which has vault-maint-agent.localfile.xml.
+
+  Append to /var/ossec/etc/ossec.conf on that host, then restart:
+      Pi-hole VM / VPS:  sudo systemctl restart wazuh-agent
+      wazuh-home:        sudo systemctl restart wazuh-manager
+  Check:
+      sudo grep maint-status /var/ossec/logs/ossec.log | tail -2
+      # expect: Analyzing file: '/var/log/maint-status.jsonl'
+
+  If the file doesn't exist yet (before the first run), create it empty
+  first, so the agent starts reading it right away:
+      sudo touch /var/log/maint-status.jsonl
+
+  A single, non-dated file on purpose: the agent keeps its read position
+  in it, so the line written seconds before a reboot still ships (a new
+  dated file each day isn't picked up in time). Rotated with copytruncate
+  by logrotate-maint-status.
+-->
+<ossec_config>
+  <localfile>
+    <log_format>json</log_format>
+    <location>/var/log/maint-status.jsonl</location>
+  </localfile>
+</ossec_config>

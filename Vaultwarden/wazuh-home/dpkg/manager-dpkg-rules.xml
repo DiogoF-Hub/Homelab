@@ -16,7 +16,7 @@
     100601 (level 7): decision=keep. The nightly upgrade kept a locally
                       edited config file (squid.conf, sudoers, ...) and
                       saved the package's new version as .dpkg-dist.
-                      custom-discord posts it to #maintenance.
+                      custom-discord posts it to #config-files.
   "install" decisions (someone chose the package version by hand) stay
   at the level-0 base.
 -->

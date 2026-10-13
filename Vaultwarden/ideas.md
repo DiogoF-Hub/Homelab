@@ -478,10 +478,9 @@ README §Automation Scripts.
 > **Still pending:** the **no-run-in-25h silence rule** that would actually let
 > Wazuh replace `DEADMAN_URL` (#2) is NOT built, the maintenance summary fires
 > on a run, not on its absence, so `DEADMAN_URL` stays (and the user wants it
-> kept permanently regardless). Also: agent-down notifications (rule 504,
-> investigated and parked, the nightly reboots show as clean stop/start
-> 506/503 within the ~10-min disconnect threshold so they don't false-fire);
-> shipping the Vault VM's own `vw-logs/` + `bw-logs/`; FIM. Phase B (manager +
+> kept permanently regardless). Agent-down notifications are done (rule 504 → #agents,
+> 2026-10-13; the nightly reboots' clean 506/503 pair isn't posted). Still
+> open: shipping the Vault VM's own `vw-logs/` + `bw-logs/`; FIM. Phase B (manager +
 > agents) is done.
 >
 > NOTE the implementation diverged from the Phase C sketch below: it uses

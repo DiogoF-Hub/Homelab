@@ -27,7 +27,7 @@ PiHole/
 ├── cookielist_whitelist.txt  # 223 cookie-consent (CMP) domains to allowlist
 ├── manual_domains_block.txt  # REGEX blacklist entries (not exact domains)
 ├── mycustom_list.txt         # 27 exact domains to block
-├── main.sh                   # Nightly maintenance, run by root cron. ENDS IN A REBOOT
+├── main.sh                   # Nightly maintenance, deployed to /root/pihole/main.sh. Reboots only if needed
 ├── start-containers.sh       # @reboot bring-up, also what deploys freshly pulled images
 ├── root_crontab.txt          # The two root crontab entries
 └── README.md                 # This documentation
@@ -37,7 +37,8 @@ Two paths live on the **host**, not in the repo, and both have to exist:
 
 | Host path | What it is |
 | --------- | ---------- |
-| `/home/pi/pihole/` | Where the compose stack is deployed. Hardcoded in both scripts, so don't move it. |
+| `/home/pi/pihole/` | Where the compose stack and `start-containers.sh` are deployed. Hardcoded in both scripts, so don't move it. |
+| `/root/pihole/main.sh` | Where `main.sh` is deployed (root-owned, mode 700): root's cron runs it, and it holds no secrets but runs apt and reboots, so it lives with root like the other hosts' nightly scripts (`/root/wazuh/main.sh`, `/root/vps/main.sh`). |
 | `/home/pi/pihole/data/etc-pihole/` | Bind mount for `/etc/pihole` (gravity DB, FTL DB, TLS cert). **Create it before the first `up`.** |
 | `/mnt/truenas-logs/pihole/` | TrueNAS NFS mount where `main.sh` writes its logs. If it isn't mounted, the logs go nowhere useful. |
 
@@ -197,8 +198,8 @@ Because of that, the VM must have nothing else on 53 or 443, or the Pi-hole cont
 
 | Script | Purpose |
 | ------ | ------- |
-| **`start-containers.sh`** | `docker compose up -d --force-recreate` from `/home/pi/pihole`. Runs `@reboot` via root cron. The `--force-recreate` is what actually **deploys the images `main.sh` pulled**, so it's the second half of the update cycle, not just a boot script. |
-| **`main.sh`** | Nightly maintenance, run by root cron at **04:15**. |
+| **`start-containers.sh`** | `docker compose up -d --force-recreate` from `/home/pi/pihole`. Runs `@reboot` via root cron, and `main.sh` calls it directly when no reboot is needed. The `--force-recreate` is what actually **deploys the images `main.sh` pulled**, so it's the second half of the update cycle, not just a boot script. |
+| **`main.sh`** | Nightly maintenance, deployed as `/root/pihole/main.sh`, run by root cron at **04:15**. |
 
 ### What `main.sh` actually does
 
@@ -206,11 +207,13 @@ Because of that, the VM must have nothing else on 53 or 443, or the Pi-hole cont
 2. **Stop the stack**: `docker compose down`, then polls up to 30s for every service to actually be stopped
 3. **Image update**: for each service, compares local vs pulled image ID, pulls with 3 retries, `docker rmi -f` on the superseded image. It **does not bring the stack back up.**
 4. **System update**: `dpkg --configure -a`, `apt-get update`, `openssh-server` upgraded with `UCF_FORCE_CONFFOLD=1` (keeps existing config), `upgrade`, `full-upgrade` (all with `--force-confdef --force-confold`, so an edited config like `squid.conf` is kept instead of stalling on dpkg's prompt; the new default lands as `<file>.dpkg-dist`; held packages such as `wazuh-agent` are skipped), `autoremove --purge`, `clean`
-5. **`reboot -h now`** unconditionally
+5. **Reboot only if needed**: when a package wrote `/var/run/reboot-required`, or `needrestart -b -k` reports that a newer kernel is installed than the one running (`NEEDRESTART-KSTA` 2 or 3), it reboots and `start-containers.sh` brings the stack back `@reboot`. Otherwise it runs `start-containers.sh` itself straight away.
 
-> ⚠️ Two things worth knowing before you copy this:
-> * **DNS is down from step 2 until the box finishes rebooting.** The stack is deliberately not restarted mid-script; `start-containers.sh` brings it back at boot. Have a second resolver configured on your clients or DHCP.
-> * **The reboot is unconditional**, not "if a kernel update landed".
+The kernel check matters on Debian: `/var/run/reboot-required` is an Ubuntu habit, and on Debian a kernel update doesn't reliably write it, so the flag alone would skip reboots after kernel updates. **Install `needrestart`** (`sudo apt install needrestart`) for that check. It also restarts, right after each apt run, any service still running an old library (sshd, squid, ...; `NEEDRESTART_MODE=a`, no prompt), which is what makes skipping the reboot safe. Without it the script falls back to the flag file only.
+
+> ⚠️ **DNS is down from step 2 until the stack is back up** (end of the script, or after the reboot). Have a second resolver configured on your clients or DHCP. The VM itself resolves through `1.1.1.3` (see `/etc/resolv.conf` under Deployment Steps), so it can still update while Pi-hole is down.
+
+6. **Report**: one JSON status line in `/var/log/maint-status.jsonl` (ok / degraded / fail, what failed, apt packages, images updated, reboot or containers restarted, held packages with a newer version). The Wazuh agent ships it and Discord gets the nightly report in **#maintenance of the Pi-Hole category**: 🟢 ok, 🔵 ok with an updated image, 🟠 degraded, 🔴 fail, with an @ on anything but a plain 🟢. If the script stops early (gravity fails, the containers don't stop), an EXIT trap still writes a `fail` line saying where. Setup on the Wazuh side: [`../Vaultwarden/wazuh-home/README.md`](../Vaultwarden/wazuh-home/README.md), "Maintenance report of the other hosts".
 
 Logs, each with 30-day retention pruning:
 
@@ -223,9 +226,11 @@ Logs, each with 30-day retention pruning:
 `root_crontab.txt`:
 
 ```cron
-@reboot /home/pi/pihole/start-containers.sh > /dev/null 2>&1
-15 4 * * * /home/pi/pihole/main.sh
+@reboot /bin/bash -lc '/home/pi/pihole/start-containers.sh' > /dev/null 2>&1
+15 4 * * * /bin/bash -lc '/root/pihole/main.sh' > /dev/null 2>&1
 ```
+
+Same cron line format as the other hosts' nightly scripts (wazuh-home 03:30, Pi-hole 04:15, VPS 05:00, Vault VM 05:35); the file's header has the full order.
 
 Both entries must be in **root's** crontab. `main.sh` runs `apt-get` and `reboot` with no `sudo`, so it fails as a normal user.
 
@@ -277,11 +282,16 @@ Both entries must be in **root's** crontab. `main.sh` runs `apt-get` and `reboot
 
    It prints an `N FTLCONF environment variables found (X used, Y invalid, Z ignored)` line, plus "did you mean" suggestions for anything it didn't recognize.
 
-5. **Load the crontab entries**
+5. **Install `main.sh` and load the crontab entries**
 
    ```bash
+   sudo mkdir -p /root/pihole
+   sudo install -m 700 -o root -g root main.sh /root/pihole/main.sh
+   sudo apt install needrestart     # kernel check for the reboot decision, see above
    sudo crontab -e
    ```
+
+   For the nightly Discord report: `sudo touch /var/log/maint-status.jsonl`, add [`host-maint.localfile.xml`](../Vaultwarden/wazuh-home/maintenance/host-maint.localfile.xml) to the Wazuh agent's `ossec.conf` (then `sudo systemctl restart wazuh-agent`), and install [`logrotate-maint-status`](../Vaultwarden/wazuh-home/maintenance/logrotate-maint-status) as `/etc/logrotate.d/maint-status`.
 
    Paste the contents of `root_crontab.txt`.
 

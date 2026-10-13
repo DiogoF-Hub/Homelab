@@ -1,2 +1,25 @@
-@reboot /home/pi/pihole/start-containers.sh > /dev/null 2>&1
-15 4 * * * /home/pi/pihole/main.sh
+# Root crontab on the LAN Pi-hole VM.
+#
+# Install with: sudo crontab -e (as root) and paste the line(s) below.
+# Verify with:  sudo crontab -l
+#
+# Nightly: /root/pihole/main.sh (apt update / upgrade / autoremove, reboot only if
+# needed). Same script pattern and same cron line on every host, only
+# the path and the time differ. See ./main.sh for the full flow.
+#
+# @reboot brings the Pi-hole stack back after a reboot (and deploys the
+# images main.sh pulled); main.sh also calls it itself when it doesn't
+# reboot.
+#
+# Nightly order across the hosts, each run well clear of the one before:
+#   03:30 wazuh-home   /root/wazuh/main.sh   first: if it reboots, the
+#                                            manager is back before the
+#                                            other hosts' events arrive
+#   04:15 Pi-hole VM   /root/pihole/main.sh  done before the Vault VM
+#                                            needs its DNS + Squid
+#   05:00 edge VPS     /root/vps/main.sh
+#   05:35 Vault VM     Vaultwarden/root_crontab.txt
+#
+# Format: minute hour day-of-month month day-of-week command
+@reboot /bin/bash -lc '/home/pi/pihole/start-containers.sh' > /dev/null 2>&1
+15 4 * * * /bin/bash -lc '/root/pihole/main.sh' > /dev/null 2>&1

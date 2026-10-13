@@ -49,7 +49,7 @@ Homelab/
 │   │   ├── README.md                         # VPS provisioning + ops doc (Hetzner setup, PTR, DNS, UFW, WireGuard, nginx stream + PROXY, OPNsense WG, CrowdSec firewall bouncer)
 │   │   ├── crowdsec/                         # CrowdSec firewall bouncer config (nftables, pulls bans from home LAPI over the WG tunnel, drops banned IPs at the VPS edge)
 │   │   ├── nginx/                            # nginx stream config (raw TCP passthrough with PROXY protocol)
-│   │   ├── scripts/                          # nightly maintenance: auto-update.sh (apt + unconditional reboot) + root_crontab.txt
+│   │   ├── scripts/                          # nightly maintenance: main.sh (apt, reboot only if needed) + root_crontab.txt
 │   │   └── wireguard/                        # WG tunnel config template
 │   ├── vault_domains_allow_dns.txt           # Pi-hole allowlist for the vaultwarden-vm group (gravity/ABP-syntax mirror of the Squid allowlist; consumed via Pi-hole's "Add allowlist" URL feature)
 │   ├── wazuh-home/                           # Targets the wazuh-home VM (Wazuh manager) + sidecar daemon for the LAN Pi-hole VM
@@ -117,7 +117,7 @@ Runs on a **dedicated Debian 13 VM in Proxmox** on the LAN. The same VM also run
   * DNS chokepoint for the Vaultwarden VM (strict per-client allowlist, every query shipped to Wazuh by a sidecar), with Squid next to it as the HTTP/HTTPS chokepoint
 * **Scripts**
 
-  * `main.sh` for daily maintenance (gravity update → stop containers → image update → system update → reboot)
+  * `main.sh` for daily maintenance (gravity update → stop containers → image update → system update → reboot only if the update needs it, otherwise start the containers again), ending with a status line for the nightly Discord report
   * `start-containers.sh` to bring services up at boot
   * `root_crontab.txt` documenting the cron entries
 
@@ -194,6 +194,57 @@ See [`Minecraft-Server/README.md`](./Minecraft-Server/README.md) for the full de
 ### **Tailscale Windows VPN On-Demand**
 
 This setup has been **migrated to its own dedicated repository**; the folder here is kept only as a read-only pointer. See [`Tailscale Windows VPN on demand/README.md`](./Tailscale%20Windows%20VPN%20on%20demand/README.md) for the link.
+
+---
+
+## 🔔 Monitoring and Discord alerts
+
+Everything worth knowing about ends up in one private Discord server. **Wazuh** (the `wazuh-home` VM) collects the logs of every VM and decides what's worth a message, and one small script posts it to the right channel.
+
+### How it works
+
+```
+log line on a VM ──► Wazuh agent ──► wazuh-home ──► decoder + rule ──► alert ──► custom-discord ──► webhook ──► Discord channel
+                                     (manager)                                  (filters, formats,
+                                                                                 picks the channel,
+                                                                                 decides the @)
+```
+
+1. **Each VM writes what happens to a log file.** Some are standard (`fail2ban.log`, `dpkg.log`, Squid's `access.log`). Others are written for Wazuh on purpose: small sidecars turn Pi-hole's query database and ModSecurity's audit log into clean JSON lines, and every nightly maintenance script ends with one JSON status line. OPNsense has no agent and sends its firewall log over syslog instead.
+2. **The Wazuh agent on each VM ships those lines** to the manager on `wazuh-home`, encrypted, over TCP 1514.
+3. **The manager decodes each line and runs it through the rules.** Each pipeline has its own block of rule IDs, and the rule's level says how serious it is. Everything is stored in the Wazuh dashboard (alerts 180 days), whether it reaches Discord or not.
+4. **A few rules are wired to the integrator.** The `<integration>` blocks in the manager's `ossec.conf` decide which alerts are handed to `custom-discord`, a single Python script (stdlib only).
+5. **`custom-discord` does the last step.** It drops what isn't worth a message (e.g. resolved DNS queries, repeats of the same firewall block within 3 minutes), builds a Discord embed, picks the channel's webhook, and adds an **@** only when something needs a look.
+
+The webhook URLs and the @ live only on the manager, in `/var/ossec/integrations/discord-webhooks.json` (template: [`discord-webhooks.json.example`](Vaultwarden/wazuh-home/integrations/discord-webhooks.json.example)). Each Discord category has its own webhook bot (name + logo), so you can tell at a glance which host is talking. A channel whose webhook isn't set stays quiet; a host's maintenance report and #config-files fall back to Vaultwarden's #maintenance until theirs is set.
+
+### The channels
+
+**When you get an @:** every message in an alert channel pings. The nightly maintenance reports only ping when the run was degraded or failed, or when a container image was updated (a new release just went live). A plain 🟢 OK report arrives silently.
+
+| Category | Channel | What posts there |
+|----------|---------|------------------|
+| General | #agents | a Wazuh agent has had no contact with the manager for 15 min (VM down or hung, agent stopped, network cut). A normal reboot's clean stop/start isn't posted. |
+| General | #config-files | a nightly upgrade on any VM kept a locally edited config file and saved the package's new default as `.dpkg-dist`, so you can compare them. |
+| Vaultwarden | #maintenance | the Vault VM's nightly report: backup, container images (old → new version), APT upgrades, reboot, and a newer `wazuh-agent` when one is out. |
+| Vaultwarden | #modsecurity-blocks | BunkerWeb's WAF saw a real attack (CRS anomaly score ≥ 30). |
+| Vaultwarden | #dns-block | the Vault VM asked Pi-hole for a domain that isn't on its allowlist. |
+| Vaultwarden | #squid-block | Squid refused an outbound request from the Vault VM (domain not allowlisted). |
+| Vaultwarden | #firewall | OPNsense blocked a new connection from or to the Vault VM. |
+| Vaultwarden | #fail2ban | fail2ban banned an IP for SSH brute force, on any home VM. |
+| Vaultwarden | #crowdsec | planned: CrowdSec doesn't feed Wazuh yet, so nothing posts here for now. |
+| Pi-Hole | #maintenance | the Pi-hole VM's nightly report: Docker images, APT, reboot or containers restarted, any problem (e.g. gravity update failed), and a newer `wazuh-agent` when one is out. |
+| Wazuh | #maintenance | wazuh-home's nightly report: APT, reboot, and **a newer Wazuh version** for the held packages (the cue for [`UPGRADE.md`](Vaultwarden/wazuh-home/UPGRADE.md)). |
+| VPS | #maintenance | the edge VPS's nightly report. Starts once the VPS has a Wazuh agent; the script already writes the status line. |
+
+Maintenance colours: 🟢 OK, 🔵 OK with updated container images, 🟠 degraded (finished, but something went wrong), 🔴 failed (the run stopped early, the message says at which step).
+
+### What it can't tell you
+
+- **wazuh-home itself being down.** It's the one that sends the messages, so if it's down, nothing arrives. Silence on a night with no 🟢 Wazuh report is the hint.
+- **A maintenance run that never started** (cron broken, VM off). The report fires when a run finishes. For the Vault VM, an external dead-man's switch (`DEADMAN_URL`) covers this.
+
+Rule IDs, decoders, the integrator and every `<integration>` block are in [`Vaultwarden/wazuh-home/`](Vaultwarden/wazuh-home/README.md); the per-channel table with the exact rules is in [`Vaultwarden/README.md` § Discord notifications](Vaultwarden/README.md#discord-notifications).
 
 ---
 

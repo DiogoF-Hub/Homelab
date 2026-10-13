@@ -18,3 +18,6 @@ Minecraft-Server/data/
 Minecraft-Server/mods/
 Minecraft-Server/backups/
 Minecraft-Server/logs/
+
+# Wazuh: real Discord webhook URLs stay on the manager, only the .example is committed
+discord-webhooks.json

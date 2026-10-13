@@ -1,6 +1,6 @@
 # Wazuh visibility + alerting for the Vaultwarden stack
 
-This folder holds the Wazuh-side configuration for the Vaultwarden stack: structured log pipelines into the Wazuh manager (`wazuh-home`), plus per-source Discord notifications via one integrator. It started as DNS-only visibility and has grown to seven sources.
+This folder holds the Wazuh-side configuration for the Vaultwarden stack: structured log pipelines into the Wazuh manager (`wazuh-home`), plus per-source Discord notifications via one integrator. It started as DNS-only visibility and has grown to eight sources.
 
 ## Pipelines at a glance
 
@@ -10,11 +10,13 @@ This folder holds the Wazuh-side configuration for the Vaultwarden stack: struct
 | **ModSecurity** (BunkerWeb WAF) | CRS matches, tiered by anomaly score | 100300-100303 | #modsec, `band=high` (score ≥ 30) |
 | **fail2ban** (all hosts) | SSH brute-force bans | 100400-100401 | #fail2ban, every ban |
 | **Squid** (LAN Pi-hole VM) | egress-allowlist denials | built-in `squid` group | #squid, `action=TCP_DENIED` |
+| **host maintenance** (Pi-hole VM, wazuh-home, VPS `main.sh`) | nightly run summary per host (apt, reboot, Pi-hole images) | 100510-100512 | #maintenance of each host's Discord category, @ on degraded/fail or updated Pi-hole images |
 | **maintenance** (Vault VM `main.sh`) | nightly run summary (backup / docker / apt / reboot) | 100500-100502 | #maintenance, every run (green OK; @ on degraded/fail or updated images) |
-| **dpkg config files** (all hosts) | an upgrade kept a locally edited config file | 100600-100601 | #maintenance, @ on every `keep` |
+| **dpkg config files** (all hosts) | an upgrade kept a locally edited config file | 100600-100601 | #config-files, @ on every `keep` |
+| **Agent health** (all agents) | an agent has had no contact for 15 min | built-in 504 | #agents, @ every time |
 | **OPNsense firewall** (syslog) | blocked traffic from / to the Vault VM | 100700-100701 (on built-in 87701) | #firewall, once per connection per 3 min |
 
-One integrator, `integrations/custom-discord.py`, fans these out to per-channel Discord webhooks (the data-field filter lives in the script + a `discord-webhooks.json` side-file on the manager holds the real URLs; `integrations/manager-discord-integration.xml` has the `<integration>` blocks that decide which alerts reach it). Rule-ID map: DNS 100250-100253, ModSecurity 100300-100303, fail2ban 100400-100401, maintenance 100500-100502, dpkg config files 100600-100601, OPNsense firewall 100700-100701 (the retired text-log DNS pipeline used 100190-100210; keep new pipelines clear of those).
+One integrator, `integrations/custom-discord.py`, fans these out to per-channel Discord webhooks (the data-field filter lives in the script + a `discord-webhooks.json` side-file on the manager holds the real URLs; `integrations/manager-discord-integration.xml` has the `<integration>` blocks that decide which alerts reach it). Rule-ID map: DNS 100250-100253, ModSecurity 100300-100303, fail2ban 100400-100401, maintenance 100500-100502, host maintenance 100510-100512, dpkg config files 100600-100601, OPNsense firewall 100700-100701 (the retired text-log DNS pipeline used 100190-100210; keep new pipelines clear of those).
 
 Squid has no files in this folder beyond its `<integration>` block: the Wazuh agent installer auto-discovers `/var/log/squid/access.log` on the LAN Pi-hole VM (as long as Squid is installed before the agent), and the squid decoder/rules are built into Wazuh, so there's nothing custom to deploy for it.
 
@@ -30,12 +32,13 @@ wazuh-home/
 ├── dns/           manager-rules.xml + pihole-agent.localfile.xml
 ├── modsec/        manager-modsec-rules.xml + vault-modsec-agent.localfile.xml
 ├── fail2ban/      manager-fail2ban-decoder.xml + manager-fail2ban-rules.xml + fail2ban-agent.localfile.xml
-├── maintenance/   manager-maint-rules.xml + vault-maint-agent.localfile.xml
+├── maintenance/   manager-maint-rules.xml + vault-maint-agent.localfile.xml (Vault VM); manager-host-maint-rules.xml + host-maint.localfile.xml + logrotate-maint-status (Pi-hole VM, wazuh-home, VPS)
 ├── dpkg/          manager-dpkg-decoder.xml + manager-dpkg-rules.xml   (no agent file: /var/log/dpkg.log is a default localfile)
 ├── opnsense/      README.md + rsyslog-opnsense.conf + logrotate-opnsense + manager-opnsense-localfile.xml + manager-opnsense-rules.xml   (no agent: OPNsense sends syslog)
 ├── manager/       manager-global.snippet.xml          (logall_json; manager-wide, not pipeline-specific)
-├── integrations/  custom-discord.py + manager-discord-integration.xml
+├── integrations/  custom-discord.py + manager-discord-integration.xml + discord-webhooks.json.example
 ├── retention/     ism-delete-30d.json + ism-delete-180d.json + wazuh-log-cleanup.{sh,service,timer}   (manager host)
+├── scripts/       main.sh + root_crontab.txt   (manager host: nightly apt full-upgrade, logs to TrueNAS, reboot only if required)
 ├── UPGRADE.md     step-by-step Wazuh upgrade: manager host first, then the agents (all packages are apt-held)
 └── sidecar/
     ├── pihole/    pihole-ftl-tail.py + .service        (installs on the LAN Pi-hole VM)
@@ -337,7 +340,7 @@ Every agent already tails `/var/log/dpkg.log` (the agent installer adds it), so 
 
 - `dpkg/manager-dpkg-decoder.xml` , `dpkg-conffile`, a child of Wazuh's built-in `windows-date-format` decoder (which only recognises the timestamp), extracting `dpkg_conffile` and `dpkg_decision`.
 - `dpkg/manager-dpkg-rules.xml` , 100600 (base, L0, any decision) + 100601 (`keep`, L7).
-- `integrations/manager-discord-integration.xml` , the `rule_id 100601` block; `custom-discord.py` posts "📝 Upgrade kept a local config file" with host, file and the `diff` command to compare, to #maintenance with an @.
+- `integrations/manager-discord-integration.xml` , the `rule_id 100601` block; `custom-discord.py` posts "📝 Upgrade kept a local config file" with host, file and the `diff` command to compare, to #config-files with an @ (webhook key `conffile`; until that key is in `discord-webhooks.json` it falls back to #maintenance).
 
 Test before restarting: `sudo /var/ossec/bin/wazuh-logtest`, paste the sample line above, expect phase 2 `dpkg_conffile: '/etc/squid/squid.conf'`, `dpkg_decision: 'keep'` and phase 3 rule `100601`.
 
@@ -355,6 +358,36 @@ One blocked TCP connect logs several lines (SYN retries) and a scan logs hundred
 
 Test: from the Vault VM, `curl --noproxy '*' -m 5 http://1.1.1.1` (times out) → one #firewall message, and a second run within 3 minutes stays quiet. Full setup (OPNsense side included), tests and gotchas: [`opnsense/README.md`](opnsense/README.md).
 
+## Agent disconnected (built-in rule 504)
+
+Wazuh's own rule **504** fires when the manager hasn't heard from an agent for `agents_disconnection_time` (15 min in the manager's `ossec.conf`, alert immediately after: `agents_disconnection_alert_time` 0). `custom-discord.py` posts it to **#agents** with an @: the VM is down or hung, the agent is stopped, or the network / firewall cuts it off from `wazuh-home`, and either way its logs aren't arriving.
+
+Rules **506** (agent stopped) and **503** (agent started) are deliberately **not** posted: every reboot produces that clean pair (the Vault VM's nightly one at 05:35, for example), which would ping every night for nothing. A stopped agent that doesn't come back still trips 504 fifteen minutes later. Nothing custom on the rule side, only the `rule_id 504` block in `integrations/manager-discord-integration.xml` and the `"agents"` webhook key.
+
+Test: on any agent VM, `sudo systemctl stop wazuh-agent`, wait about 16 minutes → one message in #agents; then `sudo systemctl start wazuh-agent`.
+
+## Maintenance report of the other hosts (Pi-hole VM, wazuh-home, VPS)
+
+The nightly `main.sh` on the Pi-hole VM, `wazuh-home` and the edge VPS ends every run with **one JSON line** in `/var/log/maint-status.jsonl` (`event_type=host_maint`, `role` = `pihole` / `wazuh` / `vps`). The same small block of shell sits near the top of all three scripts. It's simpler than the Vault VM's multi-phase pipeline below because each of these runs is one script:
+
+| Field | Meaning |
+|---|---|
+| `status` / `maint_sev` | `ok` (info), `degraded` (a step failed, the run went on) or `fail` (the run stopped early, or Pi-hole was left down); `maint_sev` is what the rules match, `status` being a static Wazuh field |
+| `errors` | `;`-separated list of what went wrong; an unexpected exit is reported as "run stopped early (exit N) during: <step>" by an EXIT trap |
+| `apt_count` / `apt_upgraded` | packages about to be upgraded, captured right after `apt-get update` (held ones left out) |
+| `held_updates` | held packages with a newer version waiting, e.g. `wazuh-manager → 4.14.9-1` on wazuh-home: the cue for [`UPGRADE.md`](UPGRADE.md) |
+| `reboot` | `not needed` or `rebooting (<reason>)` |
+| `images_updated`, `pull_failures`, `containers` | Pi-hole VM only |
+
+On a reboot the line is written first and the script waits 10 s (15 s on `wazuh-home`, which has to process its own line and post it) before rebooting, so it's shipped before the agent stops.
+
+- `maintenance/host-maint.localfile.xml` , the `<localfile>` (json) for `/var/log/maint-status.jsonl`, on each of those hosts (on `wazuh-home` in the manager's own `ossec.conf`).
+- `maintenance/logrotate-maint-status` , `/etc/logrotate.d/maint-status` on each host (monthly, `copytruncate`).
+- `maintenance/manager-host-maint-rules.xml` , 100510 (base, L0) / 100511 (ok, L3) / 100512 (degraded or fail, L11).
+- `integrations/manager-discord-integration.xml` , the `rule_id 100511,100512` block. `custom-discord.py` posts to the `#maintenance` channel of the host's Discord category (webhook keys `maintenance-pihole`, `maintenance-wazuh`, `maintenance-vps`; until a key is set, that host's report goes to the Vault VM's #maintenance). Same look as the Vault VM's report: 🟢 ok, 🔵 ok with updated Pi-hole images, 🟠 degraded, 🔴 fail; @ on degraded / fail and on updated images.
+
+The VPS already writes the line, but it has no Wazuh agent yet, so its report starts once the agent is installed (after `wazuh-home` moves to its own VLAN).
+
 ## Maintenance run summary (Vault VM `main.sh`)
 
 The nightly maintenance run (`main.sh` → backup / docker-update / system-update / reboot) emits a structured JSON status log; the Vault VM agent ships it, and the manager turns the run rollup into one nightly #maintenance Discord report (a green OK heartbeat, or an @ on degraded/fail). It also @s you on a clean run when a container image was updated (🔵, with old → new version and a release-notes link per image), since the new release goes live at the reboot that follows. This is the Phase A work from `Vaultwarden/ideas.md` idea #7. The external `DEADMAN_URL` stays as the independent "did it run at all" net, a completed-run summary can't catch a run that never happened.
@@ -368,12 +401,30 @@ The run rules match a **derived `vw_sev`** field (`info`/`warn`), NOT `status`: 
 
 ## Discord notifications (custom-discord integrator)
 
-`integrations/custom-discord.py` is one Wazuh integrator all seven sources route through. It holds a **per-channel webhook map** (placeholders in the repo; the real URLs live in a gitignored `discord-webhooks.json` side-file on the manager, mode `0640 root:wazuh`, whose keys override the placeholders at startup, so re-installing the script never clobbers them, fill them once; an optional `"mention": "<@your-user-id>"` key in the same file is the @ the pinging messages use) and applies the final data-field filter each source needs (dns: `status=blocked-regex`; squid: `action=TCP_DENIED`; modsec: `band=high`; fail2ban: rule 100401; maintenance: rules 100501/100502, @ when `status != ok` or an image was updated; conffile: rule 100601, always @; firewall: rules 100700/100701, new connections only (no broadcast/multicast or out-of-state TCP), once per src -> dst:port/proto per 3 min). It posts native Discord embeds (GeoIP-enriched for public source IPs), stdlib-only (urllib).
+`integrations/custom-discord.py` is one Wazuh integrator all eight sources route through. It holds a **per-channel webhook map** (placeholders in the repo; the real URLs live in a gitignored `discord-webhooks.json` side-file on the manager, mode `0640 root:wazuh`, whose keys override the placeholders at startup, so re-installing the script never clobbers them, fill them once; an optional `"mention": "<@your-user-id>"` key in the same file is the @ the pinging messages use) and applies the final data-field filter each source needs (dns: `status=blocked-regex`; squid: `action=TCP_DENIED`; modsec: `band=high`; fail2ban: rule 100401; maintenance: rules 100501/100502, @ when `status != ok` or an image was updated; host maintenance: rules 100511/100512, to `maintenance-<role>`, same @ rule; conffile: rule 100601, always @; firewall: rules 100700/100701, new connections only (no broadcast/multicast or out-of-state TCP), once per src -> dst:port/proto per 3 min). It posts native Discord embeds (GeoIP-enriched for public source IPs), stdlib-only (urllib).
 
 - `integrations/custom-discord.py` , install at manager `/var/ossec/integrations/custom-discord` (mode 0750, `root:wazuh`; note: no `.py`, that's the name integratord calls).
 - `integrations/manager-discord-integration.xml` , the `<integration>` blocks (one per source, scoped by group / rule_id / level) for the manager's `ossec.conf`.
+- `integrations/discord-webhooks.json.example` , template for `/var/ossec/integrations/discord-webhooks.json`: every webhook key plus `mention`. Copy it there, fill in the real URLs, `sudo chown root:wazuh` and `sudo chmod 0640` it, then check it with `sudo python3 -m json.tool <file> >/dev/null && echo JSON OK`. A key left on its placeholder just stays quiet.
 
 Gotcha baked into the script: Discord's API is Cloudflare-fronted and **403s the default `Python-urllib` User-Agent**, so `send_discord` sets a `DiscordBot (...)` UA. The manager needs egress to `discord.com:443`.
+
+## OS updates (manager host)
+
+`scripts/main.sh` keeps `wazuh-home` itself patched, deployed as `/root/wazuh/main.sh` and run by root's cron at **03:30** (`scripts/root_crontab.txt`), first of the nightly runs so the manager is back before the other hosts' events arrive. It waits for the apt/dpkg lock, checks that the TrueNAS log share (`/mnt/truenas-logs`) is mounted, then runs `dpkg --configure -a`, `apt-get update`, openssh-server first, `full-upgrade`, `autoremove --purge` and `clean`, logging to `/mnt/truenas-logs/wazuh/system/system-autoupdate-<date>.log` (30 days kept). It reboots only when the update needs it: a package wrote `/var/run/reboot-required`, or `needrestart -b -k` reports a newer kernel installed than the one running. On Debian a kernel update doesn't reliably write the flag file, so **install `needrestart`** (`sudo apt install needrestart`); it also restarts services still running old libraries right after each apt run (`NEEDRESTART_MODE=a`), which is what makes skipping the reboot safe. Without it the script falls back to the flag file only.
+
+- **The Wazuh packages are held** (`wazuh-manager`, `wazuh-indexer`, `wazuh-dashboard`, `filebeat`), so `full-upgrade` lists them as kept back and skips them. Upgrade them by hand with [`UPGRADE.md`](UPGRADE.md).
+- **Edited config files are kept** (`--force-confdef --force-confold`, same as the Vault VM and Pi-hole VM scripts), so an edited file never stops the run at dpkg's prompt. The new default lands next to it as `.dpkg-dist`, and since the manager reads its own `/var/log/dpkg.log`, that also posts the 📝 #config-files message (rule 100601).
+- It sends nothing to Discord itself. Unlike the Vault VM's `main.sh`, there's no nightly summary; the log on TrueNAS is the record.
+
+Deploy:
+
+```bash
+sudo mkdir -p /root/wazuh
+sudo install -m 700 -o root -g root main.sh /root/wazuh/main.sh
+sudo apt install needrestart
+sudo crontab -e        # paste the line from scripts/root_crontab.txt
+```
 
 ## Retention and indexer sizing (manager host)
 
@@ -451,5 +502,4 @@ Leave `/var/ossec/queue/vd` alone (about 11 GB): it's the CVE database for vulne
 The DNS allowlist-anomaly alerting once sketched here is done (Pi-hole regex + rule 100252, above), and the Vault VM maintenance-status pipeline is now live (JSON status log → rules 100500-100502 → #maintenance, see above). Remaining Wazuh build-out, tracked in `Vaultwarden/ideas.md` idea #7:
 
 - The **no-run-in-25h** deadman-equivalent rule (alert when no `phase=run` event arrives within 25h). NOT built, and awkward in Wazuh (rules fire on an event, not on its absence; and if the VM is dead the agent is too, so an on-box rule can't fire for the case that matters most). `DEADMAN_URL` stays as the external net for "the run never happened" rather than being replaced.
-- Agent-down notifications (rule 504). Investigated and parked: the nightly reboots show as clean stop/start (506/503) within the ~10-min disconnect threshold so they don't false-fire, but the channel isn't wired.
 - Shipping the Vault VM's own `vw-logs/` + `bw-logs/` and FIM on `/srv/vw-data`, compose files, etc.

@@ -87,8 +87,8 @@ vaultwarden/
 │   └── wireguard/
 │       └── wg0.conf.template                  # WG tunnel config template (10.10.10.0/30, point-to-point with OPNsense)
 │
-├── wazuh-home/                                # Targets the wazuh-home VM (Wazuh manager) + sidecars on the Vault VM and LAN Pi-hole VM. Visibility + per-source Discord alerting across 6 pipelines (DNS / ModSecurity / fail2ban / Squid / maintenance / dpkg config files); see wazuh-home/README.md. Snippets grouped one folder per pipeline
-│   ├── README.md                              # Architecture, apply order, verification for all seven pipelines + the Discord integrator
+├── wazuh-home/                                # Targets the wazuh-home VM (Wazuh manager) + sidecars on the Vault VM and LAN Pi-hole VM. Visibility + per-source Discord alerting across 8 pipelines (DNS / ModSecurity / fail2ban / Squid / maintenance / host maintenance / dpkg config files / OPNsense firewall); see wazuh-home/README.md. Snippets grouped one folder per pipeline
+│   ├── README.md                              # Architecture, apply order, verification for all eight pipelines + the Discord integrator
 │   ├── dns/                                   # DNS pipeline (Pi-hole FTL)
 │   │   ├── manager-rules.xml                  # DNS rules 100250-100253 (base / resolved L3 / Pi-hole-policy block L6 / upstream no-answer L4)
 │   │   └── pihole-agent.localfile.xml         # <localfile> for the Pi-hole VM's agent (tails the sidecar's vault-dns/events.log)
@@ -106,7 +106,8 @@ vaultwarden/
 │   │   └── manager-global.snippet.xml         # logall_json toggle for the wazuh-home <global> block
 │   ├── integrations/                          # the Discord integrator + its routing blocks
 │   │   ├── custom-discord.py                  # Manager-side Discord integrator: per-channel webhooks (placeholders in repo, real URLs in a gitignored discord-webhooks.json side-file on the manager), GeoIP embeds, stdlib-only
-│   │   └── manager-discord-integration.xml    # <integration> blocks (one per source) routing alerts to the integrator
+│   │   ├── manager-discord-integration.xml    # <integration> blocks (one per source) routing alerts to the integrator
+│   │   └── discord-webhooks.json.example      # template for the manager's discord-webhooks.json (every webhook key + mention)
 │   └── sidecar/                               # log-flattening daemons, one dir per host
 │       ├── pihole/                            # runs on the LAN Pi-hole VM
 │       │   ├── pihole-ftl-tail.py             # polls FTL SQLite DB, emits one JSON event per query
@@ -1115,24 +1116,27 @@ The Wazuh apt repo (`packages.wazuh.com`) is configured on each VM, but **`wazuh
 
 ### Discord notifications
 
-One `custom-discord` integrator on the manager posts every notification, one Discord channel per source. The webhook URLs and the @ mention live in `/var/ossec/integrations/discord-webhooks.json` on the manager (`0640 root:wazuh`, not in the repo; the script only carries placeholders), so re-installing the script never resets them. Decoders, rules, the integrator and the `<integration>` blocks are all in [`wazuh-home/`](./wazuh-home/).
+One `custom-discord` integrator on the manager posts every notification, one Discord channel per source, grouped by category (General, Vaultwarden, Pi-Hole, Wazuh, VPS). How the whole chain works, in plain words: [main README § Monitoring and Discord alerts](../README.md#-monitoring-and-discord-alerts). The webhook URLs and the @ mention live in `/var/ossec/integrations/discord-webhooks.json` on the manager (`0640 root:wazuh`, not in the repo; the script only carries placeholders), so re-installing the script never resets them. Decoders, rules, the integrator and the `<integration>` blocks are all in [`wazuh-home/`](./wazuh-home/).
 
 | Channel | You get a message when | @ mention | Source → rules |
 |---------|------------------------|-----------|----------------|
-| #modsec | BunkerWeb's WAF sees a real attack (CRS anomaly score ≥ 30, `band=high`) | yes | Vault VM `modsec-tail` sidecar → 100303 |
-| #dns | the Vault VM tries to resolve a domain that isn't on its Pi-hole allowlist (`blocked-regex`) | yes | Pi-hole FTL sidecar → 100252 |
-| #squid | Squid refuses an outbound request from the Vault VM (`TCP_DENIED`, domain not allowlisted) | yes | Pi-hole VM `access.log` → built-in squid rules |
-| #firewall | OPNsense blocks traffic from or to the Vault VM (new connection attempts only, once per source → destination:port per 3 min; broadcast / multicast and leftover packets of already-closed connections skipped) | yes | OPNsense syslog → 100700 (from the VM) / 100701 (to the VM) |
-| #fail2ban | fail2ban bans an IP for SSH brute force on a home VM | yes | every agent's `fail2ban.log` → 100401 |
-| #maintenance | every night, the Vault VM maintenance summary: 🟢 OK, 🔵 OK with updated images (old → new version + release notes), 🟠 degraded, 🔴 failed; also lists APT upgrades and a newer held `wazuh-agent` | only on degraded / failed or updated images | Vault VM `main.sh` status log → 100501 / 100502 |
-| #maintenance | an upgrade kept a locally edited config file and saved the new default as `.dpkg-dist` (any VM) | yes | every agent's `dpkg.log` → 100601 |
+| Vaultwarden → #modsecurity-blocks | BunkerWeb's WAF sees a real attack (CRS anomaly score ≥ 30, `band=high`) | yes | Vault VM `modsec-tail` sidecar → 100303 |
+| Vaultwarden → #dns-block | the Vault VM tries to resolve a domain that isn't on its Pi-hole allowlist (`blocked-regex`) | yes | Pi-hole FTL sidecar → 100252 |
+| Vaultwarden → #squid-block | Squid refuses an outbound request from the Vault VM (`TCP_DENIED`, domain not allowlisted) | yes | Pi-hole VM `access.log` → built-in squid rules |
+| Vaultwarden → #firewall | OPNsense blocks traffic from or to the Vault VM (new connection attempts only, once per source → destination:port per 3 min; broadcast / multicast and leftover packets of already-closed connections skipped) | yes | OPNsense syslog → 100700 (from the VM) / 100701 (to the VM) |
+| Vaultwarden → #fail2ban | fail2ban bans an IP for SSH brute force on a home VM | yes | every agent's `fail2ban.log` → 100401 |
+| Vaultwarden → #maintenance | every night, the Vault VM maintenance summary: 🟢 OK, 🔵 OK with updated images (old → new version + release notes), 🟠 degraded, 🔴 failed; also lists APT upgrades and a newer held `wazuh-agent` | only on degraded / failed or updated images | Vault VM `main.sh` status log → 100501 / 100502 |
+| Pi-Hole → #maintenance | every night, the Pi-hole VM's update run: gravity, Docker images (🔵 when one was updated), apt, reboot or containers restarted, and any held package with an update (`wazuh-agent`) | only on degraded / failed or updated images | Pi-hole VM `main.sh` → 100511 / 100512 |
+| Wazuh → #maintenance | every night, wazuh-home's update run: apt, reboot, and **a newer Wazuh version** for the held manager / indexer / dashboard / filebeat (the cue for `UPGRADE.md`) | only on degraded / failed | wazuh-home `main.sh` → 100511 / 100512 |
+| VPS → #maintenance | every night, the edge VPS's update run: apt, reboot. **Starts once the VPS has a Wazuh agent**; the script already writes the line. | only on degraded / failed | VPS `main.sh` → 100511 / 100512 |
+| General → #config-files | an upgrade kept a locally edited config file and saved the new default as `.dpkg-dist` (any VM) | yes | every agent's `dpkg.log` → 100601 |
+| General → #agents | a Wazuh agent has had no contact with the manager for 15 min (VM down or hung, agent stopped, network cut). The clean stop/start of a normal reboot isn't posted. | yes | built-in rule 504 |
 
 Planned, not built yet:
 
 | Notification | Status |
 |--------------|--------|
 | **CrowdSec** decisions (an IP banned by a BunkerWeb scenario or a blocklist hit) | Planned. CrowdSec doesn't ship anything to Wazuh in this stack today (it feeds the BunkerWeb bouncer and the VPS firewall bouncer directly), so this needs its own pipeline, not just a Discord formatter. |
-| **Wazuh agent down** (rules 504 / 506) | Planned, [ideas.md](ideas.md) #7. The formatter is already in the script, not wired. |
 | **Maintenance run missing** (no summary in 25 h: VM dead, cron broken) | Not built. `DEADMAN_URL` is the external net for this today; the nightly summary only fires when a run completes. |
 
 Also still ahead, tracked in [ideas.md](ideas.md) #7: shipping the Vault VM's own `bw-logs/` + `vw-logs/`, and FIM.
@@ -1146,7 +1150,7 @@ Also still ahead, tracked in [ideas.md](ideas.md) #7: shipping the Vault VM's ow
 
 - **CrowdSec**, tails `vaultwarden.log` + `access.log` + `error.log` + `modsec_audit.log` in real time, parses them, applies bouncer decisions back at BunkerWeb. The parser/scenario/whitelist files in `crowdsec/` are the contract between log format and detection rules.
 - **TrueNAS**, pulls the encrypted backup bundle + the four `/srv/logs/{main,backup,docker,system}/` phase logs via scp using the `fetcher` user (see [Off-site replication](#off-site-replication-truenas-via-cron)).
-- **Wazuh**, seven live pipelines into `wazuh-home`, each with per-channel Discord via the `custom-discord` integrator: DNS (Pi-hole FTL sidecar → rules 100250-100253), ModSecurity (Vault VM `modsec-tail` sidecar → 100300-100303, `band=high` pings), Squid (Pi-hole VM access.log → built-in squid decoder, `TCP_DENIED` pings), fail2ban (every host → custom `fail2ban-file` decoder + 100401), maintenance (Vault VM `main.sh` JSON status log → 100500-100502, nightly #maintenance report), dpkg config files (every host's `dpkg.log` → custom `dpkg-conffile` decoder + 100601, #maintenance), and OPNsense firewall blocks from / to the Vault VM (syslog → rsyslog keeps only the Vault VM's lines → built-in pf decoder + 100700-100701, #firewall). The Vault VM's own raw `vw-logs/` + `bw-logs/` are still not shipped (see [ideas.md](ideas.md) #7).
+- **Wazuh**, eight live pipelines into `wazuh-home`, each with per-channel Discord via the `custom-discord` integrator: DNS (Pi-hole FTL sidecar → rules 100250-100253), ModSecurity (Vault VM `modsec-tail` sidecar → 100300-100303, `band=high` pings), Squid (Pi-hole VM access.log → built-in squid decoder, `TCP_DENIED` pings), fail2ban (every host → custom `fail2ban-file` decoder + 100401), maintenance (Vault VM `main.sh` JSON status log → 100500-100502, nightly #maintenance report), host maintenance (the Pi-hole VM's, wazuh-home's and the VPS's `main.sh` status line → 100510-100512, #maintenance of each host's Discord category), dpkg config files (every host's `dpkg.log` → custom `dpkg-conffile` decoder + 100601, #config-files), and OPNsense firewall blocks from / to the Vault VM (syslog → rsyslog keeps only the Vault VM's lines → built-in pf decoder + 100700-100701, #firewall). The Vault VM's own raw `vw-logs/` + `bw-logs/` are still not shipped (see [ideas.md](ideas.md) #7).
 - **Operator**, `tail -f` for live debugging; log files are the source of truth for everything except the BW internal scheduler/UI/Redis logs (those are debug-only).
 
 ---

@@ -28,7 +28,16 @@
                connection per 3 min.
     - conffile: rule 100601 (dpkg kept a locally edited config file during
                an upgrade, new default saved as .dpkg-dist). Any agent;
-               posted to the #maintenance channel with an @.
+               posted to #config-files with an @ (to #maintenance while
+               no "conffile" webhook is configured).
+    - host maintenance: rules 100511 (ok) + 100512 (degraded/fail), the
+               nightly report of the Pi-hole VM, wazuh-home and the VPS.
+               Posted to the #maintenance of each host's Discord category
+               (webhook keys maintenance-pihole / -wazuh / -vps), @ on
+               degraded/fail or updated Pi-hole images.
+    - agents : rule 504 (Wazuh agent disconnected: no contact for 15 min).
+               506 / 503 (clean stop / start at every reboot) are left
+               out on purpose. Posted to #agents with an @.
     - maintenance: rules 100501 (run ok) + 100502 (run degraded/fail), the
                nightly maintenance summary. Fires every night; the script
                @s you on degraded/fail and when a container image was
@@ -38,7 +47,7 @@
   <hook_url>, add a dummy <hook_url>http://127.0.0.1</hook_url> to that
   block (the script ignores argv[3] and uses its own WEBHOOKS map).
 
-  Wire a future source (agent-down, ...) by adding its block
+  Wire a future source by adding its block
   here, a WEBHOOKS key in the script, and un-commenting its branch in
   the script's main().
 -->
@@ -84,6 +93,18 @@
   <integration>
     <name>custom-discord</name>
     <rule_id>100700,100701</rule_id>
+    <alert_format>json</alert_format>
+  </integration>
+
+  <integration>
+    <name>custom-discord</name>
+    <rule_id>100511,100512</rule_id>
+    <alert_format>json</alert_format>
+  </integration>
+
+  <integration>
+    <name>custom-discord</name>
+    <rule_id>504</rule_id>
     <alert_format>json</alert_format>
   </integration>
 </ossec_config>

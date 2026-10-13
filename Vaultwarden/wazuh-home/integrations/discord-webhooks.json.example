@@ -1,0 +1,14 @@
+{
+  "modsec": "https://discord.com/api/webhooks/REPLACE_WITH_MODSEC_WEBHOOK",
+  "dns": "https://discord.com/api/webhooks/REPLACE_WITH_DNS_WEBHOOK",
+  "squid": "https://discord.com/api/webhooks/REPLACE_WITH_SQUID_WEBHOOK",
+  "fail2ban": "https://discord.com/api/webhooks/REPLACE_WITH_FAIL2BAN_WEBHOOK",
+  "maintenance": "https://discord.com/api/webhooks/REPLACE_WITH_MAINTENANCE_WEBHOOK",
+  "firewall": "https://discord.com/api/webhooks/REPLACE_WITH_FIREWALL_WEBHOOK",
+  "conffile": "https://discord.com/api/webhooks/REPLACE_WITH_CONFFILE_WEBHOOK",
+  "agents": "https://discord.com/api/webhooks/REPLACE_WITH_AGENTS_WEBHOOK",
+  "maintenance-pihole": "https://discord.com/api/webhooks/REPLACE_WITH_PIHOLE_MAINTENANCE_WEBHOOK",
+  "maintenance-wazuh": "https://discord.com/api/webhooks/REPLACE_WITH_WAZUH_MAINTENANCE_WEBHOOK",
+  "maintenance-vps": "https://discord.com/api/webhooks/REPLACE_WITH_VPS_MAINTENANCE_WEBHOOK",
+  "mention": "<@REPLACE_WITH_YOUR_DISCORD_USER_ID>"
+}
