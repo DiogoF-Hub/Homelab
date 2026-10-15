@@ -8,7 +8,7 @@ services:
       - ALL
     cap_add:
       # Bind to privileged ports (<1024); kept defensively. BunkerWeb's
-      # default LISTEN_HTTP_PORT/LISTEN_HTTPS_PORT are 8080/8443 (>1024),
+      # default HTTP_PORT/HTTPS_PORT are 8080/8443 (>1024),
       # and the host port mapping below targets those internal ports,
       # so the cap isn't strictly needed today. Stays granted in case a
       # future image bump changes the internal listen ports.
@@ -66,8 +66,11 @@ services:
     environment:
       TZ: "${TZ}"
       # Space-separated: the vault hostname AND the bare apex domain (the
-      # apex must answer on HTTPS to stay on the HSTS preload list). Both
-      # share this server block, cert and every control below; the apex
+      # apex must answer on HTTPS to stay on the HSTS preload list).
+      # BunkerWeb turns each name into its own service with its own
+      # server block and its own Let's Encrypt cert (two certs, renewed
+      # separately; the scheduler logs "2 service(s)"). Every setting
+      # below is global, so both services get the same controls. The apex
       # only ever gets a tiny JSON status, never Vaultwarden (see
       # REVERSE_PROXY_INCLUDES below and
       # bunkerweb/custom-configs/http/apex.conf).
@@ -133,10 +136,14 @@ services:
       SSL_PROTOCOLS: "TLSv1.2 TLSv1.3"
       SSL_CIPHERS_LEVEL: "modern"
 
-      # HTTPS listener + HTTP->HTTPS redirect, pinned so a future
-      # BunkerWeb default change can't silently drop them. AUTO_REDIRECT
-      # redirects when HTTPS is detected, REDIRECT_HTTP_TO_HTTPS forces it.
-      LISTEN_HTTPS: "yes"
+      # HTTP->HTTPS redirect, pinned so a future BunkerWeb default change
+      # can't silently drop it. AUTO_REDIRECT redirects when HTTPS is
+      # detected, REDIRECT_HTTP_TO_HTTPS forces it. The HTTPS listener has
+      # no on/off setting: it comes up on HTTPS_PORT (default 8443) as soon
+      # as a cert source is on (AUTO_LETS_ENCRYPT above). A LISTEN_HTTPS
+      # line used to sit here, but BunkerWeb has no such setting; the
+      # scheduler logged "variable name LISTEN_HTTPS doesn't exist" and
+      # ignored it (2026-10-15, 1.6.16).
       AUTO_REDIRECT_HTTP_TO_HTTPS: "yes"
       REDIRECT_HTTP_TO_HTTPS: "yes"
 
