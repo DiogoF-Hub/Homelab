@@ -80,6 +80,7 @@ APT_UPGRADED_COUNT=${#__upgradable[@]}
 # version from the same repo, so this one VM's notice covers all of them.
 # Upgrade order: wazuh-home first, then each agent with
 #   apt-get install --allow-change-held-packages wazuh-agent
+#   apt-mark hold wazuh-agent    (the install drops the hold)
 if dpkg -s wazuh-agent >/dev/null 2>&1; then
     __wz_inst=$(dpkg-query -W -f='${Version}' wazuh-agent)
     __wz_cand=$(apt-cache policy wazuh-agent 2>/dev/null | awk '/Candidate:/ {print $2}')

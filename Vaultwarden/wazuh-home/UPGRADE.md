@@ -35,7 +35,10 @@ sudo cp /etc/wazuh-indexer/jvm.options /etc/wazuh-indexer/jvm.options.old
 sudo apt-get update
 apt-cache policy wazuh-manager | grep Candidate                 # must be $WZ-1
 sudo apt-get install --allow-change-held-packages wazuh-indexer wazuh-manager wazuh-dashboard filebeat
+sudo apt-mark hold wazuh-indexer wazuh-manager wazuh-dashboard filebeat
 ```
+
+The `apt-mark hold` is not optional: installing a held package with `--allow-change-held-packages` drops its hold (only the ones that actually changed version; `filebeat` usually keeps it), and the next nightly run would then upgrade Wazuh unattended.
 
 If dpkg asks about a config file:
 - `/etc/wazuh-indexer/jvm.options`: take the new one (`Y`), then put the heap back to 3 GB below.
@@ -78,7 +81,7 @@ Check:
 systemctl is-active wazuh-indexer wazuh-manager filebeat wazuh-dashboard    # 4x active
 sudo /var/ossec/bin/wazuh-control info | grep VERSION                       # v$WZ
 sudo filebeat test output                                                   # talk to server ... OK
-apt-mark showhold                                                           # still all four
+apt-mark showhold                                                           # all four
 ```
 
 Log into the dashboard. The agents still show **active** on the old version; that's fine until step 2.
@@ -90,8 +93,9 @@ Vault VM, LAN Pi-hole VM, and any other agent (`wazuh-home` has none of its own:
 ```bash
 sudo apt-get update
 sudo apt-get install --allow-change-held-packages wazuh-agent
+sudo apt-mark hold wazuh-agent                   # the install dropped the hold
 systemctl is-active wazuh-agent                  # active
-apt-mark showhold                                # wazuh-agent still held
+apt-mark showhold                                # wazuh-agent
 ```
 
 `ossec.conf` (localfiles, agent name) is kept. If dpkg asks about `/etc/systemd/system/wazuh-agent.service`, take the new one (`Y`) unless you edited that unit yourself.
