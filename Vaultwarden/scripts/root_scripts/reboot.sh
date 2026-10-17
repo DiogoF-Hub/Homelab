@@ -12,8 +12,8 @@
 # "did we actually reboot?" signal is visible inline with the rest of
 # the orchestrator's output.
 #
-# Runnable standalone:   sudo /root/vault/reboot.sh
-# Called from main.sh:   /root/vault/reboot.sh
+# Runnable standalone:   sudo /root/vault/root_scripts/reboot.sh
+# Called from main.sh:   /root/vault/root_scripts/reboot.sh
 #
 # Exit codes (see EXIT_CODE_DESC in lib.sh):
 #   0:  rebooted (only visible in the log; /sbin/reboot replaces the

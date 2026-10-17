@@ -13,4 +13,3 @@ mask = [
 ]
 no_gpu = true
 no_display = true
-terminal_passthrough = true

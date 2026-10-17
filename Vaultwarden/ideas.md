@@ -429,7 +429,7 @@ periodic drills and can land later.
 `main.sh` is now an orchestrator-only wrapper that flocks, then calls the
 phase scripts in order: `backup.sh` → `docker-update.sh` →
 `system-update.sh` → `reboot.sh`. Each phase is independently runnable
-(`sudo /root/vault/backup.sh` works standalone) and sources a shared
+(`sudo /root/vault/root_scripts/backup.sh` works standalone) and sources a shared
 `lib.sh` for readonly paths, helpers (`log` / `fail` / `warn` /
 `require_root` / `stop_containers` / etc.), and the `EXIT_CODE_DESC`
 table. Distinct exit codes per phase (10–14 backup, 20 docker, 30–33

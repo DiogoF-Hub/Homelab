@@ -43,6 +43,7 @@ vaultwarden/
 │
 ├── poduser_crontab.txt                        # Crontab entries for poduser (container @reboot startup)
 ├── root_crontab.txt                           # Crontab entries for root automation (nightly main.sh)
+├── vault-shutdown.service                     # systemd unit: podman-compose down on every shutdown/reboot (REBUILD.md Phase 14)
 │
 ├── bunkerweb/                                 # Mounted into the BunkerWeb container
 │   ├── security.txt                           # Vulnerability-reporting contact (served at /.well-known/security.txt)
@@ -118,7 +119,7 @@ vaultwarden/
 │
 ├── vault_domains_allow_dns.txt                # Pi-hole allowlist for the vaultwarden-vm group (mirror of squid/vault_domains_allow_proxy.txt in gravity/ABP syntax)
 │
-├── scripts/                                   # Repo-side split by lifecycle / target user; all root_scripts/ + setups_scripts/ deploy to /root/vault/ on the VM
+├── scripts/                                   # Repo-side split by lifecycle / target user; root_scripts/ + setups_scripts/ deploy as they are under /root/vault/ on the VM
     ├── root_scripts/                          # Recurring scripts run by root nightly via cron
     │   ├── lib.sh                             # Shared constants + helpers (sourced; never executed)
     │   ├── main.sh                            # Orchestrator (the only script cron invokes)
@@ -148,7 +149,7 @@ The stack lives on four machines. Two sit on the inbound request path, in this o
 Two more on the home LAN support it:
 
 3. **LAN Pi-hole VM** (Proxmox, `192.168.173.2`): the Vault VM's **two egress chokepoints**: Pi-hole for DNS and Squid for HTTP/HTTPS, both locked to the Vault VM's allowlists (the only other ways out are SMTP to Mailjet and NTP, see the firewall table). Until October 2026 these were two separate Ubuntu VMs (Pi-hole and `proxy-home`); they now share one Debian 13 VM
-4. **`wazuh-home` VM** (Proxmox, `192.168.173.10`, Debian 13, 8 GB RAM): the Wazuh manager + indexer + dashboard that receives the agents of the Vault VM and the Pi-hole VM and posts the Discord alerts. Alerts are kept 180 days and archives 30 days ([retention setup](wazuh-home/README.md#retention-and-indexer-sizing-manager-host))
+4. **`wazuh-home` VM** (Proxmox, `192.168.173.10`, Debian 13, 8 GB RAM): the Wazuh manager + indexer + dashboard that receives the agents of the Vault VM and the Pi-hole VM and posts the Discord alerts. Alerts are kept 180 days and archives 30 days ([retention setup](wazuh-home/README.md#retention-and-indexer-sizing-manager-host)). **Own resolver**: `/etc/resolv.conf` pinned to `1.1.1.3` (dhcpcd `nohook resolv.conf`), not to the Pi-hole, so the Discord alerts still go out while Pi-hole is down; see [`wazuh-home/README.md`](wazuh-home/README.md#discord-notifications-custom-discord-integrator)
 
 ### **Edge VPS (Hetzner Cloud CX23, Falkenstein)**
 
@@ -704,7 +705,7 @@ Limits when this was the active flavor: cloudflared added latency (~50–100ms t
 
 ## 🔄 Automation Scripts
 
-Repo-side, the scripts are split by lifecycle and target user. On the VM, **`root_scripts/` and `setups_scripts/` both deploy to `/root/vault/`** (root-owned, mode 700), the repo split is purely organizational. `poduser_scripts/` deploys to `poduser`'s home; `truenas_scripts/` runs on the TrueNAS host.
+Repo-side, the scripts are split by lifecycle and target user. On the VM, **`root_scripts/` and `setups_scripts/` deploy as they are under `/root/vault/`** (`/root/vault/root_scripts/`, `/root/vault/setups_scripts/`, root-owned, mode 700), with the backup-crypto material directly in `/root/vault/` next to them. `poduser_scripts/` deploys to `poduser`'s home; `truenas_scripts/` runs on the TrueNAS host.
 
 ### **Recurring (root, nightly via cron)**
 
@@ -733,6 +734,12 @@ Upstream signature verification of these downloads is **not yet implemented**, s
 | Script | Purpose |
 |--------|---------|
 | **`start-containers.sh`** | poduser's `@reboot` cron target. Waits for a default route + DNS resolution, then runs `podman-compose up -d --force-recreate`. Not called by `main.sh`; only by the poduser crontab. This is how containers come back up after the reboot triggered by `reboot.sh`. |
+
+### **Shutdown (systemd unit)**
+
+| File | Purpose |
+|------|---------|
+| **`vault-shutdown.service`** | The other half of `start-containers.sh`: a systemd unit (installed to `/etc/systemd/system/`) that runs `podman-compose down` as poduser on **every shutdown or reboot** of the VM (the Proxmox Shutdown button via the QEMU guest agent, `sudo reboot`, `reboot.sh`). Ordered to stop before poduser's systemd manager, while the containers still have somewhere to be stopped from. Without it, nothing owns the cron-started containers and a shutdown SIGTERMs them all at once. On the nightly reboot `backup.sh` has already stopped the stack. Logs to the journal, not to the maintenance logs. The `down` output is filed under podman's own scopes rather than the unit, so view the whole sequence with `journalctl -b -1 | grep -E "vault-shutdown|podman-compose\[|Stopping user@1001"`. Install steps in [`REBUILD.md`](REBUILD.md) Phase 14. |
 
 ### **Off-site replication (TrueNAS, via cron)**
 
@@ -1632,10 +1639,10 @@ This script downloads and pins age binaries (Linux + Windows) from GitHub releas
 
 ```bash
 # Download the latest release from GitHub
-sudo /root/vault/setup-age.sh
+sudo /root/vault/setups_scripts/setup-age.sh
 
 # Download a specific version
-sudo /root/vault/setup-age.sh v1.3.1
+sudo /root/vault/setups_scripts/setup-age.sh v1.3.1
 ```
 
 If no version is specified, the script queries the [GitHub API](https://api.github.com/repos/FiloSottile/age/releases/latest) to determine the latest release automatically.
@@ -1687,10 +1694,10 @@ Mirror of `setup-age.sh` for minisign. Same flow, same versioned directory layou
 
 ```bash
 # Download the latest release from GitHub
-sudo /root/vault/setup-minisign.sh
+sudo /root/vault/setups_scripts/setup-minisign.sh
 
 # Download a specific version
-sudo /root/vault/setup-minisign.sh 0.12
+sudo /root/vault/setups_scripts/setup-minisign.sh 0.12
 ```
 
 After running, update `MINISIGN_VERSION` in `lib.sh`:
@@ -1736,8 +1743,8 @@ To update either tool:
 
 1. On the Vaultwarden VM, run the corresponding setup script with no args (downloads latest) or a specific version:
    ```bash
-   sudo /root/vault/setup-age.sh
-   sudo /root/vault/setup-minisign.sh
+   sudo /root/vault/setups_scripts/setup-age.sh
+   sudo /root/vault/setups_scripts/setup-minisign.sh
    ```
 
 2. Update `AGE_VERSION` or `MINISIGN_VERSION` in `lib.sh`.

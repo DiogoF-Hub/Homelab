@@ -39,6 +39,7 @@ wazuh-home/
 ├── integrations/  custom-discord.py + manager-discord-integration.xml + discord-webhooks.json.example
 ├── retention/     ism-delete-30d.json + ism-delete-180d.json + wazuh-log-cleanup.{sh,service,timer}   (manager host)
 ├── scripts/       main.sh + root_crontab.txt   (manager host: nightly apt full-upgrade, logs to TrueNAS, reboot only if required)
+├── shutdown/      after-indexer.conf   (manager host: systemd drop-in, indexer starts first and stops last)
 ├── UPGRADE.md     step-by-step Wazuh upgrade: manager host first, then the agents (all packages are apt-held)
 └── sidecar/
     ├── pihole/    pihole-ftl-tail.py + .service        (installs on the LAN Pi-hole VM)
@@ -407,7 +408,16 @@ The run rules match a **derived `vw_sev`** field (`info`/`warn`), NOT `status`: 
 - `integrations/manager-discord-integration.xml` , the `<integration>` blocks (one per source, scoped by group / rule_id / level) for the manager's `ossec.conf`.
 - `integrations/discord-webhooks.json.example` , template for `/var/ossec/integrations/discord-webhooks.json`: every webhook key plus `mention`. Copy it there, fill in the real URLs, `sudo chown root:wazuh` and `sudo chmod 0640` it, then check it with `sudo python3 -m json.tool <file> >/dev/null && echo JSON OK`. A key left on its placeholder just stays quiet.
 
-Gotcha baked into the script: Discord's API is Cloudflare-fronted and **403s the default `Python-urllib` User-Agent**, so `send_discord` sets a `DiscordBot (...)` UA. The manager needs egress to `discord.com:443`.
+Gotcha baked into the script: Discord's API is Cloudflare-fronted and **403s the default `Python-urllib` User-Agent**, so `send_discord` sets a `DiscordBot (...)` UA. The manager needs egress to `discord.com:443`. It also has to resolve `discord.com` **without the Pi-hole**: on 2026-10-17 the Pi-hole VM's nightly reboot took DNS down for the LAN right as its own report fired, and the post died with `Temporary failure in name resolution` (in `/var/ossec/logs/ossec.log`, `wazuh-integratord`). Any alert raised while Pi-hole is down, the #agents one about the Pi-hole VM included, would be lost the same way. So `wazuh-home` resolves like the Pi-hole VM itself, `/etc/resolv.conf` pinned:
+
+```
+# /etc/resolv.conf
+nameserver 1.1.1.3
+options edns0 trust-ad
+search localdomain
+```
+
+plus `nohook resolv.conf` in `/etc/dhcpcd.conf`, so DHCP doesn't put `192.168.173.2` back.
 
 ## OS updates (manager host)
 
@@ -425,6 +435,25 @@ sudo install -m 700 -o root -g root main.sh /root/wazuh/main.sh
 sudo apt install needrestart
 sudo crontab -e        # paste the line from scripts/root_crontab.txt
 ```
+
+## Clean shutdown from the Proxmox Shutdown button (manager host)
+
+The Wazuh components on `wazuh-home` are native systemd services, so a shutdown already stops each one cleanly; there is no compose stack to take down and no script to write. What a shutdown doesn't do is stop them **in order**: the stock units don't order themselves against each other, so the indexer can go down while the manager, filebeat and the dashboard are still writing to it. `shutdown/after-indexer.conf` is a drop-in that fixes that, `After=wazuh-indexer.service` on the three units that talk to the indexer, so it starts first and stops last. The same order [`UPGRADE.md`](UPGRADE.md) uses by hand. It applies to every shutdown or reboot: the Proxmox Shutdown button, `sudo reboot`, and `main.sh`'s reboot.
+
+```bash
+# Proxmox: VM -> Options -> QEMU Guest Agent -> Enabled. Then, on wazuh-home:
+sudo apt install qemu-guest-agent
+for u in wazuh-manager filebeat wazuh-dashboard; do
+    sudo install -D -m 0644 shutdown/after-indexer.conf \
+        /etc/systemd/system/$u.service.d/after-indexer.conf
+done
+sudo systemctl daemon-reload
+systemctl show -p After wazuh-manager filebeat wazuh-dashboard   # each includes wazuh-indexer.service
+```
+
+Then **Shutdown + Start** the VM from Proxmox, not a reboot from inside: the guest agent's virtio-serial port is only added at a cold start (`qm agent <vmid> ping` on the Proxmox host answers silently with exit 0 once it works). The agent only asks the guest to shut down; the ordering above is what makes that shutdown tidy. Ordering only, no `Requires=`, so an indexer that fails to start doesn't block the others. The drop-ins live under `/etc/systemd/system/`, outside the held packages, so upgrades leave them alone.
+
+The indexer is the slow one to stop (it flushes to disk). If the Proxmox host itself shuts down, it gives each VM its *Start/Shutdown order* timeout (VM → Options, 180 s by default) before stopping it hard; raise it for this VM if a shutdown ever runs over.
 
 ## Retention and indexer sizing (manager host)
 

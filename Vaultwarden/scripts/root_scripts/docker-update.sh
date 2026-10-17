@@ -5,8 +5,8 @@
 # Containers are left stopped at the end; they auto-start on boot via
 # start-containers.sh (or equivalent unit).
 #
-# Runnable standalone:   sudo /root/vault/docker-update.sh
-# Called from main.sh:   /root/vault/docker-update.sh
+# Runnable standalone:   sudo /root/vault/root_scripts/docker-update.sh
+# Called from main.sh:   /root/vault/root_scripts/docker-update.sh
 #
 # Exit codes (see EXIT_CODE_DESC in lib.sh):
 #   20: cannot access compose dir / stop containers failed

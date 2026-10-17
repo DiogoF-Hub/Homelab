@@ -11,10 +11,11 @@ This is the short path for normal releases (e.g. 4.14.8 → 4.14.9). For a bigge
 First take a **Proxmox snapshot** of `wazuh-home`: since 4.12 an indexer upgrade can't be undone by downgrading, so the snapshot is the way back.
 
 ```bash
-sudo systemctl stop filebeat wazuh-dashboard wazuh-manager
+sudo systemctl stop filebeat wazuh-dashboard wazuh-manager wazuh-indexer
 sudo cp /etc/wazuh-indexer/jvm.options /etc/wazuh-indexer/jvm.options.old
 sudo apt-get update
 sudo apt-get install --allow-change-held-packages wazuh-indexer wazuh-manager wazuh-dashboard filebeat
+sudo apt-mark hold wazuh-indexer wazuh-manager wazuh-dashboard filebeat   # the install drops the hold
 ```
 
 If dpkg asks about a config file:
@@ -35,7 +36,7 @@ sudo systemctl daemon-reload
 sudo systemctl restart wazuh-indexer && sleep 60
 sudo systemctl restart wazuh-manager filebeat wazuh-dashboard
 systemctl is-active wazuh-indexer wazuh-manager filebeat wazuh-dashboard    # 4x active
-apt-mark showhold                                                           # still all four
+apt-mark showhold                                                           # all four
 ```
 
 Log into the dashboard. The agents still show **active** on the old version; that's fine until step 2.
@@ -47,8 +48,9 @@ Vault VM, LAN Pi-hole VM, and any other agent:
 ```bash
 sudo apt-get update
 sudo apt-get install --allow-change-held-packages wazuh-agent
+sudo apt-mark hold wazuh-agent                   # the install drops the hold
 systemctl is-active wazuh-agent                  # active
-apt-mark showhold                                # wazuh-agent still held
+apt-mark showhold                                # wazuh-agent
 ```
 
 `ossec.conf` (localfiles, agent name) is kept. If dpkg asks about `/etc/systemd/system/wazuh-agent.service`, take the new one (`Y`) unless you edited that unit yourself.

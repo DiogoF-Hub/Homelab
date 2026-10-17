@@ -3,8 +3,8 @@
 # backup.sh: tar /srv/vw-data, encrypt with age, sign with minisign (if
 # enabled), package into a self-contained bundle, apply retention.
 #
-# Runnable standalone:   sudo /root/vault/backup.sh
-# Called from main.sh:   /root/vault/backup.sh
+# Runnable standalone:   sudo /root/vault/root_scripts/backup.sh
+# Called from main.sh:   /root/vault/root_scripts/backup.sh
 #
 # Exit codes:
 #   10: age prerequisites missing

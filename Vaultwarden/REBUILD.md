@@ -838,28 +838,40 @@ expect them. Don't move them.
 
 ## Phase 7, Deploy the maintenance toolkit to `/root/vault/`
 
-All root-owned scripts live in **one directory**, `/root/vault/`. This
-is `${ROOT_VAULT_DIR}` per `lib.sh` (auto-derived from where `lib.sh`
-itself sits). The repo splits scripts across `root_scripts/` and
-`setups_scripts/` for organisation, but on the VM **both flatten into
-`/root/vault/`**.
+All root-owned maintenance files live under **one directory**,
+`/root/vault/`. This is `${ROOT_VAULT_DIR}` per `lib.sh` (auto-derived
+from where `lib.sh` itself sits). The repo's two script folders are
+copied **as they are**, folder names included, and the crypto material
+(Phase 8) sits directly in `/root/vault/`, next to them:
+
+```
+/root/vault/
+├── root_scripts/     {main,lib,backup,docker-update,system-update,reboot}.sh
+├── setups_scripts/   setup-age.sh, setup-minisign.sh
+└── age-recipient.txt, minisign.key, minisign.pub, DECRYPT.txt   (Phase 8)
+```
+
+`lib.sh` sees that it sits in a `root_scripts/` folder and takes the
+parent, `/root/vault`, as `ROOT_VAULT_DIR`. A flat layout (every script
+directly in `/root/vault/`) also works, `lib.sh` handles both, but the
+runbook, the crontab and the systemd unit all assume the one above.
 
 From your workstation, copy the files to the VM (or copy them up via
 the repo checkout in Phase 10 once it's there):
 
 ```bash
-# Files to deploy into /root/vault/:
-#   scripts/root_scripts/{main,lib,backup,docker-update,system-update,reboot}.sh
-#   scripts/setups_scripts/{setup-age,setup-minisign}.sh
+# Folders to deploy, as they are:
+#   scripts/root_scripts/   -> /root/vault/root_scripts/
+#   scripts/setups_scripts/ -> /root/vault/setups_scripts/
 #
-# Permissions: 700 root:root on the directory and all .sh files.
+# Permissions: 700 root:root on the directories and all .sh files.
 # lib.sh is sourced (not executed), the +x bit is harmless but optional.
 ```
 
 ```bash
 sudo chown -R root:root /root/vault
-sudo chmod 700 /root/vault
-sudo chmod 700 /root/vault/*.sh
+sudo chmod 700 /root/vault /root/vault/root_scripts /root/vault/setups_scripts
+sudo chmod 700 /root/vault/*/*.sh
 ```
 
 Then run the binary-pinning scripts. Each pulls from GitHub (via Squid),
@@ -868,14 +880,14 @@ and records SHA-256s. They use `find` to locate binaries inside extracted
 archives, so they're resilient to upstream layout changes.
 
 ```bash
-sudo /root/vault/setup-age.sh
-sudo /root/vault/setup-minisign.sh
+sudo /root/vault/setups_scripts/setup-age.sh
+sudo /root/vault/setups_scripts/setup-minisign.sh
 ```
 
 After both run, **confirm the version constants in `lib.sh` match what
 just got pinned**:
 
-- `AGE_VERSION` (currently `v1.3.1`)
+- `AGE_VERSION` (currently `v1.3.2`)
 - `MINISIGN_VERSION` (currently `0.12`)
 
 If `setup-age.sh` pulled a newer version (e.g. `v1.4.0`) and you want
@@ -1279,27 +1291,98 @@ Install both crontabs from the repo root:
 
 ```bash
 # Root crontab, runs main.sh nightly at 05:35.
-sudo crontab -u root /home/poduser/vault/bunkerweb/root_crontab.txt
+sudo crontab -u root /home/poduser/vault/root_crontab.txt
 
 # poduser crontab, runs start-containers.sh @reboot.
-sudo crontab -u poduser /home/poduser/vault/bunkerweb/poduser_crontab.txt
+sudo crontab -u poduser /home/poduser/vault/poduser_crontab.txt
 
 # Verify:
 sudo crontab -u root -l
 sudo crontab -u poduser -l
 ```
 
+### Clean shutdown from the Proxmox Shutdown button
+
+Install the shutdown hook so every shutdown or reboot of the VM runs a
+`podman-compose down` first: the Proxmox **Shutdown** button, a manual
+`sudo reboot`, and `main.sh`'s nightly reboot alike. The containers are
+started from cron, so no systemd unit owns them, and without the hook a
+shutdown just SIGTERMs everything in `poduser`'s systemd manager at once.
+
+1. **QEMU guest agent.** In Proxmox: *VM → Options → QEMU Guest Agent →
+   Enabled*. In the VM:
+
+   ```bash
+   sudo apt install qemu-guest-agent
+   ```
+
+   Then **Shutdown + Start** the VM from Proxmox, not a reboot from
+   inside: the agent's virtio-serial port is only added at a cold start.
+   Check from the Proxmox host with `qm agent <vmid> ping` (no output and
+   exit 0 means it answers). With the agent, Proxmox asks the guest to
+   shut down through it; without it, Proxmox falls back to an ACPI
+   power-button press, which Debian also honours, just less reliably.
+   Either way the guest runs a normal systemd shutdown, and that is what
+   the hook hooks into. The agent itself never runs your scripts.
+
+2. **The hook.** `vault-shutdown.service` (repo root, next to the
+   crontab files) runs `podman-compose down` as poduser. It carries a
+   placeholder for `poduser`'s uid in three places (it has to stop
+   before `user@<uid>.service`, and needs poduser's runtime dir), so
+   install it through `sed`:
+
+   ```bash
+   sudo sh -c 'sed "s/@PODUSER_UID@/$(id -u poduser)/g" /home/poduser/vault/vault-shutdown.service \
+       > /etc/systemd/system/vault-shutdown.service'
+   sudo systemctl daemon-reload
+   sudo systemctl enable --now vault-shutdown.service
+
+   systemctl is-active vault-shutdown        # "active" (exited, by design)
+   systemctl show -p After vault-shutdown    # lists user@<poduser uid>.service
+   ```
+
+   It needs linger on `poduser` (Phase 5), which starts that user manager
+   at boot instead of at login. Its `WorkingDirectory` is the same
+   compose dir `start-containers.sh` uses, keep the two in step. Stopping
+   or restarting the unit by hand runs the `down`, which takes
+   Vaultwarden down.
+
+3. **Test it.** Click Shutdown in Proxmox, start the VM again, then look
+   at the previous boot's journal (the hook logs only there, not to the
+   maintenance logs under `/srv/logs/`):
+
+   ```bash
+   sudo journalctl -b -1 | grep -E "vault-shutdown|podman-compose\[|Stopping user@1001"
+   # systemd[1]: Stopping vault-shutdown.service ...
+   # podman-compose[..]: crowdsec / bunkerweb / vaultwarden   (stopped, then removed)
+   # podman-compose[..]: <pod id>                             (pod removed)
+   # podman-compose[..]: backend / security                   (networks removed)
+   # systemd[1]: vault-shutdown.service: Deactivated successfully.
+   # systemd[1]: Stopping user@1001.service ...               (only after the unit)
+   ```
+
+   The podman lines aren't under `-u vault-shutdown`: podman has no
+   daemon, each `podman stop` / `rm` runs in its own scope under
+   poduser's systemd, and the journal files the output there (`docker
+   compose` on the Pi-hole VM is a client of dockerd, so its output stays
+   under its unit). First test, 2026-10-17: all three stopped
+   gracefully in about 6 s, and `user@1001.service` only began stopping
+   once the unit had finished.
+
+   After a nightly reboot there's nothing left to stop, since
+   `backup.sh` already took the stack down.
+
 The two files (`root_crontab.txt`, `poduser_crontab.txt` at the repo
 root) contain exactly:
 
-- `35 5 * * * /bin/bash -lc '/root/vault/main.sh' > /dev/null 2>&1`
+- `35 5 * * * /bin/bash -lc '/root/vault/root_scripts/main.sh' > /dev/null 2>&1`
 - `@reboot /bin/bash -lc '/home/poduser/vault/start-containers.sh'`
 
 Run `main.sh` once manually to confirm end-to-end **before** the first
 scheduled run:
 
 ```bash
-sudo /root/vault/main.sh
+sudo /root/vault/root_scripts/main.sh
 ```
 
 Expected sequence:

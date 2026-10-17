@@ -29,6 +29,7 @@ PiHole/
 ├── mycustom_list.txt         # 27 exact domains to block
 ├── main.sh                   # Nightly maintenance, deployed to /root/pihole/main.sh. Reboots only if needed
 ├── start-containers.sh       # @reboot bring-up, also what deploys freshly pulled images
+├── pihole-shutdown.service   # systemd hook: `docker compose down` on every shutdown/reboot
 ├── root_crontab.txt          # The two root crontab entries
 └── README.md                 # This documentation
 ```
@@ -200,6 +201,7 @@ Because of that, the VM must have nothing else on 53 or 443, or the Pi-hole cont
 | ------ | ------- |
 | **`start-containers.sh`** | `docker compose up -d --force-recreate` from `/home/pi/pihole`. Runs `@reboot` via root cron, and `main.sh` calls it directly when no reboot is needed. The `--force-recreate` is what actually **deploys the images `main.sh` pulled**, so it's the second half of the update cycle, not just a boot script. |
 | **`main.sh`** | Nightly maintenance, deployed as `/root/pihole/main.sh`, run by root cron at **04:15**. |
+| **`pihole-shutdown.service`** | systemd unit, installed to `/etc/systemd/system/`. Runs `docker compose down` from `/home/pi/pihole` on every shutdown or reboot (the Proxmox Shutdown button, `sudo reboot`, `main.sh`'s reboot), before `docker.service` stops. Step 6 below. |
 
 ### What `main.sh` actually does
 
@@ -295,7 +297,23 @@ Both entries must be in **root's** crontab. `main.sh` runs `apt-get` and `reboot
 
    Paste the contents of `root_crontab.txt`.
 
-6. **Access the web interface**
+6. **Clean shutdown from the Proxmox Shutdown button**
+
+   In Proxmox: *VM → Options → QEMU Guest Agent → Enabled*. In the VM:
+
+   ```bash
+   sudo apt install qemu-guest-agent
+   sudo install -m 0644 pihole-shutdown.service /etc/systemd/system/
+   sudo systemctl daemon-reload
+   sudo systemctl enable --now pihole-shutdown.service
+   systemctl is-active pihole-shutdown       # "active" (exited, by design)
+   ```
+
+   Then **Shutdown + Start** the VM from Proxmox, not a reboot from inside: the agent's virtio-serial port is only added at a cold start. `qm agent <vmid> ping` on the Proxmox host answers silently with exit 0 once it works.
+
+   The agent only asks the guest to shut down; it's the unit that runs `docker compose down` during that shutdown. dockerd would stop the containers on its own anyway, so this is belt and braces: an explicit, ordered `down` (pihole before dnsproxy) that leaves the same state `main.sh` leaves before its reboot. Stopping or restarting the unit by hand also runs the `down`, which takes LAN DNS with it. After a Proxmox Shutdown + Start, `journalctl -b -1 -u pihole-shutdown` shows the previous boot's `down`.
+
+7. **Access the web interface**
 
    * URL: `https://pi.hole/admin`
    * Password: the one from `.env`

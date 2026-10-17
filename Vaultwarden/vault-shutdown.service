@@ -1,0 +1,64 @@
+# vault-shutdown.service: `podman-compose down` the Vaultwarden stack on
+# every shutdown or reboot of the Vault VM (the Proxmox Shutdown button,
+# a manual `sudo reboot`, main.sh's nightly reboot), before poduser's
+# systemd manager, which owns the container scopes, is stopped.
+#
+# Why it's needed: the containers are rootless podman, started from
+# poduser's @reboot cron, so no systemd unit owns them. Without this, a
+# shutdown just SIGTERMs everything in poduser's systemd manager at once
+# (Vaultwarden, BunkerWeb, CrowdSec in no particular order) instead of
+# running a `podman-compose down`. On the nightly reboot backup.sh has
+# already stopped the stack, so there is nothing left for it to stop.
+#
+# Install (as root): copy to /etc/systemd/system/vault-shutdown.service,
+# replace all three @PODUSER_UID@ (After=, both Environment= lines) with
+# `id -u poduser`, then
+#   systemctl daemon-reload
+#   systemctl enable --now vault-shutdown.service
+#
+# Verify:
+#   systemctl is-active vault-shutdown        # "active" (exited, by design)
+#   systemctl show -p After vault-shutdown    # lists user@<poduser uid>.service
+# Test: Proxmox Shutdown + Start, then the whole sequence in one view:
+#   journalctl -b -1 | grep -E "vault-shutdown|podman-compose\[|Stopping user@1001"
+# (unit starts, each container / the pod / both networks, unit stops,
+# THEN poduser's manager stops). The podman lines aren't under
+# -u vault-shutdown: podman has no daemon, each podman stop / rm runs in
+# its own scope under poduser's manager, and the journal files the
+# output there (docker compose is a client of dockerd, so it doesn't).
+#
+# How it works: a oneshot with RemainAfterExit=yes stays active after
+# its no-op ExecStart, which gives systemd something to stop at
+# shutdown, and stopping it runs ExecStop. At shutdown systemd applies
+# After= in reverse, so After=user@<uid>.service makes this unit stop,
+# and podman-compose down run, BEFORE poduser's manager goes away.
+# Relies on linger for poduser (REBUILD.md Phase 5), which starts that
+# manager at boot rather than at login.
+#
+# Rootless podman has to run as poduser with poduser's runtime dir and
+# session bus, which a system unit doesn't set on its own: hence User=
+# and the two Environment= lines. WorkingDirectory is the same compose
+# dir start-containers.sh uses; keep the two in step.
+#
+# Stopping or restarting this unit by hand runs ExecStop too, which takes
+# Vaultwarden down. Bring it back with start-containers.sh as poduser.
+
+[Unit]
+Description=Stop the Vaultwarden podman stack before shutdown
+After=user@@PODUSER_UID@.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+User=poduser
+WorkingDirectory=/home/poduser/vault
+Environment=XDG_RUNTIME_DIR=/run/user/@PODUSER_UID@
+Environment=DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/@PODUSER_UID@/bus
+ExecStart=/bin/true
+ExecStop=/usr/bin/podman-compose down
+# podman-compose down stops the containers in parallel (10s grace each by
+# default); about 6s in total on 2026-10-17.
+TimeoutStopSec=120
+
+[Install]
+WantedBy=multi-user.target

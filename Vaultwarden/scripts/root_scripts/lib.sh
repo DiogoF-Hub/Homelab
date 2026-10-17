@@ -6,7 +6,7 @@
 # and functions.
 #
 # Usage in callers (all of them co-located with this file in
-# ${ROOT_VAULT_DIR}, `/root/vault/`, on the VM):
+# `/root/vault/root_scripts/` on the VM):
 #     source "$(dirname "$(readlink -f "$0")")/lib.sh"
 
 # ---- environment ---------------------------------------------------------
@@ -85,15 +85,16 @@ readonly LOCK_FILE="/var/run/vaultwarden-maint.lock"
 # anything else (handy when staging a new layout side-by-side with the
 # old one). Two supported layouts:
 #
-#   1. Flat (production layout, the canonical one):
+#   1. Repo-mirror (production layout, the canonical one): the repo's
+#      `root_scripts/` and `setups_scripts/` folders copied as they are,
+#      lib.sh inside `root_scripts/`:
+#        /root/vault/root_scripts/lib.sh, ..., /root/vault/setups_scripts/...
+#        → ROOT_VAULT_DIR = /root/vault  (the parent, where crypto
+#          material like age-recipient.txt actually lives)
+#
+#   2. Flat (everything in one directory, still supported):
 #        /root/vault/lib.sh, /root/vault/main.sh, /root/vault/backup.sh, ...
 #        → ROOT_VAULT_DIR = /root/vault
-#
-#   2. Repo-mirror (lib.sh sits inside a `root_scripts/` subdir, useful
-#      when staging a new version side-by-side with the running one):
-#        /root/vault2/root_scripts/lib.sh, ..., /root/vault2/setups_scripts/...
-#        → ROOT_VAULT_DIR = /root/vault2  (the parent, where crypto
-#          material like age-recipient.txt actually lives)
 #
 # If lib.sh ever gets relocated to a layout that's neither of these,
 # update this branch.
@@ -120,7 +121,7 @@ readonly COMPOSE_DIR="/home/${USER_POD}/$(basename "$ROOT_VAULT_DIR")"
 #
 # To upgrade: run setup-age.sh <version>, then bump AGE_VERSION here.
 
-readonly AGE_VERSION="v1.3.1"
+readonly AGE_VERSION="v1.3.2"
 readonly AGE_TOOLS_DIR="/srv/tools/age"
 readonly AGE_BINARY="${AGE_TOOLS_DIR}/${AGE_VERSION}/age"
 readonly AGE_BINARY_WIN="${AGE_TOOLS_DIR}/${AGE_VERSION}/age.exe"

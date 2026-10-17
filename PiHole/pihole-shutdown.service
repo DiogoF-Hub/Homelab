@@ -1,0 +1,43 @@
+# pihole-shutdown.service: `docker compose down` the Pi-hole stack on
+# every shutdown or reboot of the VM (the Proxmox Shutdown button, a
+# manual `sudo reboot`, main.sh's reboot), before docker.service stops.
+#
+# Install (as root, from this folder):
+#   install -m 0644 pihole-shutdown.service /etc/systemd/system/
+#   systemctl daemon-reload
+#   systemctl enable --now pihole-shutdown.service
+#
+# Verify:
+#   systemctl is-active pihole-shutdown       # "active" (exited, by design)
+#
+# dockerd already stops the containers itself when docker.service stops,
+# so this is the lightest of the three VMs' hooks: it turns that into an
+# explicit, ordered `compose down` (pihole before dnsproxy, per
+# depends_on) that leaves no containers behind, the same state main.sh
+# leaves before its own reboot. start-containers.sh recreates them
+# @reboot either way.
+#
+# How it works: a oneshot with RemainAfterExit=yes stays active after
+# its no-op ExecStart, which gives systemd something to stop at
+# shutdown, and stopping it runs ExecStop. At shutdown systemd applies
+# After= in reverse, so After=docker.service makes this stop first,
+# while dockerd is still there to answer.
+#
+# Stopping or restarting this unit by hand runs ExecStop too, which takes
+# Pi-hole, and LAN DNS with it, down. Bring it back with
+# /home/pi/pihole/start-containers.sh.
+
+[Unit]
+Description=Stop the Pi-hole compose stack before shutdown
+After=docker.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+WorkingDirectory=/home/pi/pihole
+ExecStart=/bin/true
+ExecStop=/usr/bin/docker compose down
+TimeoutStopSec=60
+
+[Install]
+WantedBy=multi-user.target
