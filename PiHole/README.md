@@ -257,7 +257,7 @@ Both entries must be in **root's** crontab. `main.sh` runs `apt-get` and `reboot
    search localdomain
    ```
 
-   The VM gets its IP by DHCP (static mapping in OPNsense), so also add `nohook resolv.conf` to `/etc/dhcpcd.conf`, otherwise dhcpcd rewrites the file with the DHCP-provided DNS. Verify after a reboot that the file still has these three lines.
+   The VM gets its IP by DHCP (static mapping in OPNsense), so also add `nohook resolv.conf` to `/etc/dhcpcd.conf`, otherwise dhcpcd rewrites the file with the DHCP-provided DNS. Add `nohook` **first** and restart dhcpcd (or reboot) before writing `resolv.conf`: dhcpcd only reads its config at start, so a copy that was already running still rewrites the file at the next shutdown, leaving it with no nameserver (it happened to `wazuh-home` on 2026-10-17). Verify after a reboot that the file still has these three lines.
 
 2. **Adapt `docker-compose.yml` to your network**
 

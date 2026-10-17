@@ -29,9 +29,10 @@ sudo grep -E '^-Xm[sx]' /etc/wazuh-indexer/jvm.options
 sudo sed -i 's/^-Xms.*/-Xms3g/; s/^-Xmx.*/-Xmx3g/' /etc/wazuh-indexer/jvm.options   # only if it isn't 3g
 ```
 
-Start everything, indexer first:
+Start everything, indexer first. The `wazuh-indexer` package put its old bundled GeoIP database back, so copy the current one in before the indexer starts (see [README](README.md#geoip-database-manager-host); the nightly run would also catch it, a night later):
 
 ```bash
+sudo cp /var/lib/GeoIP/GeoLite2-City.mmdb /usr/share/wazuh-indexer/modules/ingest-geoip/GeoLite2-City.mmdb
 sudo systemctl daemon-reload
 sudo systemctl restart wazuh-indexer && sleep 60
 sudo systemctl restart wazuh-manager filebeat wazuh-dashboard

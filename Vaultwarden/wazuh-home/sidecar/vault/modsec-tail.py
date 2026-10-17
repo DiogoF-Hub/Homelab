@@ -7,7 +7,7 @@ object per line), flattens each transaction into a single flat JSON
 line with clean scalar fields, and appends it to
 /var/log/modsec-events/events.log. The Wazuh agent on this VM tails
 that file via a <localfile> entry; the manager fires rules
-100300 / 100301 / 100302 / 100303 (see
+100300 / 100301 / 100302 / 100303 / 100304 (see
 Vaultwarden/wazuh-home/modsec/manager-modsec-rules.xml) on the decoded events.
 
 WHY THIS EXISTS (why not tail modsec_audit.log directly)
@@ -54,11 +54,12 @@ ARCHITECTURE
     ships event over encrypted channel to wazuh-home
                                 ^
                                 v
-                                rules 100300 / 100301 / 100302 / 100303 fire
+                                rules 100300 / 100301 / 100302 / 100303 / 100304 fire
                                 100300 (level 0):  every modsec event, archived
                                 100301 (level 3):  band=none  (probe / redirect noise)
                                 100302 (level 7):  band=low|mid (routine scoring scans)
                                 100303 (level 11): band=high (real multi-vector attack)
+                                100304 (level 12): outbound_score > 0 (response flagged)
 
 STATE
 
@@ -149,6 +150,16 @@ SCORE_HIGH_MIN = 30   # score >= this -> "high" (the Discord tier)
 # 949110's message reads "Inbound Anomaly Score Exceeded (Total Score: N)".
 SCORE_RE = re.compile(r"Total Score:\s*(\d+)")
 
+# A rule's details.data reads "Matched Data: <text> found within <VAR>: <value>".
+# Only <VAR> is kept (ARGS:path, REQUEST_URI_RAW, REQUEST_HEADERS:User-Agent),
+# never <text> or <value>: on a false positive those could be a real user's
+# login data, and the full record stays in modsec_audit.log under unique_id.
+WHERE_RE = re.compile(r"found within ([A-Z_]+(?::[^:\s]{1,64})?):")
+
+# Rules that only score or correlate, not detect: left out of rule_msgs.
+NON_DETECTION_RULES = ("949", "959", "980")
+MAX_WHERE = 10
+
 # ---------------------------------------------------------------------
 # Shutdown flag
 # ---------------------------------------------------------------------
@@ -182,15 +193,16 @@ def save_offset(value):
 # Transaction flattening
 # ---------------------------------------------------------------------
 
-def parse_score(messages):
+def parse_score(messages, rule_id="949110"):
     """
-    Pull the CRS inbound anomaly score from rule 949110's message.
-    Returns the integer score, or 0 if 949110 didn't fire (below
-    threshold) or the text didn't parse.
+    Pull a CRS anomaly score from its evaluation rule's message: 949110
+    (inbound, the default) or 959100 (outbound, the response). Returns the
+    integer score, or 0 if that rule didn't fire (below threshold) or the
+    text didn't parse.
     """
     for m in messages:
         details = m.get("details") or {}
-        if details.get("ruleId") == "949110":
+        if details.get("ruleId") == rule_id:
             text = "{} {}".format(m.get("message", ""), details.get("data") or "")
             found = SCORE_RE.search(text)
             return int(found.group(1)) if found else 0
@@ -205,6 +217,30 @@ def band_for(score):
     if score >= 1:
         return "low"
     return "none"
+
+def unique(items):
+    """De-duplicate, keeping first-seen order."""
+    return list(dict.fromkeys(i for i in items if i))
+
+def describe(messages):
+    """
+    What the request tried, from the rules that matched: the attack types
+    (the suffix of each CRS "attack-*" tag: rce, sqli, lfi, ...), the rule
+    descriptions (CRS's own text, not the request's), and where in the
+    request they matched (variable names only, see WHERE_RE).
+    """
+    attacks, msgs, where = [], [], []
+    for m in messages:
+        details = m.get("details") or {}
+        rule = str(details.get("ruleId") or "")
+        attacks += [t[len("attack-"):] for t in details.get("tags") or []
+                    if isinstance(t, str) and t.startswith("attack-")]
+        if not rule.startswith(NON_DETECTION_RULES):
+            msgs.append(m.get("message", ""))
+        found = WHERE_RE.search(details.get("data") or "")
+        if found:
+            where.append(found.group(1))
+    return unique(attacks), unique(msgs), unique(where)[:MAX_WHERE]
 
 def flatten(txn):
     """
@@ -228,9 +264,18 @@ def flatten(txn):
                      string Wazuh can pcre2-match, unlike the raw array).
       n_rules:       how many rules matched.
       anomaly_score: parsed from 949110; 0 if below threshold.
+      outbound_score: parsed from 959100, the RESPONSE's anomaly score
+                     (SQL error, stack trace, directory listing, ... in
+                     what the server sent back); 0 if below threshold.
       band:          none / low / mid / high (see band_for).
       unique_id:     modsec's transaction id, to cross-ref the raw log.
       hostname:      request Host.
+      attacks:       comma-joined CRS attack types (rce, sqli, lfi, ...).
+      rule_msgs:     " | "-joined descriptions of the detection rules
+                     that matched, de-duplicated.
+      matched_in:    comma-joined request variables they matched in
+                     (ARGS:path, REQUEST_BODY, ...), names only, never
+                     the values.
     """
     req = txn.get("request") or {}
     resp = txn.get("response") or {}
@@ -240,6 +285,7 @@ def flatten(txn):
     rule_ids = [(m.get("details") or {}).get("ruleId") for m in messages]
     rule_ids = [r for r in rule_ids if r]
     score = parse_score(messages)
+    attacks, msgs, where = describe(messages)
     uri = req.get("uri") or ""
 
     return {
@@ -253,9 +299,13 @@ def flatten(txn):
         "rule_ids":      ",".join(rule_ids),
         "n_rules":       len(messages),
         "anomaly_score": score,
+        "outbound_score": parse_score(messages, "959100"),
         "band":          band_for(score),
         "unique_id":     txn.get("unique_id", ""),
         "hostname":      req.get("hostname", ""),
+        "attacks":       ",".join(attacks),
+        "rule_msgs":     " | ".join(msgs),
+        "matched_in":    ",".join(where),
     }
 
 # ---------------------------------------------------------------------

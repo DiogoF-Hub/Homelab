@@ -18,8 +18,10 @@ the final data-field filter, and the embed.
 WIRED SOURCES (the three pipelines configured today):
   - modsec : flattened ModSecurity events from the Vault VM sidecar
              (sidecar/vault/modsec-tail.py), tiered by manager-modsec-rules.xml.
-             Pings on band=high only (rule 100303, level 11), the
-             multi-vector attacks, never the scanner noise.
+             Posts band=high (rule 100303, level 11), the multi-vector
+             attacks, without an @ (already blocked and banned), and a
+             flagged RESPONSE (rule 100304, level 12) with an @; never the
+             scanner noise below band=high.
   - dns    : Pi-hole FTL events from the Vault VM (manager-rules.xml).
              Pings on blocked=true EXCEPT status=blocked-external-null-reply
              (upstream NULL-reply noise), matching the dashboard filter.
@@ -42,7 +44,9 @@ CrowdSec is a bigger lift, it doesn't ship to Wazuh in this stack at all
 (feeds the BunkerWeb plugin + VPS firewall bouncer), so that's a whole
 separate pipeline, not just a formatter.
 
-stdlib only (urllib, json, datetime, zoneinfo), no pip, no requests.
+stdlib only (urllib, json, datetime, zoneinfo), no pip, no requests. One
+optional Debian package, python3-maxminddb, for the local GeoIP lookup (see
+geoip_local); without it the country comes from ip-api.com instead.
 """
 
 import sys
@@ -50,8 +54,10 @@ import json
 import time
 import fcntl
 import ipaddress
+import urllib.error
 import urllib.request
-from datetime import datetime
+from urllib.parse import quote
+from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
 # Optional Discord mention prepended to every notification (a role or
@@ -92,6 +98,21 @@ except (FileNotFoundError, ValueError, OSError):
 # The side-file may also hold the mention, e.g. "mention": "<@123456789>",
 # so it survives re-installing this script too.
 MENTION = WEBHOOKS.pop("mention", MENTION)
+# It may also map the hostnames BunkerWeb serves to a label for the modsec
+# embed's Target field, kept there so the real domains stay out of the repo:
+#   "modsec_targets": {"vault.example.com": "🔐 Vaultwarden",
+#                      "example.com": "🌐 Apex site"}
+# Every message's title links to its alert on the Wazuh dashboard, at the
+# "dashboard_url" from the side-file (kept there so the address isn't in the
+# repo); unset or still a placeholder = no links. Discord rejects a link
+# whose host has no dot (https://wazuh-home -> HTTP 400, tested 2026-10-17),
+# so it has to be an IP or a full name (wazuh-home.localdomain, or the
+# Tailscale name to open the links from anywhere).
+DASHBOARD_URL = str(WEBHOOKS.pop("dashboard_url", "")).rstrip("/")
+ALERT_URL = ""      # set per alert in main(), added to the embed by deliver()
+_targets = WEBHOOKS.pop("modsec_targets", {})
+MODSEC_TARGETS = ({str(k).lower().rstrip("."): str(v) for k, v in _targets.items()}
+                  if isinstance(_targets, dict) else {})
 
 
 # ---------------------------------------------------------------------------
@@ -125,11 +146,50 @@ def is_private_ip(ip):
     return ip.startswith(private_prefixes)
 
 
+# MaxMind's GeoLite2-City as geoipupdate keeps it, the same data
+# scripts/main.sh copies into the indexer for the dashboard's GeoLocation
+# (the indexer's own copy sits in folders the wazuh user can't enter).
+# Looking IPs up here keeps Discord and the dashboard in agreement, and
+# keeps attacker IPs on the box.
+GEOIP_DB = "/var/lib/GeoIP/GeoLite2-City.mmdb"
+
+
+def geoip_local(ip):
+    """
+    Country/city from the local GeoLite2-City file, in ip-api's key names.
+    Fields are empty when the IP isn't in the database (then it shows as
+    Unknown, no outside lookup). Returns None only when the lookup can't run
+    at all: python3-maxminddb missing, or the file unreadable by the wazuh
+    user. resolve_geo then falls back to ip-api.com.
+    """
+    try:
+        import maxminddb
+        reader = maxminddb.open_database(GEOIP_DB)
+    except Exception:
+        return None
+    try:
+        rec = reader.get(ip) or {}
+    except ValueError:      # not an IP address
+        rec = {}
+    finally:
+        reader.close()
+    country = rec.get("country") or {}
+    city = rec.get("city") or {}
+    region = (rec.get("subdivisions") or [{}])[0]
+    return {
+        "country":     country.get("names", {}).get("en", ""),
+        "countryCode": country.get("iso_code", ""),
+        "city":        city.get("names", {}).get("en", ""),
+        "regionName":  region.get("names", {}).get("en", ""),
+    }
+
+
 def geoip_lookup(ip):
     """
-    Best-effort country/city from ip-api.com (free tier, HTTP only).
-    Requires manager egress to ip-api.com:80. Fails soft to {} so the
-    embed just omits geo if there's no egress or the lookup errors.
+    Fallback when geoip_local can't run: best-effort country/city from
+    ip-api.com (free tier, HTTP only). Requires manager egress to
+    ip-api.com:80. Fails soft to {} so the embed just omits geo if there's
+    no egress or the lookup errors.
     """
     url = f"http://ip-api.com/json/{ip}?fields=country,countryCode,city,regionName"
     try:
@@ -144,7 +204,9 @@ def geoip_lookup(ip):
 def resolve_geo(src_ip, geo):
     """
     Build (country_display, location) from Wazuh's GeoLocation block if
-    present, else an ip-api fallback, else a private/unknown label.
+    present (it never is for integrations: the indexer adds it after this
+    script ran), else the local GeoLite2 file, else ip-api.com when the
+    local lookup can't run, else a private/unknown label.
     """
     country = geo.get("country_name", "")
     country_code = geo.get("country_code2", "")
@@ -152,7 +214,9 @@ def resolve_geo(src_ip, geo):
     region = geo.get("region_name", "")
 
     if not country and src_ip not in ("N/A", "") and not is_private_ip(src_ip):
-        fb = geoip_lookup(src_ip)
+        fb = geoip_local(src_ip)
+        if fb is None:
+            fb = geoip_lookup(src_ip)
         country = fb.get("country", "")
         country_code = fb.get("countryCode", "")
         city = fb.get("city", "")
@@ -180,13 +244,94 @@ def resolve_geo(src_ip, geo):
     return country_display, location
 
 
+def modsec_target(hostname):
+    """
+    Which site a ModSecurity hit was aimed at, from the event's `hostname`
+    (the host the client asked for, so attacker-controlled: shown in a
+    code span, backticks stripped, capped at 100 chars). A name listed in
+    MODSEC_TARGETS gets its label; a bare IP is called out as such; any
+    other name is "Unknown host" once MODSEC_TARGETS is filled in, and
+    shown as-is before that.
+    """
+    raw = str(hostname or "").strip()
+    if not raw:
+        return "⚠️ No hostname"
+    host = raw.lower()
+    if host.startswith("["):            # [v6] or [v6]:port
+        host = host[1:].split("]", 1)[0]
+    elif host.count(":") == 1:          # name:port or v4:port
+        host = host.split(":", 1)[0]
+    host = host.rstrip(".")
+    shown = "`{}`".format(raw.replace("`", "")[:100])
+
+    if host in MODSEC_TARGETS:
+        return f"{MODSEC_TARGETS[host]} ({shown})"
+    try:
+        ipaddress.ip_address(host)
+        return f"⚠️ Direct IP ({shown})"
+    except ValueError:
+        pass
+    return f"⚠️ Unknown host ({shown})" if MODSEC_TARGETS else shown
+
+
+# CRS "attack-*" tag suffixes (the sidecar's `attacks` field) in words.
+# An unknown one is shown as-is.
+CRS_ATTACK_NAMES = {
+    "protocol":          "Protocol violation",
+    "lfi":               "Path traversal / file access",
+    "rfi":               "Remote file inclusion",
+    "rce":               "Remote command execution",
+    "injection-php":     "PHP injection",
+    "injection-generic": "Code injection",
+    "injection-java":    "Java injection",
+    "xss":               "Cross-site scripting (XSS)",
+    "sqli":              "SQL injection",
+    "session-fixation":  "Session fixation",
+    "disclosure":        "Information leak",
+    "reputation-scanner":   "Known scanner",
+    "reputation-scripting": "Scripting tool",
+    "generic":           "Generic attack",
+}
+
+
+def _code(text, limit=64):
+    """Client-controlled text as an inline code span: no backticks, capped."""
+    return "`{}`".format(str(text).replace("`", "")[:limit])
+
+
+def _modsec_detail_fields(data):
+    """
+    The "what did they try" fields of a modsec embed, from the sidecar's
+    attacks / rule_msgs / matched_in. Events from before the sidecar shipped
+    them just get none of these fields.
+    """
+    fields = []
+    attacks = [a for a in str(data.get("attacks") or "").split(",") if a]
+    if attacks:
+        fields.append({"name": "Attack types", "inline": False,
+                       "value": " · ".join(CRS_ATTACK_NAMES.get(a, a) for a in attacks)[:1024]})
+    msgs = [m.strip() for m in str(data.get("rule_msgs") or "").split(" | ") if m.strip()]
+    if msgs:
+        shown = msgs[:5]
+        value = "\n".join(f"• {m[:150]}" for m in shown)
+        if len(msgs) > len(shown):
+            value += f"\n… +{len(msgs) - len(shown)} more"
+        fields.append({"name": "What matched", "value": value[:1024], "inline": False})
+    where = [w for w in str(data.get("matched_in") or "").split(",") if w]
+    if where:
+        fields.append({"name": "Where", "inline": False,
+                       "value": ", ".join(_code(w) for w in where)[:1024]})
+    return fields
+
+
 # ---------------------------------------------------------------------------
 # Embed formatters (one per wired source)
 # ---------------------------------------------------------------------------
 
 def format_modsecurity(alert):
     """
-    Discord embed from a flattened modsec event (rule 100303, band=high).
+    Discord embed from a flattened modsec event: rule 100303 (band=high),
+    or rule 100304 (the response was flagged, outbound_score > 0).
     Reads the clean fields the sidecar emits; no full_log scraping.
     """
     data = alert.get("data", {})
@@ -197,36 +342,53 @@ def format_modsecurity(alert):
     method = data.get("method", "N/A")
     path = data.get("path", "N/A")
     score = data.get("anomaly_score", "N/A")
-    rule_ids = data.get("rule_ids", "N/A")
+    outbound = str(data.get("outbound_score") or "0")
+    response_flagged = outbound not in ("", "0")
+    rule_ids = ",".join(dict.fromkeys(r for r in str(data.get("rule_ids") or "").split(",") if r)) or "N/A"
+    unique_id = data.get("unique_id", "")
     engine = data.get("engine", "N/A")
     http_code = data.get("http_code", "N/A")
+    target = modsec_target(data.get("hostname"))
     agent_name = agent.get("name", "N/A")
     timestamp = alert.get("timestamp", "N/A")
 
     country_display, location = resolve_geo(src_ip, geo)
 
     # In DetectionOnly the score is what modsec WOULD block; in On it's
-    # what it DID block. Make that explicit.
-    if engine == "On":
+    # what it DID block. Make that explicit. ModSecurity v3 reports the
+    # SecRuleEngine On setting as "Enabled" in the audit log.
+    if engine in ("On", "Enabled"):
         enforced = "On (blocked)"
     elif engine == "DetectionOnly":
         enforced = "DetectionOnly (would block)"
     else:
         enforced = str(engine)
 
+    if response_flagged:
+        # Rule 100304: what the server SENT BACK looked like a leak, and the
+        # response was blocked. Either a real leak or a false positive
+        # breaking a real client.
+        title, color = "🔥 ModSecurity , suspicious response (blocked)", 15105570  # orange
+    else:
+        title, color = "🚨 ModSecurity , high-severity attack", 15158332        # red
+    extra = [{"name": "Outbound score", "value": outbound, "inline": True}] if response_flagged else []
+
     return {
-        "title": "🚨 ModSecurity , high-severity attack",
-        "color": 15158332,  # red
-        "fields": [
+        "title": title,
+        "color": color,
+        "fields": extra + [
             {"name": "Agent",         "value": agent_name,           "inline": True},
             {"name": "Source IP",     "value": src_ip,               "inline": True},
             {"name": "Country",       "value": country_display,      "inline": True},
             {"name": "Location",      "value": location,             "inline": True},
             {"name": "HTTP code",     "value": str(http_code),       "inline": True},
             {"name": "Anomaly score", "value": str(score),           "inline": True},
+            {"name": "Target",        "value": target,               "inline": False},
             {"name": "Request",       "value": f"`{method} {path}`", "inline": False},
+        ] + _modsec_detail_fields(data) + [
+            {"name": "Engine",        "value": enforced,             "inline": True},
+            {"name": "Audit ID",      "value": _code(unique_id) if unique_id else "N/A", "inline": True},
             {"name": "CRS rules",     "value": f"`{rule_ids}`",      "inline": False},
-            {"name": "Engine",        "value": enforced,             "inline": False},
         ],
         "footer": {"text": format_timestamp(timestamp)},
     }
@@ -415,6 +577,8 @@ def format_host_maintenance(alert):
         fields.append({"name": "Containers", "value": data.get("containers") or "N/A", "inline": True})
         fields.append({"name": "Docker images updated",
                        "value": images.replace(",", ", ") if images else "none", "inline": False})
+    if data.get("geoip"):
+        fields.append({"name": "GeoIP database", "value": data["geoip"], "inline": True})
 
     errors = data.get("errors", "")
     if errors:
@@ -664,6 +828,33 @@ def send_discord(webhook_url, embed, mention=None, retries=3, delay=5):
                 raise
 
 
+def dashboard_link(alert):
+    """
+    Discover link to exactly this alert: a search on its Wazuh alert `id`
+    (always indexed; our own data.* fields aren't searchable), in a fixed
+    window of an hour either side of it, so the link still works weeks
+    later. Same URL shape the dashboard itself produces. "" if there's no
+    dashboard_url, or the alert has no usable id or timestamp.
+    """
+    alert_id = str(alert.get("id") or "")
+    host = DASHBOARD_URL.split("://", 1)[-1].split("/", 1)[0]
+    if "." not in host or "REPLACE_WITH" in host or not alert_id.replace(".", "").isdigit():
+        return ""       # no dot: Discord would reject the whole message
+    try:
+        t = datetime.strptime(alert.get("timestamp", ""), "%Y-%m-%dT%H:%M:%S.%f%z")
+    except ValueError:
+        return ""
+    t = t.astimezone(timezone.utc)
+    span = lambda d: (t + d).strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
+    query = quote(f'id:"{alert_id}"', safe=":")
+    return (f"{DASHBOARD_URL}/app/data-explorer/discover#?"
+            "_a=(discover:(columns:!(_source),isDirty:!f,sort:!()),"
+            "metadata:(indexPattern:'wazuh-alerts-*',view:discover))"
+            "&_g=(filters:!(),refreshInterval:(pause:!t,value:0),"
+            f"time:(from:'{span(timedelta(hours=-1))}',to:'{span(timedelta(hours=1))}'))"
+            f"&_q=(filters:!(),query:(language:kuery,query:'{query}'))")
+
+
 def deliver(channel, embed, mention=MENTION):
     """
     Post to the channel's webhook. Skips silently if that channel's URL is
@@ -674,7 +865,17 @@ def deliver(channel, embed, mention=MENTION):
     url = WEBHOOKS.get(channel, "")
     if not url or "REPLACE_WITH" in url:
         return
-    send_discord(url, embed, mention=(mention or None))
+    if ALERT_URL and "url" not in embed:
+        embed["url"] = ALERT_URL       # makes the title a link to the alert
+    try:
+        send_discord(url, embed, mention=(mention or None))
+    except urllib.error.HTTPError as e:
+        # Discord answers 400 to an embed it doesn't like; if the link is
+        # the cause, the alert still goes out, just without it.
+        if e.code == 400 and embed.pop("url", None):
+            send_discord(url, embed, mention=(mention or None))
+        else:
+            raise
 
 
 # ---------------------------------------------------------------------------
@@ -690,16 +891,26 @@ def main():
     with open(sys.argv[1]) as f:
         alert = json.load(f)
 
+    global ALERT_URL
+    ALERT_URL = dashboard_link(alert)
+
     data = alert.get("data", {})
     rule = alert.get("rule", {})
     groups = rule.get("groups", [])
     level = int(rule.get("level", 0))
     location = alert.get("location", "")
 
-    # --- modsec: band=high attacks only (rule 100303, level 11) ---
+    # --- modsec: band=high attacks (rule 100303, level 11) and flagged
+    #     responses (rule 100304, level 12). Only a flagged response gets
+    #     the @: a band=high attack was already blocked (engine On), and
+    #     CrowdSec bans anything scoring 10+, so there's nothing to do but
+    #     read it. A flagged response is a possible leak, or a false
+    #     positive breaking a real client: look now. ---
     if "modsecurity" in groups:
         if data.get("band") == "high" or level >= 11:
-            deliver("modsec", format_modsecurity(alert))
+            flagged = str(data.get("outbound_score") or "0") not in ("", "0")
+            deliver("modsec", format_modsecurity(alert),
+                    mention=(MENTION if flagged else ""))
 
     # --- dns: only Pi-hole allowlist denials (status=blocked-regex), i.e.
     #     the Vault VM tried to resolve a domain that isn't on its allowlist.

@@ -16,7 +16,7 @@
   DNS pipeline) for dashboard drill-down; the Discord report fires only on
   the phase=run summary.
 
-  Rule-ID block 100500-100502 (DNS 100250-100253, modsec 100300-100303,
+  Rule-ID block 100500-100502 (DNS 100250-100253, modsec 100300-100304,
   fail2ban 100400-100401 are taken):
     100500 (level 0):  base, every vault_maint event. Archived, no alert.
     100501 (level 3):  vw_sev=info  (overall ok). Nightly heartbeat.

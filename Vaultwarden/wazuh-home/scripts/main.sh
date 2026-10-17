@@ -1,10 +1,10 @@
 #!/bin/bash
 #
 # main.sh: nightly OS update for wazuh-home (manager + indexer + dashboard).
-# Run by root's cron. apt update / full-upgrade / autoremove / clean, log to
-# the TrueNAS share, and reboot only when the update needs it (a package
-# wrote /var/run/reboot-required, or needrestart sees a newer kernel than
-# the running one).
+# Run by root's cron. apt update / full-upgrade / autoremove / clean, refresh
+# the indexer's GeoIP database, log to the TrueNAS share, and reboot only
+# when the update needs it (a package wrote /var/run/reboot-required, or
+# needrestart sees a newer kernel than the running one).
 #
 # The Wazuh packages (wazuh-manager, wazuh-indexer, wazuh-dashboard,
 # filebeat) are apt-held, so this never upgrades them; they're upgraded by
@@ -202,7 +202,51 @@ echo "System Update finished at: $(date)"
 echo "-----------------------------------------------------------"
 
 # ======================
-# 2. CONDITIONAL REBOOT
+# 2. GEOIP DATABASE
+# ======================
+# The dashboard's GeoLocation comes from the GeoLite2-City database the
+# indexer ships in its ingest-geoip module, which it never refreshes, so IP
+# ranges that changed country since the build show the old one.
+# geoipupdate (/etc/GeoIP.conf) keeps MaxMind's current copy in
+# /var/lib/GeoIP, where custom-discord also reads it (the wazuh user can't
+# get into the indexer's folders). When that copy differs from the
+# indexer's, it's copied over the indexer's file: after a new MaxMind
+# release (about twice a week), or after a wazuh-indexer upgrade put the
+# old bundled file back. It has to be that file: the indexer refuses to
+# start if a database of the same name sits in
+# /etc/wazuh-indexer/ingest-geoip/. The indexer only reads it at startup, so
+# a changed file is loaded by the reboot below, or by an indexer restart
+# when there's no reboot (step 3). Skipped (geoip=not set up) when
+# geoipupdate isn't installed. See ../README.md, "GeoIP database".
+GEOIP_SRC="/var/lib/GeoIP/GeoLite2-City.mmdb"
+GEOIP_DB="/usr/share/wazuh-indexer/modules/ingest-geoip/GeoLite2-City.mmdb"
+GEOIP_PREV="/root/GeoLite2-City.mmdb.prev"
+GEOIP_STATUS="not set up"
+GEOIP_CHANGED=""
+if command -v geoipupdate > /dev/null 2>&1 && [ -f /etc/GeoIP.conf ]; then
+    MAINT_STEP="GeoIP database refresh"
+    echo -e "\n[->] Refreshing the GeoIP database..."
+    GEOIP_STATUS="unchanged"
+    if ! geoipupdate -v; then
+        GEOIP_STATUS="update failed"
+        MAINT_ERRORS+=("geoipupdate failed, the GeoIP database was not refreshed")
+    fi
+    # Even after a failed download, a current copy from an earlier night
+    # still goes in if the indexer's file differs (e.g. after an upgrade).
+    if [ -f "$GEOIP_SRC" ] && ! cmp -s "$GEOIP_SRC" "$GEOIP_DB"; then
+        cp -p "$GEOIP_DB" "$GEOIP_PREV" 2>/dev/null
+        # cp onto the existing file keeps the indexer's owner and mode.
+        if cp "$GEOIP_SRC" "$GEOIP_DB"; then
+            GEOIP_STATUS="updated"
+            GEOIP_CHANGED=1
+        else
+            MAINT_ERRORS+=("could not copy the GeoIP database into the indexer")
+        fi
+    fi
+fi
+
+# ======================
+# 3. CONDITIONAL REBOOT
 # ======================
 # stdout is already redirected to $SYSTEM_LOG, so a plain echo is enough.
 # Do NOT pipe through `tee -a "$SYSTEM_LOG"` here: tee would write to the file
@@ -226,10 +270,31 @@ if [ -n "$REBOOT_REASON" ]; then
     # Report first. This host IS the manager: give it time to read the
     # line, match the rule and run custom-discord before the reboot stops
     # Wazuh.
-    maint_emit "reboot=rebooting ($REBOOT_REASON)"
+    [ -n "$GEOIP_CHANGED" ] && GEOIP_STATUS="updated, loaded by the reboot"
+    maint_emit "reboot=rebooting ($REBOOT_REASON)" "geoip=$GEOIP_STATUS"
     sleep 15
     reboot -h now
 else
     echo "[->] No reboot required."
-    maint_emit "reboot=not needed"
+    # No reboot to load a new GeoIP database: restart the indexer. If it
+    # won't start on the new file, put the previous one back and restart
+    # again, so the dashboard isn't left down until morning.
+    if [ -n "$GEOIP_CHANGED" ]; then
+        MAINT_STEP="restarting wazuh-indexer for the new GeoIP database"
+        echo "[->] Restarting wazuh-indexer to load the new GeoIP database..."
+        if systemctl restart wazuh-indexer; then
+            GEOIP_STATUS="updated, indexer restarted"
+        else
+            echo "[✗] wazuh-indexer failed to start, putting the previous GeoIP database back..."
+            cp -p "$GEOIP_PREV" "$GEOIP_DB"
+            if systemctl restart wazuh-indexer; then
+                GEOIP_STATUS="rolled back"
+                MAINT_ERRORS+=("wazuh-indexer failed to start on the new GeoIP database, the previous one was put back")
+            else
+                GEOIP_STATUS="indexer down"
+                MAINT_FATAL="wazuh-indexer is DOWN after the GeoIP refresh, even with the previous database put back"
+            fi
+        fi
+    fi
+    maint_emit "reboot=not needed" "geoip=$GEOIP_STATUS"
 fi

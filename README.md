@@ -283,7 +283,7 @@ The webhook URLs and the @ live only on the manager, in `/var/ossec/integrations
 | General | #agents | a Wazuh agent has had no contact with the manager for 15 min (VM down or hung, agent stopped, network cut). A normal reboot's clean stop/start isn't posted. |
 | General | #config-files | a nightly upgrade on any VM kept a locally edited config file and saved the package's new default as `.dpkg-dist`, so you can compare them. |
 | Vaultwarden | #maintenance | the Vault VM's nightly report: backup, container images (old → new version), APT upgrades, reboot, and a newer `wazuh-agent` when one is out. |
-| Vaultwarden | #modsecurity-blocks | BunkerWeb's WAF saw a real attack (CRS anomaly score ≥ 30). |
+| Vaultwarden | #modsecurity-blocks | BunkerWeb's WAF saw a real attack (CRS anomaly score ≥ 30): which site, what was tried, where it matched, and a link to the alert. No @, since it was already blocked and the IP banned. **With an @**: a server **response** looked like a leak (SQL error, stack trace, ...) and was blocked, which is either a real leak or Vaultwarden broken for someone. |
 | Vaultwarden | #dns-block | the Vault VM asked Pi-hole for a domain that isn't on its allowlist. |
 | Vaultwarden | #squid-block | Squid refused an outbound request from the Vault VM (domain not allowlisted). |
 | Vaultwarden | #firewall | OPNsense blocked a new connection from or to the Vault VM. |

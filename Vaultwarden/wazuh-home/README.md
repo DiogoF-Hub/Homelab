@@ -7,7 +7,7 @@ This folder holds the Wazuh-side configuration for the Vaultwarden stack: struct
 | Source | Surfaces | Manager rules | Discord (channel / when) |
 |--------|----------|---------------|--------------------------|
 | **DNS** (Pi-hole FTL sidecar) | every Vault VM DNS query; allowlist denials | 100250-100253 | #dns, `status=blocked-regex` |
-| **ModSecurity** (BunkerWeb WAF) | CRS matches, tiered by anomaly score | 100300-100303 | #modsec, `band=high` (score ≥ 30) |
+| **ModSecurity** (BunkerWeb WAF) | CRS matches, tiered by anomaly score | 100300-100304 | #modsec, `band=high` (score ≥ 30) or a flagged response (100304) |
 | **fail2ban** (all hosts) | SSH brute-force bans | 100400-100401 | #fail2ban, every ban |
 | **Squid** (LAN Pi-hole VM) | egress-allowlist denials | built-in `squid` group | #squid, `action=TCP_DENIED` |
 | **host maintenance** (Pi-hole VM, wazuh-home, VPS `main.sh`) | nightly run summary per host (apt, reboot, Pi-hole images) | 100510-100512 | #maintenance of each host's Discord category, @ on degraded/fail or updated Pi-hole images |
@@ -16,7 +16,7 @@ This folder holds the Wazuh-side configuration for the Vaultwarden stack: struct
 | **Agent health** (all agents) | an agent has had no contact for 15 min | built-in 504 | #agents, @ every time |
 | **OPNsense firewall** (syslog) | blocked traffic from / to the Vault VM | 100700-100701 (on built-in 87701) | #firewall, once per connection per 3 min |
 
-One integrator, `integrations/custom-discord.py`, fans these out to per-channel Discord webhooks (the data-field filter lives in the script + a `discord-webhooks.json` side-file on the manager holds the real URLs; `integrations/manager-discord-integration.xml` has the `<integration>` blocks that decide which alerts reach it). Rule-ID map: DNS 100250-100253, ModSecurity 100300-100303, fail2ban 100400-100401, maintenance 100500-100502, host maintenance 100510-100512, dpkg config files 100600-100601, OPNsense firewall 100700-100701 (the retired text-log DNS pipeline used 100190-100210; keep new pipelines clear of those).
+One integrator, `integrations/custom-discord.py`, fans these out to per-channel Discord webhooks (the data-field filter lives in the script + a `discord-webhooks.json` side-file on the manager holds the real URLs; `integrations/manager-discord-integration.xml` has the `<integration>` blocks that decide which alerts reach it). Rule-ID map: DNS 100250-100253, ModSecurity 100300-100304, fail2ban 100400-100401, maintenance 100500-100502, host maintenance 100510-100512, dpkg config files 100600-100601, OPNsense firewall 100700-100701 (the retired text-log DNS pipeline used 100190-100210; keep new pipelines clear of those).
 
 Squid has no files in this folder beyond its `<integration>` block: the Wazuh agent installer auto-discovers `/var/log/squid/access.log` on the LAN Pi-hole VM (as long as Squid is installed before the agent), and the squid decoder/rules are built into Wazuh, so there's nothing custom to deploy for it.
 
@@ -312,12 +312,19 @@ sudo systemctl restart wazuh-manager
 
 BunkerWeb's `modsec_audit.log` is JSON, but Wazuh's JSON decoder collapses its `messages[]` array (where the matched rule IDs / severities live) into one opaque string. So a sidecar on the **Vault VM** flattens each transaction into one clean line first.
 
-- `sidecar/vault/modsec-tail.py` , tails `/srv/bw-logs/modsec_audit.log`, emits flat events (`srcip`, `method`, `path`, `http_code`, `engine`, `rule_ids`, `anomaly_score`, `band`, ...) to `/var/log/modsec-events/events.log`. Runs as a dedicated unprivileged **`modsectail`** user (least privilege on the crown-jewels VM; the Pi-hole sidecar runs as root only because it reads a root-owned DB on a less-sensitive box). Byte-offset state for gap-free resume, IPv4/IPv6, stdlib only, no shell-out.
+- `sidecar/vault/modsec-tail.py` , tails `/srv/bw-logs/modsec_audit.log`, emits flat events (`srcip`, `method`, `path`, `http_code`, `engine`, `rule_ids`, `anomaly_score`, `band`, `hostname`, `attacks`, `rule_msgs`, `matched_in`, `unique_id`, ...) to `/var/log/modsec-events/events.log`. Runs as a dedicated unprivileged **`modsectail`** user (least privilege on the crown-jewels VM; the Pi-hole sidecar runs as root only because it reads a root-owned DB on a less-sensitive box). Byte-offset state for gap-free resume, IPv4/IPv6, stdlib only, no shell-out.
 - `sidecar/vault/modsec-tail.service` , hardened systemd unit.
 - `modsec/vault-modsec-agent.localfile.xml` , agent tails the events log.
-- `modsec/manager-modsec-rules.xml` , rules 100300 (base, L0) / 100301 (band=none, L3) / 100302 (band=low|mid, L7) / 100303 (band=high, L11).
+- `modsec/manager-modsec-rules.xml` , rules 100300 (base, L0) / 100301 (band=none, L3) / 100302 (band=low|mid, L7) / 100303 (band=high, L11) / 100304 (response flagged, `outbound_score` > 0, L12).
 
-Tiering is by **CRS anomaly score** (rule 949110's "Total Score: N"), NOT http_code, which is backwards here: the heaviest multi-vector attacks hit `POST /` and return 404 while harmless missing-UA scans return 403. Discord fires on `band=high` (100303) only. Works identically before and after the engine flip (`DetectionOnly` -> `On`); the `engine` field rides along so the alert reads "would block" vs "blocked". Full rationale in the file headers.
+Tiering is by **CRS anomaly score** (rule 949110's "Total Score: N"), NOT http_code, which is backwards here: the heaviest multi-vector attacks hit `POST /` and return 404 while harmless missing-UA scans return 403. Discord fires on `band=high` (100303), and on **100304**: CRS's response-side rules (95x) flagged what Vaultwarden or the apex site **sent back** as a possible leak (SQL error, stack trace, directory listing), and rule 959100 blocked that response. `SecResponseBodyAccess` is On in BunkerWeb, and none had fired in the kept audit logs as of 2026-10-17, so one is either a real leak or a false positive breaking a real client. The message gets its own 🔥 title and an **Outbound score**, and it's the only ModSecurity message with an @: a `band=high` attack was already blocked and its IP banned (CrowdSec bans from score 10), so pinging for those 2–3 times a day only trained you to ignore pings. Below `high`, blocked requests stay off Discord on purpose: two weeks of data (2026-10) had ~1,000 low/mid blocks, all scanners, and not one false positive on Vaultwarden's own `/api/` paths. Works identically before and after the engine flip (`DetectionOnly` -> `On`); the `engine` field rides along so the alert reads "would block" vs "blocked". Full rationale in the file headers.
+
+**What the attacker tried.** The Discord message says it in words rather than only rule numbers: **Attack types** (from the CRS `attack-*` tags, e.g. *Path traversal / file access · Remote command execution*), **What matched** (CRS's own description of each rule that fired, de-duplicated), **Where** (the request variables they matched in, e.g. `ARGS:path`, `REQUEST_BODY`), the **Target** site and an **Audit ID**. The payload itself is deliberately **never** shipped, neither to Wazuh nor to Discord: this is a password manager, and on a false positive the matched text could be a real user's login data (the same reason `path` drops the query string). To see exactly what was sent, look the Audit ID up on the Vault VM:
+
+```bash
+sudo zgrep -hF '<Audit ID>' /srv/bw-logs/modsec_audit.log* | jq .
+sudo zgrep -hF '<Audit ID>' /srv/bw-logs/modsec_audit.log* | jq '.transaction.messages[] | {message, data: .details.data}'   # just what matched
+```
 
 ## fail2ban bans (all hosts)
 
@@ -402,7 +409,7 @@ The run rules match a **derived `vw_sev`** field (`info`/`warn`), NOT `status`: 
 
 ## Discord notifications (custom-discord integrator)
 
-`integrations/custom-discord.py` is one Wazuh integrator all eight sources route through. It holds a **per-channel webhook map** (placeholders in the repo; the real URLs live in a gitignored `discord-webhooks.json` side-file on the manager, mode `0640 root:wazuh`, whose keys override the placeholders at startup, so re-installing the script never clobbers them, fill them once; an optional `"mention": "<@your-user-id>"` key in the same file is the @ the pinging messages use) and applies the final data-field filter each source needs (dns: `status=blocked-regex`; squid: `action=TCP_DENIED`; modsec: `band=high`; fail2ban: rule 100401; maintenance: rules 100501/100502, @ when `status != ok` or an image was updated; host maintenance: rules 100511/100512, to `maintenance-<role>`, same @ rule; conffile: rule 100601, always @; firewall: rules 100700/100701, new connections only (no broadcast/multicast or out-of-state TCP), once per src -> dst:port/proto per 3 min). It posts native Discord embeds (GeoIP-enriched for public source IPs), stdlib-only (urllib).
+`integrations/custom-discord.py` is one Wazuh integrator all eight sources route through. It holds a **per-channel webhook map** (placeholders in the repo; the real URLs live in a gitignored `discord-webhooks.json` side-file on the manager, mode `0640 root:wazuh`, whose keys override the placeholders at startup, so re-installing the script never clobbers them, fill them once; an optional `"mention": "<@your-user-id>"` key in the same file is the @ the pinging messages use, and an optional `"modsec_targets"` map labels the hostnames BunkerWeb serves for the ModSecurity message's **Target** field, e.g. `{"vault.example.com": "🔐 Vaultwarden", "example.com": "🌐 Apex site"}`; a bare IP shows as ⚠️ Direct IP and any other name as ⚠️ Unknown host) and applies the final data-field filter each source needs (dns: `status=blocked-regex`; squid: `action=TCP_DENIED`; modsec: `band=high` posted without an @, a flagged response (100304) with one; fail2ban: rule 100401; maintenance: rules 100501/100502, @ when `status != ok` or an image was updated; host maintenance: rules 100511/100512, to `maintenance-<role>`, same @ rule; conffile: rule 100601, always @; firewall: rules 100700/100701, new connections only (no broadcast/multicast or out-of-state TCP), once per src -> dst:port/proto per 3 min). It posts native Discord embeds (GeoIP-enriched for public source IPs), stdlib-only (urllib). **Every message's title links to its alert on the dashboard**: a Discover search on the alert's Wazuh `id` (always searchable, unlike our own `data.*` fields), an hour either side of it so old links keep working, built from the `"dashboard_url"` in the side-file (e.g. `"https://192.0.2.10"`; kept there so the address isn't in the repo, and with no value there are no links). Discord rejects a link whose host has **no dot**, so `https://wazuh-home` can't be used: the whole message comes back `400` (tested 2026-10-17); an IP, `wazuh-home.localdomain` or the Tailscale name (`wazuh-home.<tailnet>.ts.net`) all work. The link only opens where that address is reachable: the IP on the LAN, the Tailscale name anywhere Tailscale is on. If Discord ever rejects the link, the message is resent without it rather than lost. An alert that never reached the indexer (e.g. while it refused events at the shard limit, see Retention below) has nothing to show, so its link comes up empty.
 
 - `integrations/custom-discord.py` , install at manager `/var/ossec/integrations/custom-discord` (mode 0750, `root:wazuh`; note: no `.py`, that's the name integratord calls).
 - `integrations/manager-discord-integration.xml` , the `<integration>` blocks (one per source, scoped by group / rule_id / level) for the manager's `ossec.conf`.
@@ -417,7 +424,7 @@ options edns0 trust-ad
 search localdomain
 ```
 
-plus `nohook resolv.conf` in `/etc/dhcpcd.conf`, so DHCP doesn't put `192.168.173.2` back.
+plus `nohook resolv.conf` in `/etc/dhcpcd.conf`, so DHCP doesn't put `192.168.173.2` back. **Restart dhcpcd (or reboot) right after adding `nohook`, then write `resolv.conf` and check it once more after a reboot.** dhcpcd only reads its config at start: on 2026-10-17 the copy that was already running still had the hook, and at the next shutdown it rewrote `resolv.conf` with no nameserver at all. wazuh-home came back resolving nothing (`nslookup` falling back to `127.0.0.1`), and every Discord post failed with `Temporary failure in name resolution` until the file was fixed.
 
 ## OS updates (manager host)
 
@@ -425,7 +432,8 @@ plus `nohook resolv.conf` in `/etc/dhcpcd.conf`, so DHCP doesn't put `192.168.17
 
 - **The Wazuh packages are held** (`wazuh-manager`, `wazuh-indexer`, `wazuh-dashboard`, `filebeat`), so `full-upgrade` lists them as kept back and skips them. Upgrade them by hand with [`UPGRADE.md`](UPGRADE.md).
 - **Edited config files are kept** (`--force-confdef --force-confold`, same as the Vault VM and Pi-hole VM scripts), so an edited file never stops the run at dpkg's prompt. The new default lands next to it as `.dpkg-dist`, and since the manager reads its own `/var/log/dpkg.log`, that also posts the 📝 #config-files message (rule 100601).
-- It sends nothing to Discord itself. Unlike the Vault VM's `main.sh`, there's no nightly summary; the log on TrueNAS is the record.
+- **It refreshes the indexer's GeoIP database** (`geoipupdate` into `/var/lib/GeoIP`, copied into the indexer when it differs, then an indexer restart only if there's no reboot), see [GeoIP database](#geoip-database-manager-host).
+- Each run ends with one status line that becomes the nightly report in **#maintenance of the Wazuh category** (see [Maintenance report of the other hosts](#maintenance-report-of-the-other-hosts-pi-hole-vm-wazuh-home-vps)); the full log stays on TrueNAS.
 
 Deploy:
 
@@ -454,6 +462,60 @@ systemctl show -p After wazuh-manager filebeat wazuh-dashboard   # each includes
 Then **Shutdown + Start** the VM from Proxmox, not a reboot from inside: the guest agent's virtio-serial port is only added at a cold start (`qm agent <vmid> ping` on the Proxmox host answers silently with exit 0 once it works). The agent only asks the guest to shut down; the ordering above is what makes that shutdown tidy. Ordering only, no `Requires=`, so an indexer that fails to start doesn't block the others. The drop-ins live under `/etc/systemd/system/`, outside the held packages, so upgrades leave them alone.
 
 The indexer is the slow one to stop (it flushes to disk). If the Proxmox host itself shuts down, it gives each VM its *Start/Shutdown order* timeout (VM → Options, 180 s by default) before stopping it hard; raise it for this VM if a shutdown ever runs over.
+
+## GeoIP database (manager host)
+
+The **Country** in a Discord message and the **GeoLocation** on the dashboard come from two different places. The integrator runs on the manager, before an alert reaches the indexer, so it never sees `GeoLocation`; it used to look every IP up live on ip-api.com, which is current. (It now reads the same database file as the indexer, see the end of this section.) The dashboard's `GeoLocation` is added later, when filebeat's Wazuh ingest pipeline stores the alert, by the indexer's `geoip` processor and the GeoLite2-City database `wazuh-indexer` ships in its `ingest-geoip` module. That copy is never refreshed, so IP ranges that changed country since it was built keep the old one. Noticed 2026-10-16 only because the two disagreed: a ModSecurity attacker's IP, in a cloud range that changed country after the bundled database was built, showed the right country on Discord and United States on the dashboard, at MaxMind's "somewhere in the US" placeholder location.
+
+The fix keeps MaxMind's current copy in `/var/lib/GeoIP/` (`geoipupdate`) and copies it **over the indexer's file**, `/usr/share/wazuh-indexer/modules/ingest-geoip/GeoLite2-City.mmdb`. The copy in `/var/lib/GeoIP/` is also what Discord reads (below): the `wazuh` user that runs the integrator can't get into the indexer's folders. A copy in `/etc/wazuh-indexer/ingest-geoip/`, which looks like the cleaner override, does **not** work: the indexer refuses to start when a database there has the same name as a bundled one (`expected database [GeoLite2-City.mmdb] to not exist in [/etc/wazuh-indexer/ingest-geoip]`, tried 2026-10-17). The other supported route, a differently named file there plus `database_file` on the `geoip` steps of Wazuh's ingest pipeline, isn't used either: that pipeline belongs to Wazuh's filebeat module and is replaced on upgrades, which would silently switch back to the stale file. Overwriting the bundled file leaves one thing to redo after an upgrade, copying the file back in, and the nightly run does it anyway. It needs a free MaxMind account and license key, and `geoipupdate`, which on Debian 13 is in **contrib**.
+
+```bash
+# 1. Enable contrib: add `contrib` after `main` on every `deb` line of
+#    /etc/apt/sources.list (a netinst install, like wazuh-home's), or on every
+#    `Components:` line of /etc/apt/sources.list.d/debian.sources, whichever exists
+sudo nano /etc/apt/sources.list
+sudo apt update && sudo apt install geoipupdate
+
+# 2. /etc/GeoIP.conf, replacing its contents (it holds the license key, so 600).
+#    A brand-new license key takes up to 5 minutes to activate; before that
+#    geoipupdate fails with 401 AUTHORIZATION_INVALID.
+#      AccountID <your account id>
+#      LicenseKey <your license key>
+#      EditionIDs GeoLite2-City
+#      DatabaseDirectory /var/lib/GeoIP
+sudo nano /etc/GeoIP.conf && sudo chmod 600 /etc/GeoIP.conf
+
+# 3. Download, keep the bundled file, copy the current one over it (cp onto
+#    the existing file keeps the indexer's owner and mode), restart the
+#    indexer (dashboard is down ~1 min). It only reads the database at startup.
+sudo mkdir -p /var/lib/GeoIP
+sudo geoipupdate -v
+sudo cp -p /usr/share/wazuh-indexer/modules/ingest-geoip/GeoLite2-City.mmdb /root/GeoLite2-City.mmdb.bundled
+sudo cp /var/lib/GeoIP/GeoLite2-City.mmdb /usr/share/wazuh-indexer/modules/ingest-geoip/GeoLite2-City.mmdb
+sudo systemctl restart wazuh-indexer
+```
+
+Check it by asking the indexer where an IP is, without storing anything, and compare with ip-api.com. Use an IP the two disagreed on, e.g. one from a Discord alert whose country the dashboard got wrong:
+
+```bash
+CERT="--cert /etc/wazuh-indexer/certs/admin.pem --key /etc/wazuh-indexer/certs/admin-key.pem"
+sudo curl -sk $CERT -X POST "https://127.0.0.1:9200/_ingest/pipeline/_simulate" -H 'Content-Type: application/json' \
+  -d '{"pipeline":{"processors":[{"geoip":{"field":"ip","target_field":"geo"}}]},"docs":[{"_source":{"ip":"<IP>"}}]}'
+curl -s "http://ip-api.com/json/<IP>?fields=country,countryCode"     # both should match
+```
+
+If the indexer doesn't come back: `sudo cp /root/GeoLite2-City.mmdb.bundled /usr/share/wazuh-indexer/modules/ingest-geoip/GeoLite2-City.mmdb && sudo systemctl start wazuh-indexer`. Only alerts stored **after** the restart get the new location; older ones keep what they were stored with.
+
+**Keeping it current:** `scripts/main.sh` runs `geoipupdate` every night (MaxMind publishes about twice a week, and the GeoLite2 license expects you to keep up), then copies `/var/lib/GeoIP`'s file over the indexer's whenever the two differ: after a new release, or after an indexer upgrade put the old file back. A changed file is loaded by the night's reboot, or, with no reboot, by an indexer restart, and the previous file goes back if the indexer won't start on the new one. The #maintenance report shows it as **GeoIP database**: `unchanged`, `updated, indexer restarted`, `updated, loaded by the reboot`, or 🟠 `update failed` / `rolled back`. A `wazuh-indexer` upgrade puts the old bundled file back, so [`UPGRADE.md`](UPGRADE.md) copies the current one in before starting the indexer (the nightly run would catch it a night later anyway).
+
+**Discord uses the same file.** `custom-discord.py` looks the IP up in `/var/lib/GeoIP/GeoLite2-City.mmdb` (`geoip_local()`), the same data the indexer gets, so the Country in a Discord message and on the dashboard always agree, and attacker IPs are no longer sent to a third party. It needs one package, from Debian main:
+
+```bash
+sudo apt install python3-maxminddb
+sudo -u wazuh python3 -c "import maxminddb; print(maxminddb.open_database('/var/lib/GeoIP/GeoLite2-City.mmdb').get('8.8.8.8')['country']['names']['en'])"   # United States
+```
+
+The second line checks that the `wazuh` user, which runs the integrator, can read the file. An IP the database doesn't know shows as Unknown, with no outside lookup. ip-api.com is only the fallback for when the local lookup can't run at all (package missing or file unreadable), so a half-set-up manager still gets countries.
 
 ## Retention and indexer sizing (manager host)
 

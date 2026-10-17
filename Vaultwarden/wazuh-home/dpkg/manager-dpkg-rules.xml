@@ -10,7 +10,7 @@
   (windows-date-format); the dpkg_decision field is what tells these
   lines apart from anything else starting with a timestamp.
 
-  Rule-ID block 100600-100601 (DNS 100250-100253, modsec 100300-100303,
+  Rule-ID block 100600-100601 (DNS 100250-100253, modsec 100300-100304,
   fail2ban 100400-100401, maintenance 100500-100502 are taken):
     100600 (level 0): base, any conffile decision. Archived, no alert.
     100601 (level 7): decision=keep. The nightly upgrade kept a locally

@@ -7,6 +7,7 @@ generator.conf
 *.local.md
 TEMP.txt
 temp_*.sh
+__pycache__/
 
 # Minecraft: secrets stay local, only the .example templates get committed
 Minecraft-Server/.env

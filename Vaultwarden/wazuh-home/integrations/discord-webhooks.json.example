@@ -10,5 +10,10 @@
   "maintenance-pihole": "https://discord.com/api/webhooks/REPLACE_WITH_PIHOLE_MAINTENANCE_WEBHOOK",
   "maintenance-wazuh": "https://discord.com/api/webhooks/REPLACE_WITH_WAZUH_MAINTENANCE_WEBHOOK",
   "maintenance-vps": "https://discord.com/api/webhooks/REPLACE_WITH_VPS_MAINTENANCE_WEBHOOK",
-  "mention": "<@REPLACE_WITH_YOUR_DISCORD_USER_ID>"
+  "mention": "<@REPLACE_WITH_YOUR_DISCORD_USER_ID>",
+  "modsec_targets": {
+    "vault.example.com": "🔐 Vaultwarden",
+    "example.com": "🌐 Apex site"
+  },
+  "dashboard_url": "https://REPLACE_WITH_DASHBOARD_IP_OR_FULL_NAME"
 }

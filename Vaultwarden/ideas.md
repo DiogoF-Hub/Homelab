@@ -460,7 +460,7 @@ README §Automation Scripts.
 > fail2ban bans (100401), AND the nightly maintenance run summary (100501 ok /
 > 100502 degraded|fail → #maintenance). Decoders, rules, the integrator, and
 > the `<integration>` blocks live in `wazuh-home/` (see its README). Rule-ID
-> allocation: DNS 100250-100253, ModSecurity 100300-100303, fail2ban
+> allocation: DNS 100250-100253, ModSecurity 100300-100304, fail2ban
 > 100400-100401, maintenance 100500-100502.
 >
 > **Phase A is DONE:** `lib.sh` `emit_status` + `main.sh` `emit_run_summary`
@@ -698,7 +698,7 @@ reference. Skip directly to "What's left" above for the current plan.
 **Rules (`local_rules.xml` on the manager, version-controlled in this
 repo alongside compose files, rules-as-code):**
 
-> Rule-ID ranges in use: DNS 100250-100253, ModSecurity 100300-100303,
+> Rule-ID ranges in use: DNS 100250-100253, ModSecurity 100300-100304,
 > fail2ban 100400-100401, maintenance 100500-100502 (all in `wazuh-home/`).
 > ✅ The maintenance rules below are now BUILT, at 100500-100502 in
 > `wazuh-home/maintenance/manager-maint-rules.xml`, but the implementation differs from

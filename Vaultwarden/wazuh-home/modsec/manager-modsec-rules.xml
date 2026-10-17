@@ -41,7 +41,7 @@
   along in each event so the alert shows which mode was active. No rule
   changes needed when you flip the engine.
 
-  Four-rule chain (IDs 100300-100303; DNS pipeline uses 100250-100253,
+  Five-rule chain (IDs 100300-100304; DNS pipeline uses 100250-100253,
   retired text-log pipeline used 100190-100210, so this block is free):
     100300 (level 0):  base. Every modsec event (event_type=bw_modsec).
                        Archived with logall_json; never alerts. Other
@@ -51,6 +51,10 @@
     100302 (level 7):  band=low|mid. Routine scoring scans.
     100303 (level 11): band=high. Real multi-vector attack. The Discord
                        integration (Phase 2) hooks this rule id.
+    100304 (level 12): outbound_score > 0, a child of the three above. The
+                       RESPONSE was flagged as a possible leak and blocked.
+                       Also goes to Discord (the integration takes any
+                       modsecurity alert at level 11+).
 
   Note on field matching: Wazuh treats <field> values as regex. The
   band values are a closed set (none/low/mid/high), but we anchor with
@@ -92,6 +96,20 @@
     <if_sid>100300</if_sid>
     <field name="band" type="pcre2">^high$</field>
     <description>ModSec ATTACK ($(engine)): $(srcip) $(method) $(path) [score $(anomaly_score), rules $(rule_ids)]</description>
+  </rule>
+
+  <!-- outbound_score > 0: CRS's response-side rules (95x) flagged what the
+       server SENT BACK as a possible leak (SQL error, stack trace, directory
+       listing, ...), and with the engine On, rule 959100 blocked that
+       response. Zero of these in the kept audit logs as of 2026-10-17, with
+       SecResponseBodyAccess On, so a hit is either a real leak or a false
+       positive breaking a real client: both worth a ping. A child of the band
+       rules so it applies whatever the request's own band; level 12 keeps it
+       above the modsec integration's level-11 floor. -->
+  <rule id="100304" level="12">
+    <if_sid>100301,100302,100303</if_sid>
+    <field name="outbound_score" type="pcre2">^[1-9]</field>
+    <description>ModSec RESPONSE flagged ($(engine)): $(srcip) $(method) $(path) [outbound score $(outbound_score), rules $(rule_ids)]</description>
   </rule>
 
 </group>

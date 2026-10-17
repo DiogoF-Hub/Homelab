@@ -22,7 +22,7 @@
   RST / ACK of a connection the firewall already closed). The dashboard
   still has every line.
 
-  Rule-ID block 100700-100701 (DNS 100250-100253, modsec 100300-100303,
+  Rule-ID block 100700-100701 (DNS 100250-100253, modsec 100300-100304,
   fail2ban 100400-100401, maintenance 100500-100502, dpkg 100600-100601
   are taken). Vault VM IP is hardcoded, as in the DNS rules.
 -->

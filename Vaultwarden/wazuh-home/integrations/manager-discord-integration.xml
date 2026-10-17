@@ -14,7 +14,8 @@
   squid keeps only action=TCP_DENIED).
 
   Scope = which alerts even reach the script:
-    - modsec : group modsecurity, level >= 11  -> rule 100303 (band=high)
+    - modsec : group modsecurity, level >= 11  -> rules 100303 (band=high)
+               and 100304 (response flagged)
     - dns    : rule 100252 (Pi-hole policy blocks); the script narrows to
                status=blocked-regex (allowlist denial), so resolved queries
                and upstream non-answers never ping
