@@ -10,39 +10,17 @@ This is the short path for normal releases (e.g. 4.14.8 → 4.14.9). For a bigge
 
 First take a **Proxmox snapshot** of `wazuh-home`: since 4.12 an indexer upgrade can't be undone by downgrading, so the snapshot is the way back.
 
-Set the target version once (the one the #maintenance report showed, without the `-1`) and the indexer shortcuts from the README:
-
 ```bash
-WZ=4.14.9
-CERT="--cert /etc/wazuh-indexer/certs/admin.pem --key /etc/wazuh-indexer/certs/admin-key.pem"
-IDX="https://127.0.0.1:9200"
-```
-
-Stop Filebeat and the dashboard, then let the indexer write everything to disk and stop it cleanly (Wazuh's own order: no shard moves, a flush, then the stop):
-
-```bash
-sudo systemctl stop filebeat wazuh-dashboard
-sudo curl -sk $CERT -X PUT "$IDX/_cluster/settings" -H 'Content-Type: application/json' \
-  -d '{"persistent":{"cluster.routing.allocation.enable":"primaries"}}'
-sudo curl -sk $CERT -X POST "$IDX/_flush"
-sudo systemctl stop wazuh-manager wazuh-indexer
-```
-
-Install. Agents keep their events queued while the manager is down.
-
-```bash
+sudo systemctl stop filebeat wazuh-dashboard wazuh-manager wazuh-indexer
 sudo cp /etc/wazuh-indexer/jvm.options /etc/wazuh-indexer/jvm.options.old
 sudo apt-get update
-apt-cache policy wazuh-manager | grep Candidate                 # must be $WZ-1
 sudo apt-get install --allow-change-held-packages wazuh-indexer wazuh-manager wazuh-dashboard filebeat
-sudo apt-mark hold wazuh-indexer wazuh-manager wazuh-dashboard filebeat
+sudo apt-mark hold wazuh-indexer wazuh-manager wazuh-dashboard filebeat   # the install drops the hold
 ```
-
-The `apt-mark hold` is not optional: installing a held package with `--allow-change-held-packages` drops its hold (only the ones that actually changed version; `filebeat` usually keeps it), and the next nightly run would then upgrade Wazuh unattended.
 
 If dpkg asks about a config file:
 - `/etc/wazuh-indexer/jvm.options`: take the new one (`Y`), then put the heap back to 3 GB below.
-- anything else (`opensearch_dashboards.yml`, `filebeat.yml`, `ossec.conf`, ...): keep yours (`N`). The package's version is saved next to it as `.dpkg-dist` if you ever want to compare.
+- anything else (`opensearch_dashboards.yml`, `filebeat.yml`, ...): keep yours (`N`). The package's version is saved next to it as `.dpkg-dist` if you ever want to compare.
 
 Check the heap, it must be 3g on both lines (the package resets it if it replaced the file):
 
@@ -51,36 +29,13 @@ sudo grep -E '^-Xm[sx]' /etc/wazuh-indexer/jvm.options
 sudo sed -i 's/^-Xms.*/-Xms3g/; s/^-Xmx.*/-Xmx3g/' /etc/wazuh-indexer/jvm.options   # only if it isn't 3g
 ```
 
-Start the indexer alone, wait for it, then turn shard allocation back on:
+Start everything, indexer first:
 
 ```bash
 sudo systemctl daemon-reload
-sudo systemctl start wazuh-indexer && sleep 90
-sudo curl -sk $CERT "$IDX/_cat/nodes?v"                       # one node, new version
-sudo curl -sk $CERT -X PUT "$IDX/_cluster/settings" -H 'Content-Type: application/json' \
-  -d '{"persistent":{"cluster.routing.allocation.enable":"all"}}'
-sudo curl -sk $CERT "$IDX/_cluster/health?pretty" | grep status   # yellow is normal here (see README)
-```
-
-Start the manager, then refresh Filebeat's alerts template and Wazuh module to the new version (a release can change the field mappings; this doesn't touch the ISM retention policies):
-
-```bash
-sudo systemctl start wazuh-manager
-sudo curl -so /etc/filebeat/wazuh-template.json \
-  "https://raw.githubusercontent.com/wazuh/wazuh/v$WZ/extensions/elasticsearch/7.x/wazuh-template.json"
-sudo chmod go+r /etc/filebeat/wazuh-template.json
-curl -s https://packages.wazuh.com/4.x/filebeat/wazuh-filebeat-0.4.tar.gz | sudo tar -xz -C /usr/share/filebeat/module
-sudo filebeat setup --pipelines
-sudo filebeat setup --index-management -E output.logstash.enabled=false
-sudo systemctl start filebeat wazuh-dashboard
-```
-
-Check:
-
-```bash
+sudo systemctl restart wazuh-indexer && sleep 60
+sudo systemctl restart wazuh-manager filebeat wazuh-dashboard
 systemctl is-active wazuh-indexer wazuh-manager filebeat wazuh-dashboard    # 4x active
-sudo /var/ossec/bin/wazuh-control info | grep VERSION                       # v$WZ
-sudo filebeat test output                                                   # talk to server ... OK
 apt-mark showhold                                                           # all four
 ```
 
@@ -88,12 +43,12 @@ Log into the dashboard. The agents still show **active** on the old version; tha
 
 ## 2. Each agent VM
 
-Vault VM, LAN Pi-hole VM, and any other agent (`wazuh-home` has none of its own: the manager is its own agent `000`, already upgraded in step 1):
+Vault VM, LAN Pi-hole VM, and any other agent:
 
 ```bash
 sudo apt-get update
 sudo apt-get install --allow-change-held-packages wazuh-agent
-sudo apt-mark hold wazuh-agent                   # the install dropped the hold
+sudo apt-mark hold wazuh-agent                   # the install drops the hold
 systemctl is-active wazuh-agent                  # active
 apt-mark showhold                                # wazuh-agent
 ```
