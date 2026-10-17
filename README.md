@@ -20,6 +20,7 @@ Homelab/
 │   ├── manual_domains_block.txt
 │   ├── mycustom_list.txt
 │   ├── root_crontab.txt
+│   ├── pihole-shutdown.service               # systemd hook: docker compose down on every shutdown/reboot
 │   └── start-containers.sh
 │
 ├── Vaultwarden/
@@ -33,6 +34,7 @@ Homelab/
 │   ├── docker-compose.cf-tunnel.yml          # reference only, not running it: Cloudflare Tunnel + ACME DNS-01 (CF terminates TLS at edge, sees plaintext password-manager traffic, unacceptable for this threat model)
 │   ├── poduser_crontab.txt
 │   ├── root_crontab.txt
+│   ├── vault-shutdown.service                # systemd hook: podman-compose down as poduser on every shutdown/reboot
 │   ├── bunkerweb/                            # mounted into the BunkerWeb container
 │   │   ├── robots.txt
 │   │   ├── security.txt
@@ -57,6 +59,7 @@ Homelab/
 │   │   ├── pihole-agent.localfile.xml        # <localfile> blocks for the Pi-hole VM's wazuh-agent
 │   │   ├── manager-global.snippet.xml        # logall_json toggle for the wazuh-home <global> block
 │   │   ├── manager-rules.xml                 # rules 100250 / 100251 / 100252 (archive base + resolved + blocked)
+│   │   ├── shutdown/after-indexer.conf       # systemd drop-in: wazuh-indexer stops last on shutdown
 │   │   └── sidecar/
 │   │       ├── pihole-ftl-tail.py            # Daemon: polls Pi-hole's FTL SQLite DB, emits one JSON event per Vault VM query
 │   │       └── pihole-ftl-tail.service       # systemd unit (root, hardened, 10s polling tick)
@@ -194,6 +197,59 @@ See [`Minecraft-Server/README.md`](./Minecraft-Server/README.md) for the full de
 ### **Tailscale Windows VPN On-Demand**
 
 This setup has been **migrated to its own dedicated repository**; the folder here is kept only as a read-only pointer. See [`Tailscale Windows VPN on demand/README.md`](./Tailscale%20Windows%20VPN%20on%20demand/README.md) for the link.
+
+---
+
+## 🖥️ Proxmox: clean shutdown and start order
+
+Every VM here can be shut down from the Proxmox **Shutdown** button (or with a plain `sudo poweroff` / `reboot` inside it) and stops its stack cleanly. Three pieces make that work. Redo all three when you rebuild a VM.
+
+### 1. QEMU guest agent on every VM
+
+The Shutdown button asks the guest to shut down through the agent. After that it's a normal OS shutdown: the agent runs no scripts of its own.
+
+- In Proxmox: *VM → Options → QEMU Guest Agent → Enabled*.
+- In the VM: Debian 13 and TrueNAS already ship `qemu-guest-agent`. Otherwise `sudo apt install qemu-guest-agent`.
+- Shutdown + Start the VM from Proxmox once (a reboot from inside isn't enough, the agent's device only appears at a cold start), then check from the Proxmox host: `qm agent <vmid> ping` (no output = working).
+
+Without the agent, Proxmox falls back to a virtual ACPI power-button press, which Debian also honours, just less reliably.
+
+### 2. A shutdown hook per VM
+
+During a shutdown systemd stops everything, and services with no order between them stop all at once. Each VM gets one small systemd file that puts its stack in the right place in that order:
+
+| VM | Hook | What it does |
+| --- | --- | --- |
+| **Vaultwarden VM** | [`Vaultwarden/vault-shutdown.service`](Vaultwarden/vault-shutdown.service) | `podman-compose down` as `poduser`, before poduser's systemd stops (install: [`REBUILD.md`](Vaultwarden/REBUILD.md) Phase 14) |
+| **Pi-hole VM** | [`PiHole/pihole-shutdown.service`](PiHole/pihole-shutdown.service) | `docker compose down`, before Docker stops (install: [`PiHole/README.md`](PiHole/README.md) step 6) |
+| **wazuh-home** | [`wazuh-home/shutdown/after-indexer.conf`](Vaultwarden/wazuh-home/shutdown/after-indexer.conf) | drop-in: the indexer stops last (install: [`wazuh-home/README.md`](Vaultwarden/wazuh-home/README.md)) |
+| **TrueNAS** | none | TrueNAS stops its own services and pool cleanly. Don't add files to its `/etc`, updates wipe them |
+
+They run on every normal shutdown or reboot, the nightly ones included. Never on Proxmox's **Stop** button (that's pulling the plug), and never with a forced `reboot -f`. Never `systemctl stop` or `restart` a hook by hand: that runs its `down`.
+
+### 3. Start/shutdown order on the Proxmox host
+
+The Pi-hole VM and wazuh-home mount `/mnt/truenas-logs` over NFS from TrueNAS, so TrueNAS has to be up before them and stay up until they've unmounted it. Proxmox starts guests in ascending order and shuts them down in reverse:
+
+| VM | Order | Startup delay | Why |
+| --- | --- | --- | --- |
+| **TrueNAS** | 1 | 60 s | first up, last down; the delay gives its NFS share time to come up before the next VMs start |
+| **Vaultwarden VM** | 2 | | |
+| **Pi-hole VM** | 2 | | |
+| **wazuh-home** | 2 | | |
+
+From the Proxmox host shell:
+
+```bash
+qm set <truenas-vmid>     --startup order=1,up=60
+qm set <vaultwarden-vmid> --startup order=2
+qm set <pihole-vmid>      --startup order=2
+qm set <wazuh-vmid>       --startup order=2
+
+grep -H startup /etc/pve/qemu-server/*.conf     # check
+```
+
+Or in the web UI: *VM → Options → Start/Shutdown order* (double-click to edit). The order only matters when the whole Proxmox host shuts down or boots, and the start part only applies to VMs with *Start at boot* set to Yes. Each VM gets the *Shutdown timeout* there (180 s by default) before Proxmox forces it off.
 
 ---
 
