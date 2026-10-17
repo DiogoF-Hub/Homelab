@@ -407,7 +407,16 @@ The run rules match a **derived `vw_sev`** field (`info`/`warn`), NOT `status`: 
 - `integrations/manager-discord-integration.xml` , the `<integration>` blocks (one per source, scoped by group / rule_id / level) for the manager's `ossec.conf`.
 - `integrations/discord-webhooks.json.example` , template for `/var/ossec/integrations/discord-webhooks.json`: every webhook key plus `mention`. Copy it there, fill in the real URLs, `sudo chown root:wazuh` and `sudo chmod 0640` it, then check it with `sudo python3 -m json.tool <file> >/dev/null && echo JSON OK`. A key left on its placeholder just stays quiet.
 
-Gotcha baked into the script: Discord's API is Cloudflare-fronted and **403s the default `Python-urllib` User-Agent**, so `send_discord` sets a `DiscordBot (...)` UA. The manager needs egress to `discord.com:443`.
+Gotcha baked into the script: Discord's API is Cloudflare-fronted and **403s the default `Python-urllib` User-Agent**, so `send_discord` sets a `DiscordBot (...)` UA. The manager needs egress to `discord.com:443`. It also has to resolve `discord.com` **without the Pi-hole**: on 2026-10-17 the Pi-hole VM's nightly reboot took DNS down for the LAN right as its own report fired, and the post died with `Temporary failure in name resolution` (in `/var/ossec/logs/ossec.log`, `wazuh-integratord`). Any alert raised while Pi-hole is down, the #agents one about the Pi-hole VM included, would be lost the same way. So `wazuh-home` resolves like the Pi-hole VM itself, `/etc/resolv.conf` pinned:
+
+```
+# /etc/resolv.conf
+nameserver 1.1.1.3
+options edns0 trust-ad
+search localdomain
+```
+
+plus `nohook resolv.conf` in `/etc/dhcpcd.conf`, so DHCP doesn't put `192.168.173.2` back.
 
 ## OS updates (manager host)
 
