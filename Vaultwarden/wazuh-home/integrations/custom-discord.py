@@ -461,6 +461,11 @@ RELEASE_NOTES = {
     "bunkerweb":   "https://github.com/bunkerity/bunkerweb/releases",
     "crowdsec":    "https://github.com/crowdsecurity/crowdsec/releases",
     "cloudflared": "https://github.com/cloudflare/cloudflared/releases",
+    # Pi-hole VM (compose service names, as its main.sh reports them).
+    # docker-pi-hole, not pi-hole/pi-hole: the pihole/pihole image follows
+    # docker-pi-hole's releases, each listing its Core / FTL / Web versions.
+    "pihole":      "https://github.com/pi-hole/docker-pi-hole/releases",
+    "dnsproxy":    "https://github.com/AdguardTeam/dnsproxy/releases",
 }
 
 def _maint_images(data):
@@ -469,10 +474,11 @@ def _maint_images(data):
     back to the plain name list from older runs."""
     detail = data.get("images_detail", "")
     names = data.get("images_updated", "")
-    if not detail:
-        return names.replace(",", ", ") if names else "none"
+    if not detail and not names:
+        return "none"
     lines = []
-    for entry in detail.split(";"):
+    # No versions (the Pi-hole VM, older Vault runs): one line per name.
+    for entry in (detail.split(";") if detail else names.split(",")):
         service = entry.split(":", 1)[0].strip()
         link = RELEASE_NOTES.get(service)
         lines.append(f"{entry.strip()} ([release notes]({link}))" if link else entry.strip())
@@ -576,7 +582,7 @@ def format_host_maintenance(alert):
     if role == "pihole":
         fields.append({"name": "Containers", "value": data.get("containers") or "N/A", "inline": True})
         fields.append({"name": "Docker images updated",
-                       "value": images.replace(",", ", ") if images else "none", "inline": False})
+                       "value": _maint_images(data), "inline": False})
     if data.get("geoip"):
         fields.append({"name": "GeoIP database", "value": data["geoip"], "inline": True})
 
