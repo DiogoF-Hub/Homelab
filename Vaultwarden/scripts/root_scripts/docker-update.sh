@@ -63,6 +63,23 @@ image_version() {
     done
 }
 
+# qualify_image REF: fully-qualified image reference, using Docker's rule for
+# telling a registry apart from a namespace: the first path component is a
+# registry only when it contains '.' or ':' or is 'localhost'. Refs that
+# already name one (ghcr.io/..., quay.io/..., lscr.io/...) pass through
+# unchanged; everything else is Docker Hub, with official images under
+# library/ (nginx -> docker.io/library/nginx).
+qualify_image() {
+    local ref="$1" first="${1%%/*}"
+    if [[ "$ref" != */* ]]; then
+        printf 'docker.io/library/%s' "$ref"
+    elif [[ "$first" == *.* || "$first" == *:* || "$first" == localhost ]]; then
+        printf '%s' "$ref"
+    else
+        printf 'docker.io/%s' "$ref"
+    fi
+}
+
 # --- stop containers (idempotent) -----------------------------------------
 
 stop_containers
@@ -109,13 +126,14 @@ print(config.get('services', {}).get('$service', {}).get('image', ''))
             warn "[$service] could not resolve image name, skipping"
             continue
         fi
+        IMAGE=$(qualify_image "$IMAGE")
 
         LOCAL_ID=$(sudo -u "$USER_POD" podman image inspect "$IMAGE" --format '{{.Id}}' 2>/dev/null || true)
 
         # Retry pull up to 3 times for transient network / registry flakes.
         pulled=false
         for attempt in 1 2 3; do
-            if sudo -u "$USER_POD" podman pull "docker.io/$IMAGE" >> "$PHASE_LOG" 2>&1; then
+            if sudo -u "$USER_POD" podman pull "$IMAGE" >> "$PHASE_LOG" 2>&1; then
                 pulled=true
                 break
             else

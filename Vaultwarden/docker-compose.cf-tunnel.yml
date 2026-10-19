@@ -1,7 +1,7 @@
 services:
   cloudflared:
     container_name: cloudflared
-    image: cloudflare/cloudflared:latest
+    image: docker.io/cloudflare/cloudflared:latest
     restart: unless-stopped
     security_opt:
       - no-new-privileges
@@ -26,7 +26,7 @@ services:
 
   bunkerweb:
     container_name: bunkerweb
-    image: bunkerity/bunkerweb-all-in-one:latest
+    image: docker.io/bunkerity/bunkerweb-all-in-one:latest
     security_opt:
       - no-new-privileges
     cap_drop:
@@ -323,7 +323,7 @@ services:
 
   crowdsec:
     container_name: crowdsec
-    image: crowdsecurity/crowdsec:latest
+    image: docker.io/crowdsecurity/crowdsec:latest
     security_opt:
       - no-new-privileges
     cap_drop:
@@ -405,7 +405,7 @@ services:
 
   vaultwarden:
     container_name: vaultwarden
-    image: vaultwarden/server:latest
+    image: docker.io/vaultwarden/server:latest
     security_opt:
       - no-new-privileges
     cap_drop:
