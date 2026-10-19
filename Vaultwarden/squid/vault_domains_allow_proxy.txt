@@ -64,7 +64,10 @@ dl-cdn.alpinelinux.org
 # ================================
 # Used by main.sh / setup-age.sh to pull pinned age binaries from GitHub
 # releases, and by BunkerWeb's scheduler to fetch the nginx-ultimate-bad-bot
-# user-agent list from raw.githubusercontent.com.
+# user-agent list from raw.githubusercontent.com. ghcr.io +
+# pkg-containers.githubusercontent.com: podman pulls of ghcr.io images
+# (crowdsec-web-ui) by docker-update.sh; ghcr.io serves the manifest, the
+# layers download from pkg-containers.
 github.com
 api.github.com
 raw.githubusercontent.com
@@ -73,6 +76,7 @@ objects.githubusercontent.com
 codeload.github.com
 avatars.githubusercontent.com
 ghcr.io
+pkg-containers.githubusercontent.com
 
 # ================================
 # Go ecosystem

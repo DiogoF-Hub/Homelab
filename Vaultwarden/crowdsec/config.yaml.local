@@ -1,0 +1,24 @@
+# Merged by CrowdSec over /etc/crowdsec/config.yaml (the crowdsec-config
+# volume's copy) at startup. Mounted per-file in compose. Restart the
+# crowdsec container after editing.
+
+api:
+  server:
+    # Deleting alerts through LAPI needs more than a machine login: the
+    # request must also come from one of these addresses. 10.89.1.50 is the
+    # crowdsec-web-ui container (fixed in compose), and only that one: not
+    # the whole security network, so BunkerWeb never gets this permission.
+    # Lists replace rather than merge, so the loopback defaults are restated.
+    trusted_ips:
+      - 127.0.0.1
+      - ::1
+      - 10.89.1.50
+
+# Prometheus metrics for the Web UI's Metrics page (and `cscli metrics`).
+# 0.0.0.0 inside the container = the security network only: 6060 is not
+# host-published, so it's not reachable from the LAN or the VPS.
+prometheus:
+  enabled: true
+  level: full
+  listen_addr: 0.0.0.0
+  listen_port: 6060

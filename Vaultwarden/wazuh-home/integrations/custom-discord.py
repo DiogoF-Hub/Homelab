@@ -457,15 +457,16 @@ def _maint_cap_list(csv, limit=20):
 
 # Release notes per compose service, linked when its image was updated.
 RELEASE_NOTES = {
-    "vaultwarden": "https://github.com/dani-garcia/vaultwarden/releases",
-    "bunkerweb":   "https://github.com/bunkerity/bunkerweb/releases",
-    "crowdsec":    "https://github.com/crowdsecurity/crowdsec/releases",
-    "cloudflared": "https://github.com/cloudflare/cloudflared/releases",
+    "vaultwarden":     "https://github.com/dani-garcia/vaultwarden/releases",
+    "bunkerweb":       "https://github.com/bunkerity/bunkerweb/releases",
+    "crowdsec":        "https://github.com/crowdsecurity/crowdsec/releases",
+    "cloudflared":     "https://github.com/cloudflare/cloudflared/releases",
+    "crowdsec-web-ui": "https://github.com/TheDuffman85/crowdsec-web-ui/releases",
     # Pi-hole VM (compose service names, as its main.sh reports them).
     # docker-pi-hole, not pi-hole/pi-hole: the pihole/pihole image follows
     # docker-pi-hole's releases, each listing its Core / FTL / Web versions.
-    "pihole":      "https://github.com/pi-hole/docker-pi-hole/releases",
-    "dnsproxy":    "https://github.com/AdguardTeam/dnsproxy/releases",
+    "pihole":          "https://github.com/pi-hole/docker-pi-hole/releases",
+    "dnsproxy":        "https://github.com/AdguardTeam/dnsproxy/releases",
 }
 
 def _maint_images(data):

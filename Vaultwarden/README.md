@@ -52,7 +52,8 @@ vaultwarden/
 │   └── custom-configs/                        # Mounted into BunkerWeb at /data/configs/ (its native ingest path)
 │       ├── http/
 │       │   ├── headers-upstream-passthrough.conf  # http-scope map for upstream XFO/CSP passthrough
-│       │   └── apex.conf                          # Bare-apex detection map + loopback JSON server (HSTS preload)
+│       │   ├── apex.conf                          # Bare-apex detection map + loopback JSON server (HSTS preload)
+│       │   └── crowdsec-web-ui.conf               # HTTPS server on :7001 in front of the CrowdSec Web UI (LAN admin only)
 │       ├── server-http/
 │       │   ├── headers-passthrough-apply.conf     # Owns ALL outbound security headers (HSTS, CSP, COOP, ...)
 │       │   ├── security-txt-lang.conf             # Per-path overrides for /robots.txt, /security.txt
@@ -64,6 +65,7 @@ vaultwarden/
 │           └── exclusions-before-crs.conf         # Phase-1 (request-side) exclusions
 │
 ├── crowdsec/                                  # Mounted into the CrowdSec container at the right stages
+│   ├── config.yaml.local                      # Merged over CrowdSec's config.yaml: trusted_ips for the Web UI + Prometheus metrics
 │   ├── acquis.d/                              # Per-source log acquisition definitions
 │   │   ├── bunkerweb.yaml                     # Tails BunkerWeb access/error/modsec_audit logs
 │   │   └── vaultwarden.yaml                   # Tails Vaultwarden's vaultwarden.log
@@ -210,7 +212,7 @@ Notes:
 - This is a system-wide setting, not per-user. Any unprivileged process can bind 80 and above. On a single-purpose VM running just the Vaultwarden stack with one human user, this is acceptable.
 - The setting controls both IPv4 and IPv6 binding despite the IPv4 name.
 - The `CAP_NET_BIND_SERVICE` capability granted to the BunkerWeb container in compose only governs the *container's internal* listener; it doesn't grant the host-side port bind that Podman performs as `poduser`.
-- Not needed for 80/443 on the `cf-tunnel` flavor (those go through the cloudflared outbound tunnel). The admin Web UI's port `7000` IS host-published on all three flavors (on `cf-tunnel` it's the only host port opened), but being >1024 it doesn't need this sysctl, only 80/443 do.
+- Not needed for 80/443 on the `cf-tunnel` flavor (those go through the cloudflared outbound tunnel). The admin ports `7000` (BunkerWeb UI) and `7001` (CrowdSec Web UI) ARE host-published on all three flavors (on `cf-tunnel` they're the only host ports opened), but being >1024 they don't need this sysctl, only 80/443 do.
 - If you set the threshold to `443` instead of `80`, port 443 works but port 80 does not. Fine if you've dropped port 80 from the compose, otherwise use `80`.
 
 ##### QUIC UDP receive buffer (only relevant for `cf-tunnel` flavor)
@@ -273,6 +275,7 @@ UI_ADMIN_PASSWORD=''           # 8+ chars, lower+upper+digit+special; mapped to 
 # --- CrowdSec ---
 CROWDSEC_BOUNCER_KEY=''        # API key shared between CrowdSec LAPI and BunkerWeb's bouncer plugin (generate with `openssl rand -base64 48`)
 CROWDSEC_ENROLL_KEY=''         # Console-enrollment key for app.crowdsec.net (one-time)
+CROWDSEC_WEBUI_PASSWORD=''     # Password of the `crowdsec-web-ui` watcher machine (generate with `openssl rand -hex 32`; register once, see CrowdSec Web UI)
 
 # --- Vaultwarden ---
 ADMIN_TOKEN=''                 # Admin panel token (Argon2 hash; generate inside the container)
@@ -311,7 +314,7 @@ Three `docker-compose.*.yml` files are provided. They are **mutually exclusive**
 |------|-------------------|-----------------|----------------|--------------------|
 | **`docker-compose.public-dns01.yml`** | **Running this in production** | Direct host ports 80 + 443 (TCP) | DNS-01 via Cloudflare API token | Used here in combination with an edge VPS doing TCP passthrough + PROXY protocol (see [`vps/README.md`](vps/README.md)) since the home connection is CGNAT'd and Cloudflare-at-edge isn't acceptable for a password manager. Port 80 kept open for the http→https redirect convenience, NOT used for ACME (DNS-01 handles cert validation; no `/.well-known/acme-challenge/` exposed). Comment the `80:8080/tcp` line to close port 80 entirely if you don't want the redirect. UDP/443 (HTTP/3) deliberately not exposed because PROXY protocol is TCP-only. Requires DNS on Cloudflare for the API token. |
 | **`docker-compose.public-http01.yml`** | Reference only (not running it) | Direct host ports 80/443 (TCP+UDP) | HTTP-01 | Direct exposure when home has a routable public IP. Simplest direct setup; origin IP is public. Port 80 MUST stay open for ACME validation. The PROXY-protocol env vars are present in this file too because the same VPS topology could in principle front this flavor; **remove them if you're running with TRUE direct exposure** (no upstream proxy), or BunkerWeb will reject every connection waiting for a PROXY header that never arrives. |
-| **`docker-compose.cf-tunnel.yml`** | Reference only (not running it) | Cloudflare Tunnel (no public host ports; admin UI on 7000 is host-published, LAN-only) | DNS-01 via Cloudflare API token | Outbound-only firewall, hidden origin IP, edge filtering at Cloudflare. **Reason I don't use this here**: Cloudflare terminates TLS at its edge and sees plaintext request bodies (admin token POSTs, master-password hashes), unacceptable for a password manager once you understand the threat model. Genuinely fine for non-sensitive services. Preserved as a working compose flavor; switching to it would be `podman-compose down` of the current flavor + `up -d` of this one (Podman networks + volumes carry state across cleanly). |
+| **`docker-compose.cf-tunnel.yml`** | Reference only (not running it) | Cloudflare Tunnel (no public host ports; admin UIs on 7000/7001 are host-published, LAN-only) | DNS-01 via Cloudflare API token | Outbound-only firewall, hidden origin IP, edge filtering at Cloudflare. **Reason I don't use this here**: Cloudflare terminates TLS at its edge and sees plaintext request bodies (admin token POSTs, master-password hashes), unacceptable for a password manager once you understand the threat model. Genuinely fine for non-sensitive services. Preserved as a working compose flavor; switching to it would be `podman-compose down` of the current flavor + `up -d` of this one (Podman networks + volumes carry state across cleanly). |
 
 All three run the same four services: `bunkerweb` (proxy/WAF), `crowdsec` (LAPI + parsers), `vaultwarden`, and, in the `cf-tunnel` flavor only, `cloudflared` (tunnel client).
 
@@ -423,6 +426,7 @@ Mounted at `/data/configs/` inside the container, BunkerWeb's native ingest path
 | `http/headers-upstream-passthrough.conf` | http | http-scope `map` directives that capture Vaultwarden's `X-Frame-Options` and `Content-Security-Policy` from upstream so the apply file can pass them through (preserving Vaultwarden's per-endpoint control, e.g., the Duo iframe on `/2fa-connector.html`). |
 | `server-http/security-txt-lang.conf` | server-http | nginx `location` blocks for `/.well-known/security.txt` and `/robots.txt`; redirects `/security.txt` to the canonical path; re-applies headers (nginx `add_header` in a `location` replaces parent headers, so they must be repeated). |
 | `server-http/ipcheck.conf` | server-http | `/__ipcheck` debug endpoint returning the caller's `$remote_addr` as JSON. Bookmark it to verify the PROXY-protocol → realip chain end to end; an RFC1918 address in the response means `REAL_IP_FROM` has stopped covering the bridge podman is SNAT'ing from. |
+| `http/crowdsec-web-ui.conf` | http | Plain nginx `server` on `:7001` (TLS with the `/ui-tls` cert) proxying to the CrowdSec Web UI at `10.89.1.50:3000`, with its own log files. Not a BunkerWeb service, so none of BW's checks run there; LAN admin only. See [CrowdSec Web UI](#crowdsec-web-ui). |
 | `http/apex.conf` | http | Bare-apex support: `map $host $bw_apex_backend` (the apex is the only served name with exactly one dot) plus a loopback-only `server` on `127.0.0.1:18080` returning `{"status": "ok"}` on `/` and a JSON 404 elsewhere. See [Apex domain](#apex-domain-hsts-preload) below. |
 
 `bunkerweb/apex-dispatch.conf` sits **outside** `custom-configs/` on purpose: it is mounted on its own and included **inside** BunkerWeb's generated `location /` through `REVERSE_PROXY_INCLUDES`. Anything in `custom-configs/server-http/` lands at server level, where it must not run.
@@ -618,6 +622,8 @@ Three bind mounts deliver our custom config into the right CrowdSec stages:
 
 Each mounts into a `vaultwarden/` subdir so the hub can keep ownership of the parent dir for its own symlinks. The acquisition files (`crowdsec/acquis.d/*.yaml`) are mounted **per-file** for the same reason, overlaying the whole `acquis.d` directory `:ro` would block CrowdSec from writing sibling files (e.g., from auto-installed acquisitions).
 
+`crowdsec/config.yaml.local` is mounted per-file too, at `/etc/crowdsec/config.yaml.local`. CrowdSec merges it over the volume's `config.yaml` at startup, so our two changes (the Web UI's `trusted_ips` entry and the Prometheus listener) stay in git while `config.yaml` itself stays the image's own. Memory limit: 256M (was 192M, raised with the Web UI).
+
 ### **Custom Parsers, Scenarios, and Whitelists**
 
 #### **Parser**, `crowdsec/parsers/vaultwarden-logs.yaml`
@@ -683,6 +689,57 @@ CrowdSec bans are enforced at **two layers**, both fed by the single home CrowdS
 The VPS layer is purely additive defense-in-depth on top of BunkerWeb's plugin: same engine making the decisions, two enforcement layers consuming them. If the VPS bouncer is ever down or absent, BunkerWeb still 403s; if BunkerWeb glitches mid-request, the VPS edge has already dropped most known-bad IPs. A new decision applies at the VPS edge within ~10s (its stream poll) and at BunkerWeb within 60s (live lookup cache).
 
 This whole stack replaces the previous Cloudflare Workers bouncer (which enforced bans at Cloudflare's edge). The trade-off: bans now happen one hop later than the CF edge would, but the architecture works identically with or without Cloudflare in front, the engine + bouncers are operator-controlled, and there's no extra Worker to maintain or pay for.
+
+### **CrowdSec Web UI**
+
+[CrowdSec Web UI](https://github.com/TheDuffman85/crowdsec-web-ui) is a dashboard for the home CrowdSec engine: alerts with IP / AS / country details, active and expired decisions, manual bans and unbans, and a metrics page (parsers, bouncers, LAPI latency). It replaces `cscli` for day-to-day looking around; `cscli` keeps working as before.
+
+```
+admin workstation ──HTTPS :7001──▶ BunkerWeb's nginx (crowdsec-web-ui.conf, /ui-tls cert)
+                                     └──HTTP, security network──▶ crowdsec-web-ui 10.89.1.50:3000
+                                                                    ├──▶ crowdsec:8080 (LAPI, watcher login)
+                                                                    └──▶ crowdsec:6060 (Prometheus metrics)
+```
+
+**Where and how it's reached**
+
+* A `crowdsec-web-ui` service in all three compose files, on the `security` network only, with the fixed address `10.89.1.50`. It publishes no host port.
+* `https://vaultwarden-home:7001`, served by a plain nginx `server` block in [`bunkerweb/custom-configs/http/crowdsec-web-ui.conf`](bunkerweb/custom-configs/http/crowdsec-web-ui.conf) with the same internal-CA cert as the 7000 UI. `bunkerweb` publishes `7001:7001`.
+* Not a BunkerWeb service on 443: that listener only takes PROXY-protocol connections from the edge VPS, so a vhost there would be reachable from the internet and never from the LAN. 7001 is in no VPS_TUNNEL rule, and OPNsense lets only the admin device in (see [Admin Web UI access](#admin-web-ui-access-ports-7000-and-7001)).
+* The server block proxies to the **IP**, not the container name. nginx resolves names once at startup and refuses to start if one doesn't resolve, so a stopped Web UI would otherwise take nginx, and the vault, down with it. With the IP, a stopped Web UI is just a 502 on 7001.
+* Same nginx as the vault: a syntax error in that file stops nginx from loading. Check the vault still answers after any change to it.
+* Own log files, `/srv/bw-logs/crowdsec-ui-access.log` and `crowdsec-ui-error.log`, so the UI's API polling stays out of the `access.log` / `error.log` that CrowdSec parses. Rotated by the existing `/srv/bw-logs/*.log` logrotate rule.
+
+**Login and permissions**
+
+* Local admin account with password + TOTP, created on the first visit (the UI has no account until then, so create it right after the first start). No passkeys.
+* The UI logs into LAPI as the watcher machine `crowdsec-web-ui`, password `CROWDSEC_WEBUI_PASSWORD` in `.env`. CrowdSec has no env var to pre-register a machine (unlike the `BOUNCER_KEY_*` bouncers), so it's registered once by hand and lives in the `crowdsec-db` volume; re-run it if that volume is ever rebuilt:
+  ```bash
+  podman exec crowdsec cscli machines add crowdsec-web-ui --password '<CROWDSEC_WEBUI_PASSWORD>' -f /dev/null
+  ```
+  `-f /dev/null` matters: without it, `cscli` overwrites the container's own credentials file.
+* Full admin (bans, unbans, alert deletion). Deleting alerts needs more than the login: LAPI only allows it from an address in `api.server.trusted_ips`. [`crowdsec/config.yaml.local`](crowdsec/config.yaml.local) adds exactly `10.89.1.50` next to loopback, not the whole `security` network, so BunkerWeb doesn't get that permission.
+
+**What it shows**
+
+* 30 days of history (`CONFIG_CROWDSEC_SYNC_LOOKBACK`). CrowdSec flushes its own alerts after 7 days by default, so days 8-30 only exist in the UI's cache.
+* Only local alerts and bans: the default feed leaves out the community blocklist (CAPI) and subscribed lists. Those are ~115k IPs that would bury the handful of local bans and load the CrowdSec container on every sync; they keep being enforced either way.
+* Metrics page from `http://crowdsec:6060/metrics` (`level: full`, set in `config.yaml.local`). 6060 isn't host-published, so it's reachable on the `security` network only.
+* `Europe/Luxembourg` (`TZ`), 24h clock, `dd/mm/yyyy`.
+
+**Off on purpose**
+
+* Update check (`CONFIG_UPDATES_ENABLED: "false"`): it would call `api.github.com`; the image is updated by the nightly `docker-update.sh` like the others, with a release-notes link in the #maintenance report.
+* Notifications: no destinations configured. CrowdSec bans may get a Wazuh pipeline later instead.
+* With both off and the GeoNames data inside the image, the UI needs no egress at all. Anything it still tried would be refused by Squid or OPNsense and show up in #squid or #firewall.
+
+**Container**
+
+* `ghcr.io/theduffman85/crowdsec-web-ui:latest`. Pulling from ghcr.io needs `ghcr.io` and `pkg-containers.githubusercontent.com` (where the layers download from) in both allowlists.
+* Runs as the image's `node` user (`user: "1000:1000"`), `cap_drop: ALL`, `no-new-privileges`, read-only root filesystem with a `/tmp` tmpfs, 256M / 0.5 CPU.
+* State in the `crowdsec-web-ui-data` volume (SQLite cache, admin account, settings). **Not backed up**: losing it means re-creating the admin and re-importing the last 7 days; bans themselves live in CrowdSec, never in the UI.
+
+**Undo**: remove the service, its volume, the `7001` port and `crowdsec-web-ui.conf`, drop `10.89.1.50` from `config.yaml.local` (or the whole file), and `podman exec crowdsec cscli machines delete crowdsec-web-ui`. Nothing else depends on it.
 
 ---
 
@@ -809,9 +866,9 @@ Rule 3 carries CrowdSec ban-decision pulls from the VPS-side bouncer to the home
 
 > **Note on Rule 5 (QUIC):** Cloudflare publishes their IP ranges as a single aggregated list covering all of their services, they do not provide separate ranges per product (e.g., Tunnels, CDN, Workers). Because of this, the firewall rule must allow the entire [Cloudflare IP list](https://www.cloudflare.com/ips/) on UDP port 7844 so the `cloudflared` tunnel can be established. While this is broader than ideal, the rule is scoped to a single port (QUIC 7844) and only permits outbound UDP from the DMZ, limiting the effective exposure.
 
-### **Admin Web UI access (port 7000)**
+### **Admin Web UI access (ports 7000 and 7001)**
 
-The BunkerWeb admin Web UI listens on `192.168.50.3:7000` (HTTPS, internal-CA cert) and is **deliberately absent from the VPS_TUNNEL rules above**, so it is never reachable from the public edge. To reach it from an admin workstation, add a single pass rule on that workstation's interface scoped to its source → `192.168.50.3:7000/tcp`, and let the DMZ catch-all deny everything else. Anything sharing **VLAN-DMZ** with the VM reaches `:7000` directly without traversing OPNsense, so keep that VLAN to this one host. TLS / cert details are in [BunkerWeb Admin Web UI](#bunkerweb-admin-web-ui).
+The BunkerWeb admin Web UI listens on `192.168.50.3:7000` and the [CrowdSec Web UI](#crowdsec-web-ui) on `192.168.50.3:7001` (both HTTPS, same internal-CA cert). Both are **deliberately absent from the VPS_TUNNEL rules above**, so they are never reachable from the public edge. To reach them from an admin workstation, add a pass rule on that workstation's interface scoped to its source → `192.168.50.3:7000/tcp` and `:7001/tcp`, and let the DMZ catch-all deny everything else. Anything sharing **VLAN-DMZ** with the VM reaches both ports directly without traversing OPNsense, so keep that VLAN to this one host. TLS / cert details are in [BunkerWeb Admin Web UI](#bunkerweb-admin-web-ui); after renewing the cert in `/srv/bw-ui-tls`, restart the `bunkerweb` container so 7001 picks it up too.
 
 ---
 
@@ -1094,6 +1151,7 @@ A map of every log this stack writes, what each one captures, and what consumes 
 | `/srv/bw-logs/modsec_audit.log` | **Only WAF-triggered events** (`SecAuditLogParts ABCFHJKZ` with `RelevantOnly` selector): every CRS rule match with full request context. Engine is `On`/blocking as of 2026-06-16, see [ModSecurity / OWASP CRS](#-modsecurity--owasp-crs-blocking-tuned). | Operator (manual review during exclusion tuning), CrowdSec (via error.log inline), **`modsec-tail.py` sidecar** (flattens each transaction to `/var/log/modsec-events/events.log` for Wazuh) | , |
 | `/var/log/modsec-events/events.log` | Flattened ModSecurity events from the `modsec-tail.py` sidecar: one clean JSON line per CRS-matched transaction (`srcip / method / path / http_code / engine / rule_ids / anomaly_score / band / hostname / attacks / rule_msgs / matched_in / unique_id`; rule descriptions and variable names, never the matched payload). Sidecar runs as the dedicated `modsectail` user. | Wazuh agent (tails as JSON; manager rules 100300-100304 in [`wazuh-home/modsec/manager-modsec-rules.xml`](./wazuh-home/modsec/manager-modsec-rules.xml); `band=high` → #modsec Discord) | n/a |
 | `/var/log/fail2ban.log` | fail2ban's own log: sshd-jail bans / unbans / jail lifecycle. Present on every host running the jail. | fail2ban itself, Wazuh agent (tails as syslog; manager `fail2ban-file` decoder + rule 100401; ban → #fail2ban Discord) | n/a |
+| `/srv/bw-logs/crowdsec-ui-access.log`, `crowdsec-ui-error.log` | Requests to / errors of the CrowdSec Web UI's 7001 server block. Client address is the podman bridge (rootless port forwarding SNATs), not the admin device. Kept separate so CrowdSec doesn't parse admin traffic. | Operator (debugging) |, |
 | `/srv/bw-logs/bunkerweb.log`, `redis.log`, `scheduler.log`, `ui.log` | BW's own internal logs: scheduler runs, Redis state, web UI activity, top-level container output. | Operator (debugging) |, |
 | `/srv/bw-logs/letsencrypt/*` | certbot logs from BW's bundled ACME flow. **Rotated internally by BW**, not in scope for the host logrotate config. | Operator (cert renewal debugging) |, |
 | `/srv/logs/{main,backup,docker,system}/*.log` | Maintenance script logs, one file per phase per day. `main-YYYY-MM-DD.log` (orchestrator), `vault-backup-YYYY-MM-DD.log`, `update-YYYY-MM-DD.log` (docker), `system-autoupdate-YYYY-MM-DD.log`. 30-day retention enforced by `find -mtime +30 -delete` at the end of each phase script (NOT logrotate). | Operator, TrueNAS (pulled nightly via `truenas-script.sh`) | , (human-readable; the machine-readable summary is the JSONL row below) |

@@ -92,6 +92,7 @@ objects.githubusercontent.com
 codeload.github.com
 avatars.githubusercontent.com
 ghcr.io
+pkg-containers.githubusercontent.com
 
 # === Go ecosystem ===
 proxy.golang.org

@@ -112,6 +112,12 @@ services:
       # device and must NOT be reachable from the VPS_TUNNEL interface — that
       # tunnel pass rule is scoped to 8080/8443, keep it that way.
       - "7000:7000/tcp"
+      # CrowdSec Web UI (HTTPS). Not a BunkerWeb service: a plain nginx
+      # server block in bunkerweb/custom-configs/http/crowdsec-web-ui.conf
+      # terminates TLS with the same /ui-tls cert as 7000 and proxies to the
+      # crowdsec-web-ui container. Same exposure rules as 7000: OPNsense lets
+      # only the admin device in, and it stays out of the VPS_TUNNEL rules.
+      - "7001:7001/tcp"
     environment:
       TZ: "${TZ}"
       # Space-separated: the vault hostname AND the bare apex domain (the
@@ -418,7 +424,10 @@ services:
     deploy:
       resources:
         limits:
-          memory: 192M
+          # 256M (was 192M): headroom for the CrowdSec Web UI, which logs
+          # in as a watcher, heartbeats every 30s, syncs alerts every minute
+          # and reads the Prometheus metrics.
+          memory: 256M
           # 1.0, not 0.5: at 0.5 the CFS quota throttled crowdsec in ~1/3 of
           # periods (log-parsing bursts on every proxied request), which made
           # BunkerWeb's live LAPI lookups take 0.2-1s and hit its 1s timeout.
@@ -489,6 +498,10 @@ services:
       - ./crowdsec/parsers:/etc/crowdsec/parsers/s01-parse/vaultwarden:ro
       - ./crowdsec/scenarios:/etc/crowdsec/scenarios/vaultwarden:ro
       - ./crowdsec/whitelists:/etc/crowdsec/parsers/s02-enrich/vaultwarden:ro
+      # Merged over the volume's config.yaml at startup: trusted_ips for the
+      # CrowdSec Web UI (alert deletion) + Prometheus metrics. Per-file,
+      # like acquis.d, so config.yaml itself stays the image's own.
+      - ./crowdsec/config.yaml.local:/etc/crowdsec/config.yaml.local:ro
     healthcheck:
       test: ["CMD", "cscli", "lapi", "status"]
       interval: 15s
@@ -496,6 +509,87 @@ services:
       retries: 10
     restart: unless-stopped
     networks: [security]
+
+  crowdsec-web-ui:
+    # Dashboard for CrowdSec: alerts, decisions (manual bans / unbans),
+    # metrics. https://github.com/TheDuffman85/crowdsec-web-ui
+    # Reached at https://vaultwarden-home:7001 through BunkerWeb's nginx
+    # (bunkerweb/custom-configs/http/crowdsec-web-ui.conf); publishes no
+    # host port itself. Login: local admin + TOTP, created on first visit.
+    container_name: crowdsec-web-ui
+    image: ghcr.io/theduffman85/crowdsec-web-ui:latest
+    # The image's node user (1000), set here so the entrypoint skips its
+    # root-only `chown -R /app/data` + gosu step and no capability is needed.
+    # The named volume is initialised from the image's /app/data, which is
+    # already node-owned.
+    user: "1000:1000"
+    security_opt:
+      - no-new-privileges
+    cap_drop:
+      - ALL
+    read_only: true
+    tmpfs:
+      - /tmp
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+          cpus: "0.5"
+    environment:
+      TZ: "${TZ}"
+      # Login to LAPI as a watcher machine, registered once with
+      # `cscli machines add crowdsec-web-ui --password ... -f /dev/null`
+      # (lives in the crowdsec-db volume; README § CrowdSec Web UI).
+      CONFIG_INSTANCE_ID: "vault"
+      CONFIG_INSTANCE_NAME: "Vault VM"
+      CONFIG_INSTANCE_LAPI_URL: "http://crowdsec:8080"
+      CONFIG_INSTANCE_LAPI_AUTH_USERNAME: "crowdsec-web-ui"
+      CONFIG_INSTANCE_LAPI_AUTH_PASSWORD: "${CROWDSEC_WEBUI_PASSWORD}"
+      # Metrics page. 6060 is only reachable on the security network
+      # (crowdsec/config.yaml.local), never host-published.
+      CONFIG_INSTANCE_METRICS_URL: "http://crowdsec:6060/metrics"
+      # 30 days of history. CrowdSec flushes its own alerts after 7 days by
+      # default (db_config.flush.max_age), so the Web UI's own copy is the
+      # only place days 8-30 are kept.
+      CONFIG_CROWDSEC_SYNC_LOOKBACK: "30d"
+      # No alert filter set: the default feed leaves out the community
+      # blocklist (CAPI) and subscribed lists, ~115k IPs that would bury the
+      # local bans and load the 256M crowdsec container on every sync.
+      CONFIG_AUTH_ENABLED: "true"
+      # No egress needed: the update check would call api.github.com
+      # (images are updated by the nightly docker-update.sh), no
+      # notification destinations are configured, and the GeoNames data is
+      # in the image. Anything it still tried would be refused by Squid or
+      # OPNsense and show up in #squid or #firewall.
+      CONFIG_UPDATES_ENABLED: "false"
+      CONFIG_UI_TIME_ZONE: "${TZ}"
+      CONFIG_UI_TIME_FORMAT: "24h"
+      CONFIG_UI_DATE_FORMAT: "dd/mm/yyyy"
+    volumes:
+      # SQLite cache + admin account + settings. Not backed up: losing it
+      # means re-creating the admin and re-importing the last 7 days.
+      - crowdsec-web-ui-data:/app/data
+    # The image's HEALTHCHECK, restated: podman drops it from OCI images.
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://localhost:3000/api/health').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    depends_on:
+      crowdsec:
+        condition: service_started
+    restart: unless-stopped
+    networks:
+      security:
+        # Fixed, because two things point at it by address:
+        # - crowdsec/config.yaml.local trusts exactly this IP (alert
+        #   deletion needs api.server.trusted_ips, not just a login)
+        # - the 7001 server block proxies to this IP, not to the name: nginx
+        #   resolves a name once at startup and fails to start if the
+        #   container is down, which would take the vault down with it.
+        # High in the /24 so podman's sequential allocation for the other
+        # containers never lands on it.
+        ipv4_address: 10.89.1.50
 
   vaultwarden:
     container_name: vaultwarden
@@ -618,6 +712,8 @@ volumes:
     name: crowdsec-db
   crowdsec-config:
     name: crowdsec-config
+  crowdsec-web-ui-data:
+    name: crowdsec-web-ui-data
 
 networks:
   # Subnets are pinned so the aardvark-dns gateway IPs referenced in

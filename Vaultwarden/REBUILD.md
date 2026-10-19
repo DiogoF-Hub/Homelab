@@ -1085,6 +1085,10 @@ container-root in the rootless userns), so `poduser:poduser 0600` on the key
 is readable, no need to chown to a subuid. The admin account is seeded from
 `.env`'s `UI_ADMIN_*` on first boot, so there's no setup wizard to complete.
 
+The same cert also serves the CrowdSec Web UI on port 7001, through
+BunkerWeb's nginx (`bunkerweb/custom-configs/http/crowdsec-web-ui.conf`).
+nginx must be able to read the key too; Phase 12 checks it.
+
 Pick your flavour. **What's actually running in this deployment**:
 `docker-compose.public-dns01.yml` paired with the edge VPS in
 [`vps/`](vps/) (Phase 11 alternate). The other two are kept in the
@@ -1260,8 +1264,8 @@ What to watch for on first boot, in order:
 5. **Vaultwarden** healthcheck (`curl -sf http://localhost:8080/alive`
    inside the container) goes green within ~30s.
 
-`podman ps` should show `bunkerweb`, `crowdsec`, `vaultwarden`, and (for
-`cf-tunnel` only) `cloudflared` all healthy.
+`podman ps` should show `bunkerweb`, `crowdsec`, `crowdsec-web-ui`,
+`vaultwarden`, and (for `cf-tunnel` only) `cloudflared` all healthy.
 
 Test the vault loads over HTTPS from your workstation. ModSecurity ships
 `On` (actively blocking) in the compose (see README §ModSecurity / OWASP
@@ -1269,6 +1273,35 @@ CRS), so a request crossing the CRS blocking threshold is rejected (403);
 every rule match is also logged to `/srv/bw-logs/modsec_audit.log`. If you
 hit a legit false positive during initial bring-up, roll back to
 `DetectionOnly` and recreate the container while you add an exclusion.
+
+### CrowdSec Web UI (port 7001)
+
+README § CrowdSec Web UI has the design. On a fresh `crowdsec-db` volume
+the Web UI can't log into LAPI until its watcher machine exists, so
+register it once (same password as `CROWDSEC_WEBUI_PASSWORD` in `.env`),
+then restart the UI:
+
+```bash
+# As poduser, in the compose dir:
+podman exec crowdsec cscli machines add crowdsec-web-ui \
+  --password '<CROWDSEC_WEBUI_PASSWORD>' -f /dev/null    # keep -f /dev/null
+podman restart crowdsec-web-ui
+podman exec crowdsec cscli machines list                 # crowdsec-web-ui, heartbeat recent
+```
+
+Then, in this order:
+
+1. OPNsense: pass the admin workstation → `192.168.50.3:7001/tcp` (next to
+   the 7000 rule, README § Admin Web UI access).
+2. Open `https://vaultwarden-home:7001` **right away** and create the admin
+   account, then enable TOTP. Until an account exists, whoever opens the
+   page first gets to create it.
+3. Check the vault itself still loads: the 7001 server block lives in the
+   same nginx.
+
+If 7001 doesn't answer, check nginx can read the key
+(`podman exec bunkerweb ls -ln /ui-tls`, and
+`/srv/bw-logs/crowdsec-ui-error.log`).
 
 ## Phase 13, First real login
 
