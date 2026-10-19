@@ -476,8 +476,11 @@ services:
       # means re-creating the admin and re-importing the last 7 days.
       - crowdsec-web-ui-data:/app/data
     # The image's HEALTHCHECK, restated: podman drops it from OCI images.
+    # CMD-SHELL with the JS quoted for sh, not a ["CMD", "node", "-e", ...]
+    # list: podman-compose joins that list into one unquoted string for
+    # /bin/sh, which then dies on `fetch(` ("Syntax error: ( unexpected").
     healthcheck:
-      test: ["CMD", "node", "-e", "fetch('http://localhost:3000/api/health').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]
+      test: ["CMD-SHELL", "node -e \"fetch('http://127.0.0.1:3000/api/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))\""]
       interval: 30s
       timeout: 5s
       retries: 3
