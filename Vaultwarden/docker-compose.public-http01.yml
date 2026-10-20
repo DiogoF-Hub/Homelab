@@ -218,11 +218,31 @@ services:
       USE_WHITELIST: "no"
 
       # Rate limiting (tuned for ~5 users). BunkerWeb 1.6.x dropped the
-      # standalone LIMIT_REQ_BURST setting; whatever default burst the
-      # limit plugin applies internally is fine for current traffic
-      # shape, no sync issues observed without an explicit burst.
+      # standalone LIMIT_REQ_BURST setting and the limit plugin has no burst:
+      # the 6th request inside one second gets a 429.
+      # LIMIT_REQ_URL is a PCRE regex; "/" is the fallback, used only when no
+      # other pattern matches the URI, so the global 5r/s still covers every
+      # other route (login, ciphers, admin).
+      # /api/config override added 2026-10-20: the Bitwarden iOS/iPadOS app
+      # (2026.9.x) fires up to ~23 parallel GET /api/config in the same
+      # millisecond on unlock/foreground (app + autofill extension). The 10-11
+      # to 10-20 BunkerWeb report showed 91 x 429, all on that route, all
+      # family devices (LU + BR), ~2 bursts/day. /api/config is unauthenticated,
+      # read-only server settings, so a higher rate there costs nothing;
+      # brute-force protection stays with LOGIN_RATELIMIT_* + CrowdSec.
+      # /icons/ override added the same day: scrolling the vault list on iOS
+      # loads one /icons/<domain>/icon.png per visible entry in parallel and
+      # hit the 5r/s fallback. With ICON_SERVICE=bitwarden Vaultwarden only
+      # answers a redirect (no outbound fetch, DISABLE_ICON_DOWNLOAD=true), so
+      # these are unauthenticated and cheap. The two patterns never overlap,
+      # so the unordered rule lookup in the limit plugin can't pick the wrong one.
       USE_LIMIT_REQ: "yes"
+      LIMIT_REQ_URL: "/"
       LIMIT_REQ_RATE: "5r/s"
+      LIMIT_REQ_URL_1: "^/api/config$"
+      LIMIT_REQ_RATE_1: "30r/s"
+      LIMIT_REQ_URL_2: "^/icons/"
+      LIMIT_REQ_RATE_2: "50r/s"
 
       # DNSBL (check IPs against known spam/abuse lists)
       USE_DNSBL: "yes"
