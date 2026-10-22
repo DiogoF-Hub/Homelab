@@ -17,7 +17,9 @@
   Flat JSON, one line per ModSecurity audit transaction, emitted by the
   sidecar at sidecar/vault/modsec-tail.py. Fields: event_type / ts / srcip /
   method / path / http_code / engine / rule_ids / n_rules /
-  anomaly_score / band / unique_id / hostname.
+  anomaly_score / outbound_score / band / unique_id / hostname / attacks /
+  rule_msgs / matched_in / blocked / client_name / client_version /
+  user_agent.
 
   IMPORTANT: this tails the sidecar's OUTPUT, not
   /srv/bw-logs/modsec_audit.log directly. The raw audit log is JSON

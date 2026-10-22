@@ -7,7 +7,7 @@ object per line), flattens each transaction into a single flat JSON
 line with clean scalar fields, and appends it to
 /var/log/modsec-events/events.log. The Wazuh agent on this VM tails
 that file via a <localfile> entry; the manager fires rules
-100300 / 100301 / 100302 / 100303 / 100304 (see
+100300 / 100301 / 100302 / 100303 / 100304 / 100305 (see
 Vaultwarden/wazuh-home/modsec/manager-modsec-rules.xml) on the decoded events.
 
 WHY THIS EXISTS (why not tail modsec_audit.log directly)
@@ -60,6 +60,8 @@ ARCHITECTURE
                                 100302 (level 7):  band=low|mid (routine scoring scans)
                                 100303 (level 11): band=high (real multi-vector attack)
                                 100304 (level 12): outbound_score > 0 (response flagged)
+                                100305 (level 12): blocked=yes + a Bitwarden client name
+                                                   (a real client got blocked: likely FP)
 
 STATE
 
@@ -160,6 +162,26 @@ WHERE_RE = re.compile(r"found within ([A-Z_]+(?::[^:\s]{1,64})?):")
 NON_DETECTION_RULES = ("949", "959", "980")
 MAX_WHERE = 10
 
+# Rules whose firing IS the block with the engine On: 949110 (inbound score
+# over threshold -> 403), 959100 (outbound score -> response blocked),
+# 200002 (request body failed to parse -> 400). Everything else only adds
+# to a score, so a lone PL2 match on a request that went through doesn't
+# count as blocked.
+VERDICT_RULES = ("949110", "959100", "200002")
+
+# Request headers carried into the event, case-insensitive. Bitwarden
+# clients send Bitwarden-Client-Name (web / browser / desktop / mobile /
+# cli) and -Version on every API call; scanners don't. That's what lets
+# rule 100305 single out a blocked REAL client (a likely false positive).
+# All three are client-controlled, hence the cap; they're plain labels,
+# nothing sensitive (unlike Authorization / Cookie, never read here).
+CLIENT_HEADERS = {
+    "client_name":    "bitwarden-client-name",
+    "client_version": "bitwarden-client-version",
+    "user_agent":     "user-agent",
+}
+MAX_HEADER_LEN = 160
+
 # ---------------------------------------------------------------------
 # Shutdown flag
 # ---------------------------------------------------------------------
@@ -242,6 +264,20 @@ def describe(messages):
             where.append(found.group(1))
     return unique(attacks), unique(msgs), unique(where)[:MAX_WHERE]
 
+def client_fields(req):
+    """CLIENT_HEADERS from the request, by lowercased name ("" if absent).
+    HTTP/2 already sends them lowercase, HTTP/1.1 clients may not."""
+    headers = req.get("headers") or {}
+    lower = {str(k).lower(): v for k, v in headers.items()} if isinstance(headers, dict) else {}
+    return {field: str(lower.get(name) or "")[:MAX_HEADER_LEN]
+            for field, name in CLIENT_HEADERS.items()}
+
+def was_blocked(engine, rule_ids):
+    """"yes" if the engine enforces (v3 reports On as "Enabled") and a
+    verdict rule fired, else "no". A string so rules can pcre2-match it."""
+    enforced = engine in ("On", "Enabled")
+    return "yes" if enforced and any(r in VERDICT_RULES for r in rule_ids) else "no"
+
 def flatten(txn):
     """
     Convert one transaction object into the flat dict we ship.
@@ -276,6 +312,14 @@ def flatten(txn):
       matched_in:    comma-joined request variables they matched in
                      (ARGS:path, REQUEST_BODY, ...), names only, never
                      the values.
+      blocked:       "yes" if modsec itself blocked it (see was_blocked),
+                     "no" otherwise. Unlike http_code, a 404/401 from
+                     Vaultwarden on a request modsec let through never
+                     reads as blocked.
+      client_name /  Bitwarden-Client-Name / -Version headers, "" when
+      client_version: absent (scanners). Rule 100305 keys on client_name.
+      user_agent:    User-Agent header, capped. For context only, the
+                     browser extension sends the browser's own UA.
     """
     req = txn.get("request") or {}
     resp = txn.get("response") or {}
@@ -287,6 +331,7 @@ def flatten(txn):
     score = parse_score(messages)
     attacks, msgs, where = describe(messages)
     uri = req.get("uri") or ""
+    engine = producer.get("secrules_engine", "")
 
     return {
         "event_type":    EVENT_TYPE,
@@ -295,7 +340,7 @@ def flatten(txn):
         "method":        req.get("method", ""),
         "path":          uri.split("?", 1)[0],
         "http_code":     resp.get("http_code"),
-        "engine":        producer.get("secrules_engine", ""),
+        "engine":        engine,
         "rule_ids":      ",".join(rule_ids),
         "n_rules":       len(messages),
         "anomaly_score": score,
@@ -306,6 +351,8 @@ def flatten(txn):
         "attacks":       ",".join(attacks),
         "rule_msgs":     " | ".join(msgs),
         "matched_in":    ",".join(where),
+        "blocked":       was_blocked(engine, rule_ids),
+        **client_fields(req),
     }
 
 # ---------------------------------------------------------------------

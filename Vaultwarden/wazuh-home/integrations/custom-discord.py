@@ -20,8 +20,10 @@ WIRED SOURCES (the three pipelines configured today):
              (sidecar/vault/modsec-tail.py), tiered by manager-modsec-rules.xml.
              Posts band=high (rule 100303, level 11), the multi-vector
              attacks, without an @ (already blocked and banned), and a
-             flagged RESPONSE (rule 100304, level 12) with an @; never the
-             scanner noise below band=high.
+             flagged RESPONSE (rule 100304, level 12) with an @, and a
+             blocked REAL Bitwarden client (rule 100305, level 12, a likely
+             false positive) with an @, muted per src+request for an hour;
+             never the scanner noise below band=high.
   - dns    : Pi-hole FTL events from the Vault VM (manager-rules.xml).
              Pings on blocked=true EXCEPT status=blocked-external-null-reply
              (upstream NULL-reply noise), matching the dashboard filter.
@@ -54,6 +56,7 @@ import json
 import time
 import fcntl
 import ipaddress
+import re
 import urllib.error
 import urllib.request
 from urllib.parse import quote
@@ -328,10 +331,25 @@ def _modsec_detail_fields(data):
 # Embed formatters (one per wired source)
 # ---------------------------------------------------------------------------
 
+# A client that trips a rule deterministically (an unlucky refresh token
+# retried in the background, 2026-09) would otherwise ping on every retry,
+# so rule 100305 posts once per src + request + rules per MODSEC_FP_MUTE_SECONDS.
+# Same fail-open state file approach as the firewall mute.
+MODSEC_FP_SEEN_FILE = "/var/ossec/logs/custom-discord-modsec-fp-seen.json"
+MODSEC_FP_MUTE_SECONDS = 3600
+_UUID_RE = re.compile(r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}")
+
+def _modsec_fp_key(data):
+    """Same client IP, same request shape (item UUIDs collapsed), same rules."""
+    path = _UUID_RE.sub("<uuid>", str(data.get("path", "")))
+    return f"{data.get('srcip', '')}|{data.get('method', '')} {path}|{data.get('rule_ids', '')}"
+
+
 def format_modsecurity(alert):
     """
     Discord embed from a flattened modsec event: rule 100303 (band=high),
-    or rule 100304 (the response was flagged, outbound_score > 0).
+    rule 100304 (the response was flagged, outbound_score > 0), or rule
+    100305 (a real Bitwarden client got blocked, a likely false positive).
     Reads the clean fields the sidecar emits; no full_log scraping.
     """
     data = alert.get("data", {})
@@ -351,6 +369,8 @@ def format_modsecurity(alert):
     target = modsec_target(data.get("hostname"))
     agent_name = agent.get("name", "N/A")
     timestamp = alert.get("timestamp", "N/A")
+    client = " ".join(str(data.get(k)) for k in ("client_name", "client_version") if data.get(k))
+    real_client = str((alert.get("rule") or {}).get("id")) == "100305"
 
     country_display, location = resolve_geo(src_ip, geo)
 
@@ -364,7 +384,12 @@ def format_modsecurity(alert):
     else:
         enforced = str(engine)
 
-    if response_flagged:
+    if real_client:
+        # Rule 100305: an official Bitwarden client got a 403/400 from modsec.
+        # Someone's save / sync / login just failed; find the rule and the
+        # variable (Where), then grep the Audit ID on the Vault VM.
+        title, color = "🛑 ModSecurity , blocked a Bitwarden client (likely false positive)", 10181046  # purple
+    elif response_flagged:
         # Rule 100304: what the server SENT BACK looked like a leak, and the
         # response was blocked. Either a real leak or a false positive
         # breaking a real client.
@@ -372,6 +397,10 @@ def format_modsecurity(alert):
     else:
         title, color = "🚨 ModSecurity , high-severity attack", 15158332        # red
     extra = [{"name": "Outbound score", "value": outbound, "inline": True}] if response_flagged else []
+    if client:
+        extra.append({"name": "Client", "value": _code(client), "inline": True})
+    if real_client and data.get("user_agent"):
+        extra.append({"name": "User-Agent", "value": _code(data.get("user_agent"), 160), "inline": False})
 
     return {
         "title": title,
@@ -656,11 +685,12 @@ def _fw_key(data):
     return (f"{data.get('srcip', '')}>{data.get('dstip', '')}:"
             f"{data.get('dstport', '')}/{data.get('protocol', '')}")
 
-def _fw_first_in_window(key):
-    """True if `key` wasn't posted in the last FW_MUTE_SECONDS; records it."""
+def _first_in_window(key, seen_file, mute_seconds):
+    """True if `key` wasn't posted in the last mute_seconds; records it in
+    seen_file. Shared by the firewall and modsec-FP mutes."""
     now = time.time()
     try:
-        with open(FW_SEEN_FILE, "a+") as f:
+        with open(seen_file, "a+") as f:
             fcntl.flock(f, fcntl.LOCK_EX)
             f.seek(0)
             try:
@@ -669,7 +699,7 @@ def _fw_first_in_window(key):
                 seen = {}
             if not isinstance(seen, dict):
                 seen = {}
-            seen = {k: t for k, t in seen.items() if now - t < FW_MUTE_SECONDS}
+            seen = {k: t for k, t in seen.items() if now - t < mute_seconds}
             if key in seen:
                 return False
             seen[key] = now
@@ -912,9 +942,14 @@ def main():
     #     the @: a band=high attack was already blocked (engine On), and
     #     CrowdSec bans anything scoring 10+, so there's nothing to do but
     #     read it. A flagged response is a possible leak, or a false
-    #     positive breaking a real client: look now. ---
+    #     positive breaking a real client: look now.
+    #     Rule 100305 (a real Bitwarden client blocked) always gets the @,
+    #     muted per src + request + rules for an hour. ---
     if "modsecurity" in groups:
-        if data.get("band") == "high" or level >= 11:
+        if str(rule.get("id")) == "100305":
+            if _first_in_window(_modsec_fp_key(data), MODSEC_FP_SEEN_FILE, MODSEC_FP_MUTE_SECONDS):
+                deliver("modsec", format_modsecurity(alert))
+        elif data.get("band") == "high" or level >= 11:
             flagged = str(data.get("outbound_score") or "0") not in ("", "0")
             deliver("modsec", format_modsecurity(alert),
                     mention=(MENTION if flagged else ""))
@@ -943,7 +978,7 @@ def main():
     elif rule.get("id") in ("100700", "100701"):
         if (not _fw_is_noise(data.get("dstip", ""))
                 and not _fw_is_out_of_state(alert.get("full_log", ""))
-                and _fw_first_in_window(_fw_key(data))):
+                and _first_in_window(_fw_key(data), FW_SEEN_FILE, FW_MUTE_SECONDS)):
             deliver("firewall", format_firewall(alert))
 
     # --- maintenance: nightly run summary. 100501 = ok (quiet heartbeat),

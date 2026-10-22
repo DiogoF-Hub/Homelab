@@ -41,7 +41,7 @@
   along in each event so the alert shows which mode was active. No rule
   changes needed when you flip the engine.
 
-  Five-rule chain (IDs 100300-100304; DNS pipeline uses 100250-100253,
+  Six-rule chain (IDs 100300-100305; DNS pipeline uses 100250-100253,
   retired text-log pipeline used 100190-100210, so this block is free):
     100300 (level 0):  base. Every modsec event (event_type=bw_modsec).
                        Archived with logall_json; never alerts. Other
@@ -55,6 +55,13 @@
                        RESPONSE was flagged as a possible leak and blocked.
                        Also goes to Discord (the integration takes any
                        modsecurity alert at level 11+).
+    100305 (level 12): blocked=yes from a Bitwarden client (client_name
+                       header). A real user just got a 403/400, i.e. a
+                       likely false positive. Discord with an @.
+
+  Dashboard filters (wazuh-alerts-*): data.client_name / data.client_version
+  / data.user_agent / data.blocked ride on every event, e.g.
+  `data.client_name:* and data.blocked:yes` = every real-client block.
 
   Note on field matching: Wazuh treats <field> values as regex. The
   band values are a closed set (none/low/mid/high), but we anchor with
@@ -110,6 +117,24 @@
     <if_sid>100301,100302,100303</if_sid>
     <field name="outbound_score" type="pcre2">^[1-9]</field>
     <description>ModSec RESPONSE flagged ($(engine)): $(srcip) $(method) $(path) [outbound score $(outbound_score), rules $(rule_ids)]</description>
+  </rule>
+
+  <!-- A REAL Bitwarden client got blocked: almost certainly a false
+       positive, and until now the only way to find out was someone saying
+       "my save failed". blocked=yes is set by the sidecar only when the
+       engine is On and a verdict rule fired (949110 / 959100 / 200002),
+       so a 401/404 from Vaultwarden itself never counts. client_name is
+       the Bitwarden-Client-Name header every official client sends on API
+       calls and scanners don't (first seen on the 2026-10-21 932125 FP).
+       Spoofable, but the worst a spoofer gets is a Discord ping.
+       A child of the band rules AND of 100304, so it wins either way: a
+       flagged response to a real client still lands here. Level 12 keeps
+       it above the modsec integration's level-11 floor. -->
+  <rule id="100305" level="12">
+    <if_sid>100301,100302,100303,100304</if_sid>
+    <field name="blocked" type="pcre2">^yes$</field>
+    <field name="client_name" type="pcre2">^(web|browser|desktop|mobile|cli|connector)$</field>
+    <description>ModSec BLOCKED a Bitwarden client ($(client_name) $(client_version)): $(srcip) $(method) $(path) [score $(anomaly_score), rules $(rule_ids), in $(matched_in)]</description>
   </rule>
 
 </group>
