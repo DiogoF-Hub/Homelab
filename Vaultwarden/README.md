@@ -708,7 +708,7 @@ admin workstation ──HTTPS :7001──▶ BunkerWeb's nginx (crowdsec-web-ui.
 * Not a BunkerWeb service on 443: that listener only takes PROXY-protocol connections from the edge VPS, so a vhost there would be reachable from the internet and never from the LAN. 7001 is in no VPS_TUNNEL rule, and OPNsense lets only the admin device in (see [Admin Web UI access](#admin-web-ui-access-ports-7000-and-7001)).
 * The server block proxies to the **IP**, not the container name. nginx resolves names once at startup and refuses to start if one doesn't resolve, so a stopped Web UI would otherwise take nginx, and the vault, down with it. With the IP, a stopped Web UI is just a 502 on 7001.
 * Same nginx as the vault: a syntax error in that file stops nginx from loading. Check the vault still answers after any change to it.
-* Own log files, `/srv/bw-logs/crowdsec-ui-access.log` and `crowdsec-ui-error.log`, so the UI's API polling stays out of the `access.log` / `error.log` that CrowdSec parses. Rotated by the existing `/srv/bw-logs/*.log` logrotate rule.
+* Own log files, `/srv/bw-logs/crowdsec-ui-access.log` and `crowdsec-ui-error.log`, so the UI's API polling stays out of the `access.log` / `error.log` that CrowdSec parses. Rotated with the rest of `/srv/bw-logs/*.log` by BunkerWeb's own logrotate (see [Log Rotation](#-log-rotation)).
 
 **Login and permissions**
 
@@ -1224,7 +1224,7 @@ Also still ahead, tracked in [ideas.md](ideas.md) #7: shipping the Vault VM's ow
 
 ## 🔁 Log Rotation
 
-Vaultwarden, BunkerWeb's nginx workers, the modsec-tail sidecar's output, and the FTL-DB sidecar's output all append indefinitely; none rotate themselves. Four host-side configs cover this across two VMs (three on the Vault VM, one on the Pi-hole VM). They live in `/etc/logrotate.d/<name>` and are NOT checked into this repo (created by hand from the snippets below). Pi-hole's own `pihole.log` is rotated by Pi-hole's bundled logrotate setup, no extra config needed for that. On `wazuh-home`, the OPNsense firewall lines (`/var/log/opnsense/vault-filter.log`) rotate with `/etc/logrotate.d/opnsense`, which is in the repo at [`wazuh-home/opnsense/logrotate-opnsense`](./wazuh-home/opnsense/logrotate-opnsense) (rsyslog reopens the file itself, so no `copytruncate` there).
+Vaultwarden, the modsec-tail sidecar's output, and the FTL-DB sidecar's output all append indefinitely and don't rotate themselves. BunkerWeb is the exception: it rotates its own logs from inside the container (see below), so there's deliberately no host config for `/srv/bw-logs`. Three host-side configs cover the rest across two VMs (two on the Vault VM, one on the Pi-hole VM). They live in `/etc/logrotate.d/<name>` and are NOT checked into this repo (created by hand from the snippets below). Pi-hole's own `pihole.log` is rotated by Pi-hole's bundled logrotate setup, no extra config needed for that. On `wazuh-home`, the OPNsense firewall lines (`/var/log/opnsense/vault-filter.log`) rotate with `/etc/logrotate.d/opnsense`, which is in the repo at [`wazuh-home/opnsense/logrotate-opnsense`](./wazuh-home/opnsense/logrotate-opnsense) (rsyslog reopens the file itself, so no `copytruncate` there).
 
 `copytruncate` is **load-bearing** in every config below: the standard logrotate mode (rename + create new file) changes the file's inode, and CrowdSec tails by file descriptor, it would keep reading the renamed (eventually compressed-and-deleted) file forever and miss new entries. `copytruncate` keeps the same inode and truncates in place, so its open fd keeps seeing fresh writes uninterrupted.
 
@@ -1243,20 +1243,31 @@ Vaultwarden, BunkerWeb's nginx workers, the modsec-tail sidecar's output, and th
 }
 ```
 
-#### `/etc/logrotate.d/bunkerweb`
+#### BunkerWeb logs (`/srv/bw-logs`): rotated by BunkerWeb itself, NO host config
+
+The BunkerWeb image ships its own `/etc/logrotate.d/bunkerweb`. There's no crond running in the container: the all-in-one entrypoint starts a loop instead, `while :; do logrotate -s /var/tmp/bunkerweb/logrotate.status /etc/logrotate.d/bunkerweb; sleep 3600; done`, so it checks every hour and `daily` fires on the first check after midnight (about 00:36 here, since the container is recreated at ~05:36 every morning). Its state file sits in `/var/tmp` inside the container and starts fresh at every recreate; that's harmless, rotations are still observed once a night. `/var/log/bunkerweb` inside the container is the `/srv/bw-logs` bind mount, so it rotates exactly these files. As of 2026-11 the config reads:
 
 ```
-/srv/bw-logs/*.log {
+/var/log/bunkerweb/*.log
+{
+    su nginx nginx
     daily
-    rotate 7
+    maxsize 100M
+    rotate 14
+    copytruncate
     compress
+    delaycompress
     missingok
     notifempty
-    copytruncate
+    create 0640 nginx nginx
 }
 ```
 
-The `letsencrypt/` subdir under `/srv/bw-logs/` is rotated internally by BunkerWeb's bundled certbot, the glob above won't recurse into it, which is intentional. Leave it alone.
+So: 14 days, `copytruncate` (what CrowdSec and the modsec-tail sidecar need), yesterday's file stays plain as `.1`, older ones are `.2.gz`..`.14.gz`, and a log over 100 MB rotates early.
+
+**Don't add a host `/etc/logrotate.d/bunkerweb` on top.** There used to be one (daily, `rotate 7`, `compress`), and two rotators on the same files fight: every night the container rotated at ~00:36 and left a plain `.1` (`delaycompress`), the host's logrotate timer came along a minute later, found that `.1` in its way, renamed it to `<log>.1-<date>.backup` and moved on, and logrotate never deletes `.backup` files. Seven weeks of that left ~115 of them in `/srv/bw-logs` and holes in the `.N.gz` numbering. The host config was retired on 2026-11-18. After a BunkerWeb image update, `podman exec bunkerweb cat /etc/logrotate.d/bunkerweb` shows whether the vendor config changed.
+
+The `letsencrypt/` subdir under `/srv/bw-logs/` is rotated internally by BunkerWeb's bundled certbot. Leave it alone.
 
 #### `/etc/logrotate.d/modsec-events`
 

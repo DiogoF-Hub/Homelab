@@ -263,7 +263,7 @@ services:
       USE_MODSECURITY: "yes"
       USE_MODSECURITY_CRS: "yes"
       # Flipped to "On" 2026-06-16 after nearly two months in DetectionOnly
-      # tuning exclusions. modsec_audit.log only retains 7 days (logrotate), and
+      # tuning exclusions. modsec_audit.log only retains 14 days (BunkerWeb's own logrotate), and
       # that window showed only scanners crossing the blocking threshold; the FP
       # exclusions in custom-configs/modsec-crs/ were verified against live
       # /api/ciphers + /admin/config traffic (both 200, sub-threshold). Roll back

@@ -76,7 +76,7 @@ VM) that print this request's lines from modsec_audit.log, error.log and
 access.log, pretty-printed. `lookup_safe` is the same with IPs masked,
 query strings stripped, auth / cookie headers, bodies and matched data
 hidden: for pasting the output somewhere. They only work while the logs
-still exist (bw-logs rotate daily, keep 7). Every value spliced into them
+still exist (BunkerWeb rotates bw-logs daily, keeps 14). Every value spliced into them
 is checked against a strict pattern first, so an odd value can never
 turn into shell syntax.
 
