@@ -479,7 +479,8 @@ LAN Pi-hole VM + `wazuh-home` itself), enrolled with a dedicated
 - **Vaultwarden VM**, a `modsec-tail.py` sidecar (runs as a dedicated
   unprivileged `modsectail` user) flattens BunkerWeb's `modsec_audit.log`
   into `/var/log/modsec-events/events.log`; the agent tails that; manager
-  rules 100300-100304 tier WAF events by CRS anomaly score.
+  rules 100300-100305 tier WAF events by CRS anomaly score (100320-100321
+  log BunkerWeb plugin denials from error.log).
 - **LAN Pi-hole VM**, two sources. A `pihole-ftl-tail.py` sidecar polls
   Pi-hole's FTL SQLite DB and emits per-query JSON to
   `/var/log/vault-dns/events.log` (manager rules 100250-100253). And the

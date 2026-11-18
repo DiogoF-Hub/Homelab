@@ -1,0 +1,120 @@
+{
+  "_readme": [
+    "Attacks already seen and named. Install on the Vault VM at /etc/modsec-tail/known-attacks.json (0644).",
+    "modsec-tail.py re-reads it whenever it changes: no restart. Check the journal for 'N known attacks loaded'.",
+    "A matching modsec event gets known_attack / known_cve. custom-discord only posts a high-score attack",
+    "(rule 100303) when known_attack is empty, so adding an entry here is how a new attack stops pinging.",
+    "",
+    "Entry: name, optional cve, and conditions in all (every one must hold), any (at least one, if listed),",
+    "none (none may hold). Condition: {\"in\": field, op: value}.",
+    "  fields: method path query uri body host ua headers header_names rules attacks, or header:<name>",
+    "  ops:    has (substring) / re (regex) / equals (whole value), all case-insensitive; present (true/false)",
+    "First match wins: specific exploits first, the generic scan categories last.",
+    "The generic ones carry a 'none' on injection-type attacks so a real RCE / SQLi that happens to hit",
+    "a .php path or carry a scanner header still counts as new and pings.",
+    "Built from 7 days of real traffic (2026-11-11..18); entries marked 'not seen yet' are well-known extras."
+  ],
+  "attacks": [
+    {
+      "name": "React2Shell payload (obfuscated eval)",
+      "cve": "CVE-2025-55182",
+      "all": [{"in": "body", "has": ":__proto__:then"}],
+      "any": [{"in": "body", "re": "\\beval\\b"}]
+    },
+    {
+      "name": "React2Shell secret dump",
+      "cve": "CVE-2025-55182",
+      "all": [{"in": "body", "has": ":__proto__:then"}],
+      "any": [{"in": "body", "has": "/proc/self/environ"}, {"in": "body", "re": "execSync\\(['\"]env\\b"}]
+    },
+    {
+      "name": "React2Shell probe",
+      "cve": "CVE-2025-55182",
+      "all": [{"in": "body", "has": ":__proto__:then"}],
+      "any": [{"in": "body", "has": "safe_check_"}, {"in": "body", "has": "$((41*271))"}]
+    },
+    {
+      "name": "React2Shell",
+      "cve": "CVE-2025-55182",
+      "all": [{"in": "body", "has": ":__proto__:then"}]
+    },
+
+    {
+      "name": "Log4Shell (not seen yet)",
+      "cve": "CVE-2021-44228",
+      "any": [
+        {"in": "uri", "re": "\\$\\{(jndi|\\$\\{|lower:|upper:|::-)"},
+        {"in": "headers", "re": "\\$\\{(jndi|\\$\\{|lower:|upper:|::-)"},
+        {"in": "body", "re": "\\$\\{(jndi|\\$\\{|lower:|upper:|::-)"}
+      ]
+    },
+    {
+      "name": "Shellshock (not seen yet)",
+      "cve": "CVE-2014-6271",
+      "all": [{"in": "headers", "re": "\\(\\)\\s*\\{"}]
+    },
+    {
+      "name": "Spring4Shell (not seen yet)",
+      "cve": "CVE-2022-22965",
+      "any": [{"in": "uri", "has": "class.module.classloader"}, {"in": "body", "has": "class.module.classloader"}]
+    },
+    {
+      "name": "PHPUnit eval-stdin (not seen yet)",
+      "cve": "CVE-2017-9841",
+      "all": [{"in": "path", "has": "eval-stdin.php"}]
+    },
+    {
+      "name": "ThinkPHP 5 RCE (not seen yet)",
+      "cve": "CVE-2018-20062",
+      "all": [{"in": "query", "has": "invokefunction"}]
+    },
+    {
+      "name": "Apache path traversal (not seen yet)",
+      "cve": "CVE-2021-41773",
+      "all": [{"in": "uri", "re": "/(cgi-bin|icons)/.*(%2e|%%32%65)"}]
+    },
+
+    {
+      "name": "Vite dev-server file read",
+      "cve": "CVE-2025-30208",
+      "any": [{"in": "path", "has": "/@fs/"}, {"in": "query", "re": "(^|&)(import&)?raw\\?\\?"}],
+      "none": [{"in": "attacks", "re": "rce|injection|sqli|xss|rfi"}]
+    },
+    {
+      "name": "Vite RSC source-map file read",
+      "all": [{"in": "path", "has": "/__vite_rsc_findSourceMapURL"}],
+      "none": [{"in": "attacks", "re": "rce|injection|sqli|xss"}]
+    },
+    {
+      "name": "Dolibarr file read",
+      "all": [{"in": "path", "re": "/document\\.php$"}, {"in": "query", "has": "modulepart="}],
+      "none": [{"in": "attacks", "re": "rce|injection|sqli|xss|rfi"}]
+    },
+    {
+      "name": "Next.js middleware bypass",
+      "cve": "CVE-2025-29927",
+      "all": [{"in": "header:x-middleware-subrequest", "present": true}],
+      "none": [{"in": "attacks", "re": "rce|injection|sqli|xss|rfi"}]
+    },
+    {
+      "name": "WordPress XML-RPC",
+      "all": [{"in": "path", "has": "/xmlrpc.php"}],
+      "none": [{"in": "attacks", "re": "rce|injection|sqli|xss|rfi"}]
+    },
+    {
+      "name": "AI-agent config scan",
+      "all": [{"in": "rules", "has": "930140"}],
+      "none": [{"in": "attacks", "re": "rce|injection|sqli|xss|rfi"}]
+    },
+    {
+      "name": "Secret-file scan",
+      "any": [{"in": "rules", "has": "930130"}, {"in": "rules", "has": "920440"}, {"in": "rules", "has": "920500"}],
+      "none": [{"in": "attacks", "re": "rce|injection|sqli|xss|rfi"}]
+    },
+    {
+      "name": "PHP webshell scan",
+      "all": [{"in": "path", "re": "\\.php$"}],
+      "none": [{"in": "attacks", "re": "rce|injection|sqli|xss|rfi"}]
+    }
+  ]
+}

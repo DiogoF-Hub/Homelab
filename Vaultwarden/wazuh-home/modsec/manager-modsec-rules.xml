@@ -50,7 +50,10 @@
     100301 (level 3):  band=none. Probe / redirect noise.
     100302 (level 7):  band=low|mid. Routine scoring scans.
     100303 (level 11): band=high. Real multi-vector attack. The Discord
-                       integration (Phase 2) hooks this rule id.
+                       integration hooks this rule id, but only posts it
+                       when the sidecar's known_attack is empty (an attack
+                       known-attacks.json can't name yet). Named ones
+                       stay in Wazuh.
     100304 (level 12): outbound_score > 0, a child of the three above. The
                        RESPONSE was flagged as a possible leak and blocked.
                        Also goes to Discord (the integration takes any
@@ -62,6 +65,20 @@
   Dashboard filters (wazuh-alerts-*): data.client_name / data.client_version
   / data.user_agent / data.blocked ride on every event, e.g.
   `data.client_name:* and data.blocked:yes` = every real-client block.
+  Since 2026-11 the whole record rides along too (full uri + query, all
+  request / response headers, the body, per-rule severity / paranoia
+  level / matched data, `raw`, and `lookup` / `lookup_safe` shell
+  commands), plus `denied_by` / `deny_reason` when a BunkerWeb plugin
+  (dnsbl, crowdsec, country, ...) is what actually denied the request.
+  e.g. `data.denied_by:dnsbl`, `data.paranoia_levels:2`,
+  `data.accept_encoding:identity`. None of it changes these rules.
+
+  Second group below: bw_deny events (100320-100321), one per
+  "[ACCESS] denied access from <plugin>" line in BunkerWeb's error.log,
+  emitted by the same sidecar. These cover denials of requests that never
+  tripped a CRS rule (invisible here before). Level 3, never Discord:
+  it's mostly scanners, and every one of them was already blocked.
+  (100310 is taken by the "no-run-in-25h" sketch in ideas.md.)
 
   Note on field matching: Wazuh treats <field> values as regex. The
   band values are a closed set (none/low/mid/high), but we anchor with
@@ -135,6 +152,27 @@
     <field name="blocked" type="pcre2">^yes$</field>
     <field name="client_name" type="pcre2">^(web|browser|desktop|mobile|cli|connector)$</field>
     <description>ModSec BLOCKED a Bitwarden client ($(client_name) $(client_version)): $(srcip) $(method) $(path) [score $(anomaly_score), rules $(rule_ids), in $(matched_in)]</description>
+  </rule>
+
+</group>
+
+<!-- BunkerWeb plugin denials. Not in the modsecurity group on purpose: the
+     Discord integration takes group modsecurity at level 11+, and these
+     should never reach it. -->
+<group name="bunkerweb,bw_deny,vaultwarden">
+
+  <!-- Base: every bw_deny event, archived, never alerts. -->
+  <rule id="100320" level="0">
+    <decoded_as>json</decoded_as>
+    <field name="event_type">bw_deny</field>
+    <description>BunkerWeb denial: $(denied_by) $(srcip) $(method) $(path)</description>
+  </rule>
+
+  <!-- Every denial, at the same level as a band=none modsec probe.
+       Filter on data.denied_by to see what each layer catches. -->
+  <rule id="100321" level="3">
+    <if_sid>100320</if_sid>
+    <description>BunkerWeb $(denied_by) denied $(srcip) $(method) $(path): $(deny_reason)</description>
   </rule>
 
 </group>

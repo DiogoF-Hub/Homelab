@@ -302,29 +302,151 @@ def _code(text, limit=64):
     return "`{}`".format(str(text).replace("`", "")[:limit])
 
 
-def _modsec_detail_fields(data):
-    """
-    The "what did they try" fields of a modsec embed, from the sidecar's
-    attacks / rule_msgs / matched_in. Events from before the sidecar shipped
-    them just get none of these fields.
-    """
-    fields = []
+# The sidecar's matches field holds one entry per rule, one per line:
+# "<ruleId> <SEVERITY> PL<n> <rule message> :: <details.data>". Split only
+# where the next entry starts, so a stray newline inside a payload (or a
+# "\n" Wazuh left escaped) doesn't cut an entry in two.
+_MATCHES_SPLIT_RE = re.compile(r"(?:\n|\\n)(?=\d{6} )")
+_MATCH_LINE_RE = re.compile(r"^(\d{6}) \S+ PL\S* (.*?)(?: :: (.*))?$", re.S)
+# details.data: "Matched Data: <text> found within <VAR>: <value>", <value>
+# is the whole variable as sent, <text> the part the rule caught.
+_MATCHED_RE = re.compile(r"^Matched Data: (.*?) found within ([A-Z_]+(?::[^:\s]{1,64})?): (.*)$", re.S)
+_WHERE_RE = re.compile(r"found within ([A-Z_]+(?::[^:\s]{1,64})?):")
+# CRS bookkeeping, not where the request put anything: MATCHED_VARS:ARGS
+# repeats the ARGS, TX:* are CRS's own variables.
+_NOT_A_PAYLOAD = ("MATCHED_VAR", "TX:")
+FLAGGED_LINES = 4
+SENT_CHARS = 150
+
+
+def _payload_text(text, limit=SENT_CHARS):
+    """Attacker bytes for a code block. ModSecurity's own escaping undone
+    (\\" back to ", \\\\ back to \\), then no backticks (they'd close the
+    block), no control characters, capped."""
+    text = str(text).replace('\\"', '"').replace("\\\\", "\\")
+    text = re.sub(r"[\x00-\x1f\x7f]", "·", text).replace("`", "'")
+    return text if len(text) <= limit else text[:limit] + "…"
+
+
+def _attack_types_field(data):
     attacks = [a for a in str(data.get("attacks") or "").split(",") if a]
-    if attacks:
-        fields.append({"name": "Attack types", "inline": False,
-                       "value": " · ".join(CRS_ATTACK_NAMES.get(a, a) for a in attacks)[:1024]})
-    msgs = [m.strip() for m in str(data.get("rule_msgs") or "").split(" | ") if m.strip()]
-    if msgs:
-        shown = msgs[:5]
-        value = "\n".join(f"• {m[:150]}" for m in shown)
-        if len(msgs) > len(shown):
-            value += f"\n… +{len(msgs) - len(shown)} more"
-        fields.append({"name": "What matched", "value": value[:1024], "inline": False})
-    where = [w for w in str(data.get("matched_in") or "").split(",") if w]
+    if not attacks:
+        return []
+    return [{"name": "Attack types", "inline": False,
+             "value": " · ".join(CRS_ATTACK_NAMES.get(a, a) for a in attacks)[:1024]}]
+
+
+def _payload_field(data):
+    """
+    What the attacker sent, in two parts:
+      flagged  each fragment a rule caught, next to what that rule means
+               ("__proto__ → JavaScript Prototype Pollution"), at most
+               FLAGGED_LINES. The SQL-injection rules (942xxx) mostly react
+               to quoting in JSON bodies, so when other families fired too
+               they collapse to one "+ N SQL-injection heuristics" line.
+      sent     the variable most rules matched in, with its content.
+    Built from the sidecar's matches field (rule message + data per rule).
+    ModSecurity's "found within VAR: value" can print a value from a chained
+    rule next to the wrong variable name, so "sent" picks the variable by
+    vote rather than trusting any single line. Falls back to the bare
+    variable names for events from before the sidecar shipped matches.
+    """
+    rows, sql_rows, votes, values = [], [], {}, {}
+    for entry in _MATCHES_SPLIT_RE.split(str(data.get("matches") or "")):
+        line = _MATCH_LINE_RE.match(entry.strip())
+        if not line:
+            continue
+        rule, msg, detail = line.groups()
+        if rule.startswith(("949", "959", "980")):
+            continue
+        found = _MATCHED_RE.match((detail or "").strip())
+        hit, var, value = found.groups() if found else ("", "", "")
+        row = (_payload_text(hit.strip(), 40), msg.strip()[:70])
+        (sql_rows if rule.startswith("942") else rows).append(row)
+        if var and not var.startswith(_NOT_A_PAYLOAD):
+            votes[var] = votes.get(var, 0) + 1
+            values.setdefault(var, value)
+    sql = 0
+    if rows and sql_rows:
+        sql, sql_rows = len(sql_rows), []
+    rows = list(dict.fromkeys(r for r in rows + sql_rows if r[0] or r[1]))
+    if rows:
+        lines = ["flagged"]
+        for hit, msg in rows[:FLAGGED_LINES]:
+            lines.append(f"  {hit} → {msg}" if hit else f"  {msg}")
+        if len(rows) > FLAGGED_LINES:
+            lines.append(f"  + {len(rows) - FLAGGED_LINES} more")
+        if sql:
+            lines.append(f"  + {sql} SQL-injection heuristic{'s' if sql != 1 else ''}")
+        if votes:
+            var = max(votes, key=votes.get)      # first-seen wins a tie
+            lines += ["sent", f"  {var[:40]}: {_payload_text(values[var])}"]
+        return [{"name": "Payload", "inline": False,
+                 "value": ("```\n" + "\n".join(lines) + "\n```")[:1024]}]
+    where = [w for w in str(data.get("matched_in") or "").split(",")
+             if w and not w.startswith(_NOT_A_PAYLOAD)]
     if where:
-        fields.append({"name": "Where", "inline": False,
-                       "value": ", ".join(_code(w) for w in where)[:1024]})
-    return fields
+        return [{"name": "Where", "inline": False,
+                 "value": ", ".join(_code(w) for w in where)[:1024]}]
+    return []
+
+
+def _fp_rules_field(data):
+    """
+    For a blocked real client (100305): which rule fired in which variable,
+    no values. That's what an exclusion needs, and the values here are a
+    real user's request, which doesn't go to Discord.
+    """
+    rows = []
+    for entry in _MATCHES_SPLIT_RE.split(str(data.get("matches") or "")):
+        rule = entry.strip().split(" ", 1)[0]
+        if not rule.isdigit() or rule.startswith(("949", "959", "980")):
+            continue
+        where = _WHERE_RE.search(entry)
+        rows.append(f"{rule} in {_code(where.group(1))}" if where else rule)
+    rows = list(dict.fromkeys(rows))
+    if not rows:
+        rules = [r for r in str(data.get("rule_ids") or "").split(",") if r]
+        where = [w for w in str(data.get("matched_in") or "").split(",") if w]
+        if not rules:
+            return []
+        rows = [", ".join(dict.fromkeys(rules)) + (f" in {', '.join(_code(w) for w in where)}" if where else "")]
+    value = "\n".join(rows[:5]) + (f"\n… +{len(rows) - 5} more" if len(rows) > 5 else "")
+    return [{"name": "Rule", "value": value[:1024], "inline": False}]
+
+
+def _known_line(data):
+    """Second description line when known-attacks.json named the attack
+    (only reaches Discord on a 100304 / 100305, where it's still news)."""
+    name = re.sub(r"[`*_~|>\\]", "", str(data.get("known_attack") or ""))[:100]
+    if not name:
+        return ""
+    cve = re.sub(r"[^A-Za-z0-9-]", "", str(data.get("known_cve") or ""))[:30]
+    return f"\nKnown attack: {name}" + (f" ({cve})" if cve else "")
+
+
+def _modsec_outcome(data):
+    """
+    The line under the title: who stopped the request. ModSecurity itself
+    (`blocked` / `interrupted`), a BunkerWeb plugin that got there first
+    (`denied_by`: dnsbl, crowdsec, country, ...), or nobody. Events from
+    before the sidecar shipped blocked / interrupted read as before
+    ("On" = blocked).
+    """
+    engine = str(data.get("engine") or "")
+    plugin = str(data.get("denied_by") or "")
+    if str(data.get("blocked")) == "yes" or str(data.get("interrupted")) == "yes":
+        return "✅ Blocked by ModSecurity"
+    if plugin:
+        reason = re.sub(r"[`*_~|>\\]", "", str(data.get("deny_reason") or ""))[:150]
+        return f"✅ Denied by {plugin}" + (f": {reason}" if reason else "")
+    if engine == "DetectionOnly":
+        return "⚠️ **NOT blocked** (DetectionOnly)"
+    if engine in ("On", "Enabled"):
+        if str(data.get("blocked")) == "no":
+            return f"⚠️ **NOT blocked** (no verdict rule fired, HTTP {data.get('http_code', '?')})"
+        return "✅ Blocked by ModSecurity"
+    return f"Engine: {engine or 'unknown'}"
 
 
 # ---------------------------------------------------------------------------
@@ -345,12 +467,25 @@ def _modsec_fp_key(data):
     return f"{data.get('srcip', '')}|{data.get('method', '')} {path}|{data.get('rule_ids', '')}"
 
 
+# A new (unnamed) attack usually arrives as a campaign: many IPs, many
+# paths, same payload. Keyed on the set of detection rules it trips, so the
+# whole campaign is one ping until it's added to known-attacks.json.
+MODSEC_NEW_SEEN_FILE = "/var/ossec/logs/custom-discord-modsec-new-seen.json"
+MODSEC_NEW_MUTE_SECONDS = 6 * 3600
+
+def _modsec_new_key(data):
+    rules = sorted({r for r in str(data.get("rule_ids") or "").split(",")
+                    if r and not r.startswith(("949", "959", "980"))})
+    return "new|" + ",".join(rules)
+
+
 def format_modsecurity(alert):
     """
-    Discord embed from a flattened modsec event: rule 100303 (band=high),
-    rule 100304 (the response was flagged, outbound_score > 0), or rule
-    100305 (a real Bitwarden client got blocked, a likely false positive).
-    Reads the clean fields the sidecar emits; no full_log scraping.
+    Discord embed from a flattened modsec event: rule 100303 (a band=high
+    attack known-attacks.json can't name, i.e. a new one), rule 100304 (the
+    response was flagged, outbound_score > 0), or rule 100305 (a real
+    Bitwarden client got blocked, a likely false positive). Reads the clean
+    fields the sidecar emits; no full_log scraping.
     """
     data = alert.get("data", {})
     geo = alert.get("GeoLocation", {})
@@ -362,9 +497,8 @@ def format_modsecurity(alert):
     score = data.get("anomaly_score", "N/A")
     outbound = str(data.get("outbound_score") or "0")
     response_flagged = outbound not in ("", "0")
-    rule_ids = ",".join(dict.fromkeys(r for r in str(data.get("rule_ids") or "").split(",") if r)) or "N/A"
+    rule_ids = list(dict.fromkeys(r for r in str(data.get("rule_ids") or "").split(",") if r))
     unique_id = data.get("unique_id", "")
-    engine = data.get("engine", "N/A")
     http_code = data.get("http_code", "N/A")
     target = modsec_target(data.get("hostname"))
     agent_name = agent.get("name", "N/A")
@@ -374,20 +508,16 @@ def format_modsecurity(alert):
 
     country_display, location = resolve_geo(src_ip, geo)
 
-    # In DetectionOnly the score is what modsec WOULD block; in On it's
-    # what it DID block. Make that explicit. ModSecurity v3 reports the
-    # SecRuleEngine On setting as "Enabled" in the audit log.
-    if engine in ("On", "Enabled"):
-        enforced = "On (blocked)"
-    elif engine == "DetectionOnly":
-        enforced = "DetectionOnly (would block)"
-    else:
-        enforced = str(engine)
+    footer = [format_timestamp(timestamp)]
+    if unique_id:
+        footer.append(f"Audit {unique_id}")
+    if rule_ids:
+        footer.append(f"{len(rule_ids)} CRS rule{'s' if len(rule_ids) != 1 else ''}")
 
     if real_client:
         # Rule 100305: an official Bitwarden client got a 403/400 from modsec.
         # Someone's save / sync / login just failed; find the rule and the
-        # variable (Where), then grep the Audit ID on the Vault VM.
+        # variable (the Rule field), then grep the Audit ID on the Vault VM.
         title, color = "🛑 ModSecurity , blocked a Bitwarden client (likely false positive)", 10181046  # purple
     elif response_flagged:
         # Rule 100304: what the server SENT BACK looked like a leak, and the
@@ -395,16 +525,27 @@ def format_modsecurity(alert):
         # breaking a real client.
         title, color = "🔥 ModSecurity , suspicious response (blocked)", 15105570  # orange
     else:
-        title, color = "🚨 ModSecurity , high-severity attack", 15158332        # red
+        # Rule 100303 only posts for an attack known-attacks.json doesn't
+        # name (main()), so this is always something new. Once it's added
+        # there, the same attack stops posting.
+        title, color = "🆕 ModSecurity , new attack (not in known-attacks.json)", 15158332  # red
     extra = [{"name": "Outbound score", "value": outbound, "inline": True}] if response_flagged else []
     if client:
         extra.append({"name": "Client", "value": _code(client), "inline": True})
     if real_client and data.get("user_agent"):
         extra.append({"name": "User-Agent", "value": _code(data.get("user_agent"), 160), "inline": False})
 
+    # Below the request: what they tried, in words, and what they sent. For
+    # a real client the "what they sent" is a user's own request, so it's
+    # the rule + variable only (enough to write the exclusion). Audit ID and
+    # the rule count sit in the footer; the full rule list is one click away
+    # (the title links to the alert).
+    detail = _attack_types_field(data) + (_fp_rules_field(data) if real_client else _payload_field(data))
+
     return {
         "title": title,
         "color": color,
+        "description": _modsec_outcome(data) + _known_line(data),
         "fields": extra + [
             {"name": "Agent",         "value": agent_name,           "inline": True},
             {"name": "Source IP",     "value": src_ip,               "inline": True},
@@ -414,12 +555,8 @@ def format_modsecurity(alert):
             {"name": "Anomaly score", "value": str(score),           "inline": True},
             {"name": "Target",        "value": target,               "inline": False},
             {"name": "Request",       "value": f"`{method} {path}`", "inline": False},
-        ] + _modsec_detail_fields(data) + [
-            {"name": "Engine",        "value": enforced,             "inline": True},
-            {"name": "Audit ID",      "value": _code(unique_id) if unique_id else "N/A", "inline": True},
-            {"name": "CRS rules",     "value": f"`{rule_ids}`",      "inline": False},
-        ],
-        "footer": {"text": format_timestamp(timestamp)},
+        ] + detail,
+        "footer": {"text": " · ".join(footer)},
     }
 
 
@@ -937,22 +1074,26 @@ def main():
     level = int(rule.get("level", 0))
     location = alert.get("location", "")
 
-    # --- modsec: band=high attacks (rule 100303, level 11) and flagged
-    #     responses (rule 100304, level 12). Only a flagged response gets
-    #     the @: a band=high attack was already blocked (engine On), and
-    #     CrowdSec bans anything scoring 10+, so there's nothing to do but
-    #     read it. A flagged response is a possible leak, or a false
-    #     positive breaking a real client: look now.
-    #     Rule 100305 (a real Bitwarden client blocked) always gets the @,
-    #     muted per src + request + rules for an hour. ---
+    # --- modsec: only what needs you, all three with the @:
+    #     100305  a real Bitwarden client got blocked (likely a false
+    #             positive), muted per src + request + rules for an hour
+    #     100304  a response was flagged as a possible leak
+    #     100303  a band=high attack that known-attacks.json can't name
+    #             (empty known_attack): something new, so look at it and
+    #             add an entry. Muted per rule set for MODSEC_NEW_MUTE_SECONDS
+    #             so a campaign is one ping, not fifty.
+    #     A NAMED band=high attack (React2Shell, ...) posts nothing: it
+    #     was blocked, CrowdSec banned the IP, and it's in Wazuh. ---
     if "modsecurity" in groups:
+        flagged = str(data.get("outbound_score") or "0") not in ("", "0")
         if str(rule.get("id")) == "100305":
             if _first_in_window(_modsec_fp_key(data), MODSEC_FP_SEEN_FILE, MODSEC_FP_MUTE_SECONDS):
                 deliver("modsec", format_modsecurity(alert))
-        elif data.get("band") == "high" or level >= 11:
-            flagged = str(data.get("outbound_score") or "0") not in ("", "0")
-            deliver("modsec", format_modsecurity(alert),
-                    mention=(MENTION if flagged else ""))
+        elif flagged:
+            deliver("modsec", format_modsecurity(alert))
+        elif (data.get("band") == "high" or level >= 11) and not data.get("known_attack"):
+            if _first_in_window(_modsec_new_key(data), MODSEC_NEW_SEEN_FILE, MODSEC_NEW_MUTE_SECONDS):
+                deliver("modsec", format_modsecurity(alert))
 
     # --- dns: only Pi-hole allowlist denials (status=blocked-regex), i.e.
     #     the Vault VM tried to resolve a domain that isn't on its allowlist.

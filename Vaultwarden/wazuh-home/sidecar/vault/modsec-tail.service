@@ -27,13 +27,23 @@
 #   - READ /srv/bw-logs/modsec_audit.log  (mode 0644, world-readable as
 #     written by the rootless-podman bunkerweb container, so the
 #     dedicated user reads it with NO group/ACL wiring needed)
+#   - READ /srv/bw-logs/error.log  (for BunkerWeb's "[ACCESS] denied"
+#     lines: denied_by + bw_deny events). Check it's world-readable too:
+#         ls -l /srv/bw-logs/error.log
+#     If it isn't, the modsec events still flow without those fields, and
+#     the journal says so once ("error.log unreadable").
+#   - READ /etc/modsec-tail/known-attacks.json  (the named-attacks table,
+#     re-read on change; ProtectSystem=strict leaves /etc readable):
+#         sudo install -d -m 0755 /etc/modsec-tail
+#         sudo install -m 0644 known-attacks.json /etc/modsec-tail/
 #   - WRITE /var/log/modsec-events/ and /var/lib/modsec-tail/
 # It opens no sockets and runs no subprocesses.
 #
 # The sidecar's output log is mode 0644 (created under the default
 # umask), so the Wazuh agent's logcollector can read it regardless of
-# which user that runs as. The contents (attack metadata) are no more
-# sensitive than the source audit log, which is already 0644.
+# which user that runs as. The contents (the full audit record: headers,
+# body, matched data) are no more sensitive than the source audit log,
+# which is already 0644.
 
 [Unit]
 Description=ModSecurity audit-log tail to Wazuh (BunkerWeb WAF visibility)

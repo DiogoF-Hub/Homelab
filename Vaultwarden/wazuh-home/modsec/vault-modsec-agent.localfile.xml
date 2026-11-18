@@ -14,12 +14,27 @@
 
   Single source: /var/log/modsec-events/events.log
 
-  Flat JSON, one line per ModSecurity audit transaction, emitted by the
-  sidecar at sidecar/vault/modsec-tail.py. Fields: event_type / ts / srcip /
-  method / path / http_code / engine / rule_ids / n_rules /
-  anomaly_score / outbound_score / band / unique_id / hostname / attacks /
-  rule_msgs / matched_in / blocked / client_name / client_version /
-  user_agent.
+  Flat JSON, emitted by the sidecar at sidecar/vault/modsec-tail.py. Two
+  event types share the file:
+    event_type=bw_modsec, one per ModSecurity audit transaction. Fields:
+      event_type / ts / srcip / method / path / http_code / engine /
+      rule_ids / n_rules / anomaly_score / outbound_score / band /
+      unique_id / hostname / attacks / rule_msgs / matched_in / blocked /
+      client_name / client_version / user_agent, plus the full record:
+      uri / query / http_version / client_port / host_port / listener /
+      interrupted / header_names / accept / accept_encoding /
+      accept_language / referer / origin / content_type / content_length /
+      connection / req_headers / req_body / req_body_len / resp_headers /
+      resp_content_type / resp_content_length / severities /
+      max_severity / paranoia_levels / capec / rule_files / matched_data /
+      matches / modsec_version / crs_version / denied_by / deny_reason /
+      nginx_conn / raw / raw_bytes / lookup / lookup_safe.
+    event_type=bw_deny, one per BunkerWeb plugin denial in error.log:
+      ts / srcip / denied_by / deny_reason / deny_phase / method / path /
+      query / uri / http_version / request_truncated / hostname / server /
+      referer / nginx_conn / log_level / lookup / lookup_safe.
+  Lines stay under ~60 KB (the sidecar shrinks raw / body / headers
+  first), below Wazuh's ~64 KB event line limit.
 
   IMPORTANT: this tails the sidecar's OUTPUT, not
   /srv/bw-logs/modsec_audit.log directly. The raw audit log is JSON
