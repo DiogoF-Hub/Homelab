@@ -1581,3 +1581,120 @@ Steps:
   regex depends on the real log-line format, which only appears once
   `LOG_LEVEL: "info"` is live and a test login has been captured.
 
+
+---
+
+## 13. Update cooldown: only take container images that have been out for 48-72h
+
+### What
+
+Stop running brand-new upstream releases the same night they ship. Today
+`docker-update.sh` pulls `:latest` for every service at ~05:35 and the
+reboot recreates the containers on it, so an image pushed at 01:00 is
+running on the vault four hours later. The idea: only adopt a new image
+once it has been out (and unchanged) for 48-72h.
+
+Scope, deliberately split by where the release comes from:
+
+| Updated by | What | Cooldown? |
+|---|---|---|
+| `docker-update.sh` | Vaultwarden, BunkerWeb, CrowdSec, crowdsec-web-ui images (`:latest`) | **yes**, this is the main target |
+| `system-update.sh` | `wazuh-agent` from `packages.wazuh.com` (vendor-pushed, like the images) | **yes** |
+| `system-update.sh` | Debian stable packages | **no** |
+| `setup-age.sh` / `setup-minisign.sh` | age + minisign binaries | already pinned by version; signature check is #8 |
+
+### Why
+
+Supply-chain attacks (hijacked maintainer account, poisoned CI, a
+malicious tag pushed over a good one) mostly get spotted and pulled
+within hours to a couple of days. Auto-pulling `:latest` every night
+means taking that risk on the most sensitive box in the homelab with
+zero buffer. A cooldown lets the rest of the world run into it first.
+
+Debian is left alone on purpose: stable goes through Debian's own
+review and signing, so the risk there is the reverse. Delaying a
+security update mostly means 48h more exposure to a vulnerability
+that's already public and already fixed.
+
+crowdsec-web-ui is the riskiest of the images (single maintainer,
+newest project): worth a longer cooldown than the others, or a pinned
+version.
+
+### How
+
+**Track digests, not tags, and trust our own clock.** Each night, for
+each image:
+
+1. Read the digest `:latest` currently points to on the registry
+   *without pulling it*. `podman pull` would move the local tag, and
+   the reboot's `podman-compose up --force-recreate` would then run the
+   new image straight away, so the check has to come before any pull.
+   `skopeo inspect --format '{{.Digest}}' docker://<image>:latest` does
+   that (`apt install skopeo`; it goes through the same registries, so
+   the Squid allowlist should already cover it, verify).
+2. Keep a small state file, e.g. `/var/lib/vault-maint/image-cooldown.tsv`:
+   `image  digest  first_seen`. New digest -> record it with now as
+   `first_seen`, don't pull. Same digest as last night -> keep its
+   `first_seen`. A digest replaced during the window (a re-push of the
+   tag, suspicious in itself) restarts the clock.
+3. Once a digest has been seen for >= `COOLDOWN_HOURS` (48 or 72), pull
+   it **by digest** (`podman pull <image>@sha256:...`) and retag it
+   locally as `<image>:latest` so the compose file doesn't change.
+   Then the existing "remove the old image ID" step runs as today.
+4. Remember the previous digest per image, so rollback is
+   `podman tag <image>@<old digest> <image>:latest` + recreate.
+
+Why our own `first_seen` and not the registry's dates: an image's
+`created` timestamp is written by whoever built it, so an attacker
+controls it. The time *we* first saw a digest can't be faked from
+outside.
+
+**`wazuh-agent`:** same idea on the apt side. Hold it (`apt-mark hold`,
+the conffile-hold machinery in `system-update.sh` already does holds
+cleanly) and release the hold once the candidate version has been
+visible for the cooldown. Same `first_seen` state file, keyed on
+package + version.
+
+**Report it.** The nightly #maintenance message gets a line per image /
+package that's waiting: `vaultwarden 1.x.y waiting, usable in 31h`.
+Otherwise a held update is invisible and looks like "nothing new".
+
+**Override for urgent fixes.** A Vaultwarden security release is exactly
+the case where waiting 48h hurts. A flag (e.g. touch
+`/var/lib/vault-maint/cooldown-skip-<service>`, consumed on the next run)
+or a manual `podman pull` + recreate takes it immediately.
+
+### Optional refinements
+
+- **Per-image cooldown**: 48h for Vaultwarden / BunkerWeb / CrowdSec,
+  longer (or a pinned version) for crowdsec-web-ui.
+- **Pin versions instead of `:latest`** (e.g. `vaultwarden/server:1.x.y`)
+  on top of the cooldown, so a major-version bump never arrives
+  unannounced. More careful, but the bumps become manual work. The
+  digest cooldown on `:latest` is the low-effort middle ground.
+- **Watch upstream before adopting**: check the project's GitHub
+  releases / issues for "compromised" / "yanked" around the new
+  version before the cooldown expires. Probably overkill to automate.
+- 48h is the short end: Renovate-style setups commonly use 3-7 days.
+  72h would still be painless here, Vaultwarden and BunkerWeb don't
+  release that often.
+
+### What this does NOT fix
+
+- **Slow-burn compromises.** Something like the xz backdoor sat
+  undetected for weeks. No reasonable cooldown helps against that; this
+  filters the fast, noisy incidents only.
+- **A compromise that's never noticed.** The cooldown only works if
+  someone upstream spots the bad release within the window.
+- **Images that are already running.** It changes what gets adopted
+  from now on, it doesn't audit what's in use today.
+- **Authenticity.** It doesn't prove an image came from the real
+  maintainer; that's signature verification (cosign where upstream
+  signs, see #8 for the same problem on the binaries).
+
+### Decide before implementing
+
+- `COOLDOWN_HOURS`: 48 or 72 (and whether crowdsec-web-ui gets more).
+- Keep `:latest` + digest cooldown, or move to pinned versions.
+- Whether `wazuh-agent` goes in the same change or a second step.
+- What the override looks like (flag file vs. just "pull by hand").
