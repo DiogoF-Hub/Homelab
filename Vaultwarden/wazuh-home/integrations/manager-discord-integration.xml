@@ -14,12 +14,14 @@
   squid keeps only action=TCP_DENIED).
 
   Scope = which alerts even reach the script:
-    - modsec : group modsecurity, level >= 11  -> rules 100303 (band=high),
-               100304 (response flagged) and 100305 (a real Bitwarden
-               client blocked, muted per src+request for an hour). The
-               script posts 100303 only when known_attack is empty (an
-               attack known-attacks.json can't name yet, muted per rule
-               set for 6 h); all three @ you
+    - modsec : group modsecurity, level >= 3   -> every modsec alert
+               (100301-100305). The script posts only three kinds, all
+               with an @: 100305 (a real Bitwarden client blocked, muted
+               per src+request for an hour), 100304 (response flagged),
+               and any other modsec event whose known_attack is empty (an
+               attack known-attacks.json can't name yet, any score, muted
+               per rule set for 6 h). Level 3 so the unnamed low-score
+               ones reach the script at all; named ones exit right away
     - dns    : rule 100252 (Pi-hole policy blocks); the script narrows to
                status=blocked-regex (allowlist denial), so resolved queries
                and upstream non-answers never ping
@@ -61,7 +63,7 @@
   <integration>
     <name>custom-discord</name>
     <group>modsecurity</group>
-    <level>11</level>
+    <level>3</level>
     <alert_format>json</alert_format>
   </integration>
 

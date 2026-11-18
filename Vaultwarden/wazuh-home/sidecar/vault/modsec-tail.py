@@ -20,8 +20,8 @@ useragent, limit, ...) write when they deny a request. Two uses:
     "CRS scored it, dnsbl blocked it" instead of an unexplained 403
 
 And it names attacks it has seen before (known_attack / known_cve), from
-the table in /etc/modsec-tail/known-attacks.json. custom-discord only pings
-for a high-score attack that ISN'T in that table, so Discord carries just
+the table in /etc/modsec-tail/known-attacks.json. custom-discord pings for
+any modsec event (any score) that ISN'T in that table, so Discord carries just
 the new ones; adding an entry is how one goes quiet. See KnownAttacks.
 
 WHY THIS EXISTS (why not tail modsec_audit.log directly)
@@ -202,8 +202,8 @@ KNOWN_ATTACKS_FILE = Path("/etc/modsec-tail/known-attacks.json")
 """
 The table of attacks we've already seen and named (React2Shell, the
 Next.js middleware bypass, secret-file scans, ...). Each modsec event that
-matches an entry gets known_attack / known_cve. custom-discord only posts a
-high-score attack when known_attack is EMPTY, i.e. something new: adding an
+matches an entry gets known_attack / known_cve. custom-discord pings for any
+modsec event whose known_attack is EMPTY, i.e. something new: adding an
 entry here is how a new attack goes quiet. Re-read whenever the file
 changes, no restart needed. Missing or broken file -> no names, logged
 once; a broken edit keeps the previous table. Format: see the file's own
@@ -246,14 +246,25 @@ DENY_MATCH_SECONDS = 5
 DENY_KEEP_SECONDS = 120
 """How long an unmatched denial stays matchable."""
 
-KNOWN_FIELDS = ("method", "path", "query", "uri", "body", "host", "ua",
-                "headers", "header_names", "rules", "attacks")
+KNOWN_FIELDS = ("method", "path", "query", "uri", "body", "body_raw", "host",
+                "ua", "headers", "header_names", "rules", "attacks")
 """
 What a known-attacks.json condition can look at ("in"), besides
-"header:<name>" (one request header, case-insensitive). headers is every
-header as "name: value" lines, header_names the comma-joined names in the
-order sent, rules / attacks the comma-joined rule ids / CRS attack types.
+"header:<name>" (one request header, case-insensitive). body is the request
+body with \\uXXXX / \\xNN escapes undone (attackers write "__proto__" as
+"\\u005f\\u005f\\u0070..." to dodge substring filters), body_raw the body as
+sent. headers is every header as "name: value" lines, header_names the
+comma-joined names in the order sent, rules / attacks the comma-joined rule
+ids / CRS attack types.
 """
+
+_ESCAPE_RE = re.compile(r"\\u([0-9a-fA-F]{4})|\\x([0-9a-fA-F]{2})")
+
+def deobfuscate(text):
+    """Undo \\uXXXX and \\xNN escapes written out as text, for matching only
+    (never shipped). Covers both ModSecurity's \\xNN for raw bytes and the
+    attacker's own escaping."""
+    return _ESCAPE_RE.sub(lambda m: chr(int(m.group(1) or m.group(2), 16)), text)
 
 # CRS anomaly-score band thresholds. Tier boundaries the manager rules
 # key on via the `band` field. Picked from observed data: routine
@@ -971,7 +982,8 @@ def flatten(txn, denials):
     lower_headers = {str(k).lower(): str(v if v is not None else "") for k, v in req_headers.items()}
     known_attack, known_cve = KNOWN.match({
         "method": str(req.get("method") or ""), "path": path, "query": query,
-        "uri": uri, "body": body, "host": str(req.get("hostname") or ""),
+        "uri": uri, "body": deobfuscate(body), "body_raw": body,
+        "host": str(req.get("hostname") or ""),
         "ua": lower_headers.get("user-agent", ""),
         "headers": headers_text(req_headers),
         "header_names": ",".join(str(k) for k in req_headers),

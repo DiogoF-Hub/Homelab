@@ -444,6 +444,10 @@ def _modsec_outcome(data):
         return "⚠️ **NOT blocked** (DetectionOnly)"
     if engine in ("On", "Enabled"):
         if str(data.get("blocked")) == "no":
+            if str(data.get("band") or "none") == "none":
+                # under the anomaly threshold: CRS noted it, nothing to
+                # block (missing User-Agent, odd header, ...)
+                return f"ℹ️ Under the anomaly threshold, not blocked (HTTP {data.get('http_code', '?')})"
             return f"⚠️ **NOT blocked** (no verdict rule fired, HTTP {data.get('http_code', '?')})"
         return "✅ Blocked by ModSecurity"
     return f"Engine: {engine or 'unknown'}"
@@ -525,9 +529,9 @@ def format_modsecurity(alert):
         # breaking a real client.
         title, color = "🔥 ModSecurity , suspicious response (blocked)", 15105570  # orange
     else:
-        # Rule 100303 only posts for an attack known-attacks.json doesn't
-        # name (main()), so this is always something new. Once it's added
-        # there, the same attack stops posting.
+        # Rules 100301-100303 only post for an attack known-attacks.json
+        # doesn't name (main()), so this is always something new. Once
+        # it's added there, the same attack stops posting.
         title, color = "🆕 ModSecurity , new attack (not in known-attacks.json)", 15158332  # red
     extra = [{"name": "Outbound score", "value": outbound, "inline": True}] if response_flagged else []
     if client:
@@ -1078,12 +1082,15 @@ def main():
     #     100305  a real Bitwarden client got blocked (likely a false
     #             positive), muted per src + request + rules for an hour
     #     100304  a response was flagged as a possible leak
-    #     100303  a band=high attack that known-attacks.json can't name
-    #             (empty known_attack): something new, so look at it and
-    #             add an entry. Muted per rule set for MODSEC_NEW_MUTE_SECONDS
-    #             so a campaign is one ping, not fifty.
-    #     A NAMED band=high attack (React2Shell, ...) posts nothing: it
-    #     was blocked, CrowdSec banned the IP, and it's in Wazuh. ---
+    #     100301-100303  ANY modsec event, whatever its score, that
+    #             known-attacks.json can't name (empty known_attack):
+    #             something new, so look at it and add an entry. Muted per
+    #             rule set for MODSEC_NEW_MUTE_SECONDS so a campaign is one
+    #             ping, not fifty. Needs the integration block at level 3
+    #             (manager-discord-integration.xml), not 11.
+    #     A NAMED attack (React2Shell, secret-file scan, ...) posts
+    #     nothing: it was blocked, CrowdSec banned the IP, and it's in
+    #     Wazuh. ---
     if "modsecurity" in groups:
         flagged = str(data.get("outbound_score") or "0") not in ("", "0")
         if str(rule.get("id")) == "100305":
@@ -1091,7 +1098,7 @@ def main():
                 deliver("modsec", format_modsecurity(alert))
         elif flagged:
             deliver("modsec", format_modsecurity(alert))
-        elif (data.get("band") == "high" or level >= 11) and not data.get("known_attack"):
+        elif data.get("event_type") == "bw_modsec" and not data.get("known_attack"):
             if _first_in_window(_modsec_new_key(data), MODSEC_NEW_SEEN_FILE, MODSEC_NEW_MUTE_SECONDS):
                 deliver("modsec", format_modsecurity(alert))
 
