@@ -54,6 +54,12 @@
       "cve": "CVE-2025-55182",
       "all": [{"in": "body", "re": "__proto__:then|\"resolved_model\"|\"bound\":\"\\$@"}]
     },
+    {
+      "name": "React2Shell (headers only, body not inspected)",
+      "cve": "CVE-2025-55182",
+      "note": "seen 2026-11-18 23:29: POST with Next-Action + Accept: text/x-component and TWO Content-Type headers (CRS 920620, parser confusion), 14 KB body never read because dnsbl denied it in the access phase; 13 POSTs in 3 s from one IP with rotating Chrome UAs. Next-Action is Next.js Server Actions only, Vaultwarden never sends it",
+      "all": [{"in": "method", "equals": "POST"}, {"in": "header:next-action", "present": true}]
+    },
 
     {
       "name": "WordPress REST batch SQLi",
