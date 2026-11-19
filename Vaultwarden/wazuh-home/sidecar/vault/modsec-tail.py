@@ -557,7 +557,9 @@ def build_lookups(uid, conn, ip, when):
     (lookup, lookup_safe): one-line shell commands printing this request's
     lines from the three logs, one section each. Values are re-checked
     here; anything that doesn't fit its pattern is left out, and a log with
-    nothing safe to search on gets no section.
+    nothing safe to search on gets no section. Every grep runs with -a:
+    attackers get raw bytes into error.log, and without it grep prints
+    "binary file matches" instead of the lines.
     """
     uid = uid if UID_OK.match(uid or "") else ""
     conn = conn if CONN_OK.match(conn or "") else ""
@@ -569,21 +571,21 @@ def build_lookups(uid, conn, ip, when):
         safe.append(f"echo '=== {title} ==='; {safe_cmd}")
 
     if uid:
-        grep = f"zgrep -hF '{uid}' {AUDIT_GLOB}"
+        grep = f"zgrep -ahF '{uid}' {AUDIT_GLOB}"
         section("modsec_audit.log", f"{grep} | jq .", f"{grep} | jq '{JQ_SAFE}'")
 
     patterns = " ".join(f"-e '{p}'" for p in (uid, f"{conn} " if conn else "") if p)
     if patterns:
-        grep = f"zgrep -hF {patterns} {ERROR_GLOB}"
+        grep = f"zgrep -ahF {patterns} {ERROR_GLOB}"
         if when:
             # nginx connection ids restart with nginx (nightly reboot)
-            grep += f" | grep -F '{when:%Y/%m/%d} '"
+            grep += f" | grep -aF '{when:%Y/%m/%d} '"
         section("error.log", f"{grep} | sed -E '{SED_PRETTY}'",
                 f"{grep} | sed -E '{SED_MASK}; {SED_HIDE}; {SED_PRETTY}'")
 
     if ip and when:
         minute = f"[{when.day:02d}/{MONTH_NAMES[when.month - 1]}/{when.year}:{when:%H:%M}:"
-        grep = f"zgrep -hF ' {ip} ' {ACCESS_GLOB} | grep -F '{minute}'"
+        grep = f"zgrep -ahF ' {ip} ' {ACCESS_GLOB} | grep -aF '{minute}'"
         section("access.log (same IP, same minute)", grep, f"{grep} | sed -E '{SED_MASK}'")
 
     if not raw:

@@ -152,6 +152,12 @@
       "none": [{"in": "attacks", "re": "rce|injection|sqli|xss|rfi"}]
     },
     {
+      "name": "Opaque-cookie POST probe (no User-Agent)",
+      "note": "seen 2026-11-19 on plain http to the apex: same shape as the Go-client probe but NO User-Agent (920320), header order host,content-length,content-type,cookie,accept-encoding. POST / with Content-Type multipart/alternative (920420, so CRS never reads the ~6 KB body), a long base64 cookie 'sesskeyapiv2'. Nothing public on that cookie name. Got the http->https 301 only. Purpose unknown",
+      "all": [{"in": "method", "equals": "POST"}, {"in": "rules", "has": "920420"}, {"in": "rules", "has": "920320"}, {"in": "header:cookie", "present": true}],
+      "none": [{"in": "attacks", "re": "rce|injection|sqli|xss|rfi"}]
+    },
+    {
       "name": "PHP webshell scan",
       "all": [{"in": "path", "re": "\\.php$"}],
       "none": [{"in": "attacks", "re": "rce|injection|sqli|xss|rfi"}]
