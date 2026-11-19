@@ -220,8 +220,13 @@ hand with `sudo sshd -T`):
 * `MACs hmac-sha2-512-etm@openssh.com,hmac-sha2-256-etm@openssh.com,hmac-sha2-512,hmac-sha2-256`.
   SHA-2 only, drops `hmac-sha1` and the 64-bit `umac-64`. Every current
   client picks SHA-2 on its own. Check:
-  `ssh -o MACs=hmac-sha1 -p <ssh_port> admin@<vps>` says
-  `no matching MAC found`.
+  `ssh -o Ciphers=aes256-ctr -o MACs=hmac-sha1 -p <ssh_port> admin@<vps>`
+  says `no matching MAC found` (the server's offer lists only the 4
+  SHA-2 ones), same line with `MACs=hmac-sha2-256-etm@openssh.com`
+  logs in. The `Ciphers` flag is load-bearing: the default
+  chacha20-poly1305 / aes-gcm ciphers carry their own MAC, so the MAC
+  list isn't negotiated at all and a bare `-o MACs=hmac-sha1` just
+  connects, proving nothing.
 * `MaxStartups 10:30:60` (default `10:30:100`). Unauthenticated
   connections start getting dropped at 10, all of them at 60, so a
   connection flood can't pile up 100 half-open handshakes.
