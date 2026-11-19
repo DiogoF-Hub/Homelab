@@ -200,6 +200,32 @@ The exact port number doesn't matter much (it's not a security control,
 just noise reduction against drive-by scanners), but it does need to
 match the UFW allow rule below.
 
+### Kernel modules blocked
+
+One `/etc/modprobe.d/` file per vulnerability, each line `install <module> /bin/false`, same set as the home VM (`Vaultwarden/README.md` § Base hardening pass has the reasons). An unprivileged process could otherwise get these modules auto-loaded just by opening the matching socket type, which is how those local-root bugs get reached. Nothing on the VPS uses any of them (WireGuard doesn't need IPsec's `esp4` / `esp6`).
+
+| File | Blocks | Added | Why |
+|---|---|---|---|
+| `disable-algif.conf` | `algif_aead` | 2026-05-09 | Copy Fail, CVE-2026-31431 |
+| `dirtyfrag.conf` | `esp4`, `esp6`, `rxrpc` | 2026-05-11 | Dirty Frag, CVE-2026-43284 + CVE-2026-43500 |
+| `pintheft.conf` | `rds`, `rds_tcp`, `rds_rdma` | 2026-05-21 | PinTheft, CVE-2026-43494 |
+| `disable-sctp.conf` | `sctp` | 2026-11-19 | nginx2root's root step (SCTP bug, no CVE yet) |
+| `attack-surface.conf` | ~70 unused protocols, tunnels, filesystems, hardware | 2026-11-19 | Ahead of time; same file as the home VM, [`../host-hardening/attack-surface.conf`](../host-hardening/attack-surface.conf) |
+
+Plus `/etc/sysctl.d/90-attack-surface.conf` ([`sysctl-hardening.conf`](sysctl-hardening.conf)): io_uring off (`kernel.io_uring_disabled = 2`) and, unlike the home VM, unprivileged user namespaces off (`kernel.unprivileged_userns_clone = 0`). The VPS runs no containers, and most container-escape / local-root exploits start by creating a user namespace. Check: `cat /proc/sys/kernel/io_uring_disabled /proc/sys/kernel/unprivileged_userns_clone` shows `2` and `0`.
+
+The four per-vulnerability files were interim mitigations until patched kernels shipped, and stay as cheap defense in depth since nothing here uses those modules. Kernel fix status: `sudo debsecan --suite trixie | grep -E "CVE-2026-(31431|43284|43500|43494)"` (no output = fixed or not affected).
+
+Adding one, e.g. SCTP:
+
+```bash
+echo "install sctp /bin/false" | sudo tee /etc/modprobe.d/disable-sctp.conf
+```
+
+It only works because Debian builds these as modules (`grep CONFIG_IP_SCTP= /boot/config-$(uname -r)` shows `=m`; a built-in `=y` would ignore the file), and it doesn't unload a module that's already loaded (`lsmod | grep -w <module>`, then `rmmod` or reboot). After every change in `/etc/modprobe.d/`, run `sudo update-initramfs -u`: the initramfs carries its own copy of the directory, and early-boot modules ignore blocks it doesn't have (`lsinitramfs /boot/initrd.img-$(uname -r) | grep modprobe.d/` to check). Effective set: `sudo modprobe -c | grep -E "^install \S+ /bin/false"`. `mdadm.conf` in the same dir comes with the mdadm package; leave it alone.
+
+The VPS nginx itself isn't reachable by those nginx bugs: it's a pure `stream` passthrough (no `http` server, no TLS, no `resolver`, no `ssl_preread`), and the fixes ride in through the nightly `auto-update.sh` as Debian ships them.
+
 ### fail2ban for SSH
 
 Belt-and-suspenders on top of key-only auth: ban any IP that fails
