@@ -1,1 +1,2 @@
 35 5 * * * /bin/bash -lc '/root/vault/root_scripts/main.sh' > /dev/null 2>&1
+15 3 * * * /root/vault/root_scripts/modsec-archive.sh > /dev/null 2>&1

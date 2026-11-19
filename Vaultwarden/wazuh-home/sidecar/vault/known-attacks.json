@@ -13,7 +13,9 @@
     "First match wins: specific exploits first, the generic scan categories last.",
     "The generic ones carry a 'none' on injection-type attacks so a real RCE / SQLi that happens to hit",
     "a .php path or carry a scanner header still counts as new and pings.",
-    "Built from 7 days of real traffic (2026-11-11..18); entries marked 'not seen yet' are well-known extras."
+    "Built from 7 days of real traffic (2026-11-11..18), then extended 2026-11-19 from the 60-day archive that",
+    "scripts/root_scripts/modsec-archive.sh keeps in /srv/logs/modsec-archive/ (~21k records, all named after that pass",
+    "except own curl tests and 2 cookie false positives). Entries marked 'not seen yet' are well-known extras."
   ],
   "attacks": [
     {
@@ -64,7 +66,78 @@
     {
       "name": "WordPress REST batch SQLi",
       "note": "seen 2026-11-18, UA 'cve-2026-63030/1.0' (CVE claimed by the tool, not verified): UNION SELECT inside a nested /wp/v2/posts request",
-      "any": [{"in": "query", "has": "rest_route=/batch/v1"}, {"in": "path", "has": "/wp-json/batch/v1"}]
+      "any": [{"in": "query", "re": "rest_route=(/|%2f)batch(/|%2f)v1"}, {"in": "path", "has": "/wp-json/batch/v1"}]
+    },
+
+    {
+      "name": "PHP-CGI argument injection",
+      "cve": "CVE-2024-4577",
+      "note": "seen 2026-10..11 (60-day archive): ?%ADd+allow_url_include=1+%ADd+auto_prepend_file=php://input (soft hyphen, or plain -d) on /index.php, /php-cgi/php-cgi.exe, /cgi-bin/php*, PHP body running shell_exec('env') and cat'ing .env / AWS creds",
+      "any": [{"in": "query", "has": "auto_prepend_file"}, {"in": "query", "has": "allow_url_include"}]
+    },
+    {
+      "name": "Langflow code-validation RCE",
+      "cve": "CVE-2025-3248",
+      "note": "seen 2026-10-01 in the env-secret campaign: POST /api/v1/validate/code (also under /langflow/), Python in the body",
+      "all": [{"in": "path", "re": "/api/v1/validate/code$"}]
+    },
+    {
+      "name": "Langflow public-flow build",
+      "note": "seen 2026-10-01 in the env-secret campaign: POST /api/v1/build_public_tmp/<flow id>/flow, code injection through an unauthenticated public flow",
+      "all": [{"in": "path", "has": "/api/v1/build_public_tmp/"}]
+    },
+    {
+      "name": "Flowise CustomMCP RCE",
+      "cve": "CVE-2025-59528",
+      "note": "seen 2026-10-01 in the env-secret campaign: POST /api/v1/node-load-method/customMCP (also under /flowise/), JS in the MCP config",
+      "all": [{"in": "path", "has": "/node-load-method/custommcp"}]
+    },
+    {
+      "name": "Spring Cloud Function routing RCE",
+      "cve": "CVE-2022-22963",
+      "note": "seen 2026-10-01: POST /functionRouter and /api/functionRouter, text/plain body 'test' (a probe, the payload normally rides in spring.cloud.function.routing-expression)",
+      "all": [{"in": "path", "re": "/functionrouter$"}]
+    },
+    {
+      "name": "Laravel Ignition RCE",
+      "cve": "CVE-2021-3129",
+      "note": "seen 2026-10..11: GET /_ignition/execute-solution from the Accept-Charset scanner, checking whether the endpoint exists",
+      "all": [{"in": "path", "has": "/_ignition/execute-solution"}]
+    },
+    {
+      "name": "Env-secret file read",
+      "note": "seen 2026-10-01, one campaign trying every hole for the process environment (cloud keys, tokens): Feast /feast/read-document {\"file_path\":\"/proc/self/environ\"}, Vite RSC ?filename=file:///proc/self/environ, Next.js bypass + ?path=../../proc/self/environ on /api/fs/read, /api/system/fileView, /userfiles, Kibana's /api/console/api_server?apis=../ (CVE-2018-17246), GET /process.env, {\"templateFile\":\"../../../../.env\"}. Runs after the React2Shell entries, so their own secret dump keeps its name",
+      "any": [
+        {"in": "uri", "re": "/proc/(self|1)/environ"},
+        {"in": "body", "re": "/proc/(self|1)/environ"},
+        {"in": "path", "re": "/process\\.env$"},
+        {"in": "body", "re": "\\.\\./[./]*\\.env\\b"}
+      ]
+    },
+    {
+      "name": "GraphQL introspection probe",
+      "note": "seen 2026-10-11: POST /graphql asking for __schema (the API's full type list, step one of a GraphQL attack). CRS reads the JSON braces as SQLi. No GraphQL here",
+      "all": [{"in": "path", "re": "/graphql$"}, {"in": "body", "has": "__schema"}]
+    },
+    {
+      "name": "phpinfo scan",
+      "note": "seen 2026-09-22: GET /cgi-bin/phpinfo.php with itself as referer (the referer trips CRS's file-access + shell rules, so the PHP webshell entry's guard skips it)",
+      "all": [{"in": "method", "equals": "GET"}, {"in": "path", "re": "/phpinfo\\.php$"}]
+    },
+    {
+      "name": "WordPress install finder (double slash)",
+      "note": "seen 2026-09-30 and 10-26: GET //xmlrpc.php?rsd, //blog/, //wordpress/, //wp/, //blog/robots.txt in a burst, referer some other site's //wp-login.php, carrying that site's cookies (LSKey-c$CookieConsentPolicy, ...). The RCE / SQLi matches are CRS false positives on those COOKIES, not a payload. 404 here",
+      "all": [{"in": "method", "equals": "GET"}, {"in": "path", "re": "^//(xmlrpc\\.php|blog/|wordpress/|wp/)"}]
+    },
+    {
+      "name": "Python exec endpoint probe",
+      "note": "seen 2026-10-01 in the env-secret campaign: POST /exec-py, code=<base64 Python running env / cat /proc/self/environ>. 404 here, no such endpoint",
+      "all": [{"in": "path", "re": "/exec-py$"}]
+    },
+    {
+      "name": "ALFA webshell scan",
+      "note": "seen 2026-10..11: POST //alfacgiapi/perl.alfa and //ALFA_DATA/alfacgiapi/perl.alfa, looking for an already-planted ALFA webshell's CGI helper. 404 here",
+      "all": [{"in": "path", "has": "alfacgiapi"}]
     },
 
     {
@@ -142,7 +215,8 @@
     },
     {
       "name": "Secret-file scan",
-      "any": [{"in": "rules", "has": "930130"}, {"in": "rules", "has": "920440"}, {"in": "rules", "has": "920500"}],
+      "note": "930121 added 2026-11-19: the file name in a header (GET /app/config/parameters.yml with itself as referer)",
+      "any": [{"in": "rules", "has": "930130"}, {"in": "rules", "has": "920440"}, {"in": "rules", "has": "920500"}, {"in": "rules", "has": "930121"}],
       "none": [{"in": "attacks", "re": "rce|injection|sqli|xss|rfi"}]
     },
     {
@@ -155,6 +229,55 @@
       "name": "Opaque-cookie POST probe (no User-Agent)",
       "note": "seen 2026-11-19 on plain http to the apex: same shape as the Go-client probe but NO User-Agent (920320), header order host,content-length,content-type,cookie,accept-encoding. POST / with Content-Type multipart/alternative (920420, so CRS never reads the ~6 KB body), a long base64 cookie 'sesskeyapiv2'. Nothing public on that cookie name. Got the http->https 301 only. Purpose unknown",
       "all": [{"in": "method", "equals": "POST"}, {"in": "rules", "has": "920420"}, {"in": "rules", "has": "920320"}, {"in": "header:cookie", "present": true}],
+      "none": [{"in": "attacks", "re": "rce|injection|sqli|xss|rfi"}]
+    },
+    {
+      "name": "Opaque-cookie POST probe (rotating UAs)",
+      "note": "seen 2026-09..11: the same family as the two above with browser UAs (IE11, iPhone, Android, old Chrome): POST / with a cookie, a disallowed content type (octet-stream, xhtml+xml, text/csv, 920420) or no UA (920320), random binary or empty body. Purpose unknown",
+      "all": [{"in": "method", "equals": "POST"}, {"in": "path", "equals": "/"}, {"in": "header:cookie", "present": true}],
+      "any": [{"in": "rules", "has": "920420"}, {"in": "rules", "has": "920320"}],
+      "none": [{"in": "attacks", "re": "rce|injection|sqli|xss|rfi"}]
+    },
+    {
+      "name": "Method-override / IP-spoofing probe",
+      "note": "seen 2026-11-04..11: X-HTTP-Method-Override / X-Method-Override plus a pile of forged client-IP headers (CF-Connecting-IP, True-Client-IP, X-Forwarded-For, X-Real-IP ... random or 127.0.0.1) on GET /?rest_route=/ (WordPress REST discovery). Tries to look like an internal or allowlisted caller",
+      "any": [{"in": "header:x-http-method-override", "present": true}, {"in": "header:x-method-override", "present": true}],
+      "none": [{"in": "attacks", "re": "rce|injection|sqli|xss|rfi"}]
+    },
+    {
+      "name": "Content-Type on a GET",
+      "note": "seen 2026-10-11: GET / with Content-Type text/html (920420), old Chrome/74 UA. A broken bot, not an attack",
+      "all": [{"in": "method", "equals": "GET"}, {"in": "rules", "has": "920420"}],
+      "none": [{"in": "attacks", "re": "rce|injection|sqli|xss|rfi"}]
+    },
+    {
+      "name": "Fake Googlebot",
+      "note": "seen 2026-10-22: UA 'Googlebot/2.1 +http://www.googlebot.com/bot.html' (Google's real UA points to google.com) with a malformed 'Accept: */*,' (920600)",
+      "all": [{"in": "ua", "has": "googlebot"}, {"in": "rules", "has": "920600"}],
+      "none": [{"in": "attacks", "re": "rce|injection|sqli|xss|rfi"}]
+    },
+    {
+      "name": "Bare POST probe (1=1)",
+      "note": "seen 2026-10-08: POST / with body '1=1' and no Content-Type (920340 + 920640)",
+      "all": [{"in": "method", "equals": "POST"}, {"in": "body", "equals": "1=1"}],
+      "none": [{"in": "attacks", "re": "rce|injection|sqli|xss|rfi"}]
+    },
+    {
+      "name": "Accept-Charset scanner",
+      "note": "seen 2026-10..11, ~55 hits: old-style 'Accept-Charset: utf-8' header (920451, restricted header, score 0) on /, /robots.txt, /favicon.ico, appsettings.json ..., rotating Windows / Nokia / MeeGo UAs. Real browsers stopped sending Accept-Charset years ago",
+      "all": [{"in": "rules", "has": "920451"}, {"in": "header:accept-charset", "present": true}],
+      "none": [{"in": "attacks", "re": "rce|injection|sqli|xss|rfi"}]
+    },
+    {
+      "name": "Backup-archive scan",
+      "note": "seen 2026-10..11, ~100 hits: GET /backup.zip, /db.tar.gz, /www.rar, /cookiefamily.zip, /dump.7z ... no User-Agent, a Range header (grab the start of a big file). Plain http, got the 301 only",
+      "all": [{"in": "path", "re": "\\.(zip|rar|7z|tgz|tar|gz|bz2)$"}],
+      "none": [{"in": "attacks", "re": "rce|injection|sqli|xss|rfi"}]
+    },
+    {
+      "name": "No-User-Agent path scan",
+      "note": "seen 2026-10..11, ~110 hits: GET / HEAD with no User-Agent at all (920320 only, score 0) for WordPress folders, .php7 / .phP8 shells, Cloudflare-Worker relayed GET /. Mostly plain http, got the 301 only. After the specific entries, so a named exploit sent without a UA keeps its name",
+      "all": [{"in": "method", "re": "^(get|head)$"}, {"in": "rules", "has": "920320"}, {"in": "header:user-agent", "present": false}],
       "none": [{"in": "attacks", "re": "rce|injection|sqli|xss|rfi"}]
     },
     {

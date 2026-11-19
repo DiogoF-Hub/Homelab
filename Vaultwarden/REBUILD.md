@@ -1583,8 +1583,10 @@ Per README §ModSecurity / OWASP CRS:
 4. The engine is already `On` in the shipped compose (flipped 2026-06-16
    after the audit log ran clean). Roll it back to `DetectionOnly` and
    recreate if you hit a legit FP during initial bring-up.
-5. Still pending: bump `blocking_paranoia_level` from PL1 to PL2 in
-   `bunkerweb/custom-configs/modsec-crs/paranoia.conf` and re-tune.
+5. `paranoia.conf` ships detection AND blocking at PL2 (blocking raised
+   2026-11-20, see the README § Paranoia levels). On a fresh rebuild with
+   new clients, watch Discord for 🛑 "blocked a Bitwarden client" for the
+   first days; rolling back is `blocking_paranoia_level=1` + restart.
 
 Known exclusions table (currently just rule **911100** for
 PUT/PATCH/DELETE method allowance) lives in the README, grow it as
