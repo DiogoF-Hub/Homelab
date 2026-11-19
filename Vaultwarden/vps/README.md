@@ -193,12 +193,64 @@ termination.
 Hardened on first boot, before anything else is reachable. Standard
 public-VPS posture: SSH on a non-default port, key-based authentication
 only, root login disabled, only the operational user permitted, short
-failure window. Configured in `/etc/ssh/sshd_config` (or a drop-in
-under `/etc/ssh/sshd_config.d/`).
+failure window. Everything lives in `/etc/ssh/sshd_config` itself: the
+`Include /etc/ssh/sshd_config.d/*.conf` line stays commented and
+`sshd_config.d/` is empty, one file to read. `auto-update.sh` keeps the
+local file on openssh-server upgrades (`UCF_FORCE_CONFFOLD`).
 
 The exact port number doesn't matter much (it's not a security control,
 just noise reduction against drive-by scanners), but it does need to
 match the UFW allow rule below.
+
+Four more lines on 2026-11-19, the same CIS Debian 13 items the home
+VM's Wazuh SCA scan flagged there (no agent on the VPS, so checked by
+hand with `sudo sshd -T`):
+
+* `UsePAM yes` (was `no`). PAM's account + session modules now run for
+  SSH logins (logind session, `libpam-tmpdir` if installed). Adds no
+  login method: `PasswordAuthentication` and
+  `KbdInteractiveAuthentication` stay `no`. Side effect: PAM checks
+  password / account expiry too, so before flipping it check
+  `sudo chage -l <user>` shows "never" (or a future date) for `admin`
+  and `fetcher`, or the next login gets refused or forced into a
+  password change (fatal for the unattended `fetcher`). Also why
+  `fetcher` has a password set, see [The `fetcher` user](#the-fetcher-user).
+* `DisableForwarding yes`. Every kind of forwarding off (TCP, agent,
+  X11, unix sockets) in one line; the VPS is an edge box, not a jump host.
+* `MACs hmac-sha2-512-etm@openssh.com,hmac-sha2-256-etm@openssh.com,hmac-sha2-512,hmac-sha2-256`.
+  SHA-2 only, drops `hmac-sha1` and the 64-bit `umac-64`. Every current
+  client picks SHA-2 on its own. Check:
+  `ssh -o MACs=hmac-sha1 -p <ssh_port> admin@<vps>` says
+  `no matching MAC found`.
+* `MaxStartups 10:30:60` (default `10:30:100`). Unauthenticated
+  connections start getting dropped at 10, all of them at 60, so a
+  connection flood can't pile up 100 half-open handshakes.
+
+Applied as exact edits, backup first:
+
+```bash
+sudo cp -a /etc/ssh/sshd_config /root/sshd_config.bak
+sudo sed -i -e '/^#RekeyLimit default none$/a MACs hmac-sha2-512-etm@openssh.com,hmac-sha2-256-etm@openssh.com,hmac-sha2-512,hmac-sha2-256' -e 's/^UsePAM no$/UsePAM yes/' -e '/^AllowTcpForwarding no$/a DisableForwarding yes' -e 's/^#MaxStartups 10:30:100$/MaxStartups 10:30:60/' /etc/ssh/sshd_config
+sudo diff /root/sshd_config.bak /etc/ssh/sshd_config   # exactly 4 changes
+sudo sshd -t && sudo systemctl reload ssh
+sudo sshd -T | grep -E '^(usepam|disableforwarding|macs|maxstartups) '
+```
+
+Keep the current session open until a fresh login works (and the
+TrueNAS fetcher, which connects by hostname: its `known_hosts` entry
+is keyed on the name, so testing by raw IP fails host-key verification
+for an unrelated reason). Hetzner web console is the way back in if not:
+`sudo cp /root/sshd_config.bak /etc/ssh/sshd_config && sudo systemctl reload ssh`.
+
+### sudo and `/dev/shm`
+
+Same as the home VM (2026-11-19), same repo files:
+
+* `/etc/sudoers.d/50-hardening` ([`../host-hardening/sudoers-hardening`](../host-hardening/sudoers-hardening), mode `0440`): sudo keeps its own log of every command at `/var/log/sudo.log`, and the password stays valid 5 minutes instead of 15. Installed through `visudo -cf` on a temp copy first, a broken sudoers file locks out sudo:
+  `sudo visudo -cf /tmp/50-hardening && sudo install -m 0440 -o root -g root /tmp/50-hardening /etc/sudoers.d/50-hardening`.
+  Sits next to cloud-init's `90-cloud-init-users`, leave that one alone.
+* `/etc/logrotate.d/sudo-log` ([`../host-hardening/logrotate-sudo-log`](../host-hardening/logrotate-sudo-log)): monthly, 12 kept, compressed. Nothing else rotates `sudo.log`.
+* `/dev/shm` mounted `noexec` (plus `nosuid,nodev`) via an `/etc/fstab` line, `tmpfs /dev/shm tmpfs defaults,nodev,nosuid,noexec 0 0`, then `sudo systemctl daemon-reload && sudo mount -o remount /dev/shm`. World-writable shared memory is a classic drop-and-run spot for malware; nothing on the VPS runs programs from it. The Debian installer's `/dev/sr0 /media/cdrom0` line is commented out in the same file (no CD drive on a cloud VM, `findmnt --verify` warned about it). Check: `findmnt -kn /dev/shm` shows `noexec`, `sudo findmnt --verify` is clean.
 
 ### Kernel modules blocked
 

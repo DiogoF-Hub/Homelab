@@ -1,0 +1,20 @@
+# /etc/sudoers.d/50-hardening on the Vault VM and the edge VPS (mode 0440)
+#
+# CIS Debian 13 items from the Vault VM's Wazuh SCA scan (2026-11-19), same
+# file on the VPS. A drop-in, so the package-owned /etc/sudoers stays
+# untouched. No dot in the file name: sudo silently skips sudoers.d files
+# whose name contains one.
+#
+# 42114: sudo keeps its own log of every command run through it (who, from
+# which terminal, in which directory, as which user, the exact command), next
+# to the shorter lines it already writes to auth.log. A few KB a day, rotated
+# by /etc/logrotate.d/sudo-log.
+Defaults logfile="/var/log/sudo.log"
+
+# 42117: after typing the sudo password, it stays valid 5 minutes (default 15),
+# per terminal. Shorter window for someone else to use an unlocked session.
+Defaults timestamp_timeout=5
+
+# NEVER install this by editing it in place: a syntax error in sudoers.d
+# breaks sudo for everyone. Check it as a temp file first:
+#   sudo visudo -cf /tmp/50-hardening && sudo install -m 0440 /tmp/50-hardening /etc/sudoers.d/50-hardening

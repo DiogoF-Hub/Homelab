@@ -1,0 +1,15 @@
+# /etc/logrotate.d/sudo-log on the Vault VM and the edge VPS
+#
+# sudo's own log file (Defaults logfile in /etc/sudoers.d/50-hardening).
+# Nothing rotates it by default, so without this it grows forever. sudo opens
+# and appends per command, so a plain rotate (no copytruncate) is fine.
+# A year of monthly files, compressed: it's small, and it's an audit trail.
+/var/log/sudo.log {
+    monthly
+    rotate 12
+    compress
+    delaycompress
+    missingok
+    notifempty
+    create 0600 root root
+}

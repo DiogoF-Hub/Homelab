@@ -356,6 +356,10 @@ Port <ssh_port>
 # it's a containers-runtime account, never reached over SSH.
 AllowUsers vwadmin fetcher
 
+# MACs: SHA-2 only, no hmac-sha1 / umac-64 / umac-128 (CIS 42104,
+# 2026-11-19). Every current OpenSSH client negotiates hmac-sha2-*-etm.
+MACs hmac-sha2-512-etm@openssh.com,hmac-sha2-256-etm@openssh.com,hmac-sha2-512,hmac-sha2-256
+
 # Logging
 SyslogFacility AUTH
 LogLevel VERBOSE
@@ -374,19 +378,30 @@ KbdInteractiveAuthentication no
 
 AuthorizedKeysFile     .ssh/authorized_keys
 
-# Disable PAM, fine here because we never want password / Kerberos /
-# challenge-response paths. If you ever need to re-enable it (e.g. for
-# 2FA via PAM), revisit MaxAuthTries / KbdInteractiveAuthentication too.
-UsePAM no
+# PAM on (CIS 42111, 2026-11-19; was "no"). Runs PAM's account and
+# session modules around a key login: that's what applies libpam-tmpdir
+# (per-user TMPDIR), pam_limits and the logind session (XDG_RUNTIME_DIR)
+# to SSH sessions. It adds NO way in, because PasswordAuthentication and
+# KbdInteractiveAuthentication above are both "no": keep them that way,
+# with UsePAM yes either one would route a password prompt through PAM.
+# Side effect: an account whose password has EXPIRED is refused even with
+# a valid key, so `chage -l vwadmin` / `chage -l fetcher` must show
+# "Password expires: never".
+UsePAM yes
 
-# Forwarding off by default, this VM is a leaf, not a jump box.
+# Forwarding off, this VM is a leaf, not a jump box. DisableForwarding
+# (CIS 42097) turns off every kind at once, including unix-socket
+# forwarding the three lines above don't cover. scp / sftp keep working.
 AllowAgentForwarding no
 AllowTcpForwarding no
+DisableForwarding yes
 X11Forwarding no
 
-# Quieter sessions; less info disclosure on connect.
+# Quieter sessions; less info disclosure on connect. PrintLastLog yes
+# (Lynis SSH-7408): shows the previous login on connect, so a login you
+# didn't make stands out.
 PrintMotd no
-PrintLastLog no
+PrintLastLog yes
 TCPKeepAlive no
 Compression no
 
@@ -397,6 +412,10 @@ ClientAliveCountMax 2
 # Don't reverse-DNS clients, faster connects, no leak of who's
 # resolving what to upstream resolvers.
 UseDNS no
+
+# Pre-auth flood protection (CIS 42107): start dropping unauthenticated
+# connections at 10 open, refuse all new ones at 60 (default 10:30:100).
+MaxStartups 10:30:60
 
 # Restrict which env vars clients can pass through. Default is "LANG LC_*"
 #, the reference setup adds COLORTERM and NO_COLOR for sane terminal rendering.
