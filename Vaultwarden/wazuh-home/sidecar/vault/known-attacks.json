@@ -257,6 +257,12 @@
       "none": [{"in": "attacks", "re": "rce|injection|sqli|xss|rfi"}]
     },
     {
+      "name": "Unfilled-template crawler UA",
+      "note": "seen 2026-11-20: 'PageHubBot/1.0; +https://[DOMAIN]/bot', the bot's author never filled in the placeholder. CRS 932131 (PL2, 'Unix shell expression') reads '/[domain]' as shell syntax, so it scores 5: 301 on http, 403 on https since blocking went to PL2. GET / on the apex only. A false positive on a junk crawler, blocking it costs nothing",
+      "all": [{"in": "ua", "re": "/\\[domain\\]"}, {"in": "rules", "has": "932131"}],
+      "none": [{"in": "attacks", "re": "sqli|xss|rfi|lfi|injection"}]
+    },
+    {
       "name": "Bare POST probe (1=1)",
       "note": "seen 2026-10-08: POST / with body '1=1' and no Content-Type (920340 + 920640)",
       "all": [{"in": "method", "equals": "POST"}, {"in": "body", "equals": "1=1"}],
