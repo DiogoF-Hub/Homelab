@@ -23,7 +23,7 @@ This page only covers the box itself: hardware, OS and plugins. How its block lo
 
 AES-NI matters on a firewall: it's what keeps AES-based VPNs (IPsec, OpenVPN) and TLS cheap on a 35 W CPU. WireGuard, and so Tailscale, uses ChaCha20 instead and doesn't need it. OPNsense uses it once the `aesni` module is loaded; the supported modes show up under `sysctl dev.aesni.0.%desc`.
 
-The M710q Tiny has only one Ethernet port and no PCIe slot (without Lenovo's riser), so the second port comes from the M.2 A+E slot meant for the Wi-Fi card: a small adapter with an Intel I210 on it and its RJ45 port on a short cable. Both NICs are Intel, on purpose: FreeBSD's Intel drivers (`em` for the I219, `igb` for the I210) are the most solid ones, Realtek cards are the usual source of drops and odd link problems on OPNsense.
+The M710q Tiny has only one Ethernet port and no PCIe slot: the board has the footprint for one, but it's unpopulated (more than just the connector is missing), so it can't be used. The second port comes from the M.2 A+E slot meant for the Wi-Fi card: a small adapter with an Intel I210 on it and its RJ45 port on a short cable. Both NICs are Intel, on purpose: FreeBSD's Intel drivers (`em` for the I219, `igb` for the I210) are the most solid ones, Realtek cards are the usual source of drops and odd link problems on OPNsense.
 
 ---
 
