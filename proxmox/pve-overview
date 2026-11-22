@@ -1,0 +1,366 @@
+#!/usr/bin/env bash
+# pve-overview - one-shot host + VM resource snapshot for Proxmox VE
+#
+# Prints in one go: host CPU (cores, threads, SMT), host memory with the
+# ZFS ARC split out, load, kernel and PVE version, then one row per VM
+# (vCPUs, 5-min CPU average, CPU type, affinity, RAM, RAM used, balloon),
+# the ZFS pools and the CPU vulnerability flags. Ends with the vCPU / RAM
+# totals and ratios and a worst-case RAM budget: what's left for Proxmox
+# itself (OK / LOW / OVER) and which stopped VMs could be started right now.
+#
+# Run as root on the PVE host. Installed as /usr/local/bin/pve-overview.
+set -u
+
+# 1. Settings you can change
+HOST_RESERVE_MIB=2048     # RAM Proxmox itself should always keep free
+ARCSTATS="${ARCSTATS:-/proc/spl/kstat/zfs/arcstats}"
+CONF_DIR="${CONF_DIR:-/etc/pve/qemu-server}"
+LINE="================================================================"
+
+# 2. Basic checks
+if [ "$(id -u)" -ne 0 ]; then
+  echo "pve-overview: run it as root (pvesh needs root)" >&2
+  exit 1
+fi
+
+for tool in pvesh python3 lscpu free; do
+  if ! command -v "$tool" >/dev/null 2>&1; then
+    echo "pve-overview: missing command: $tool" >&2
+    exit 1
+  fi
+done
+
+# 3. Small helpers
+mib_to_gib() {
+  awk -v mib="$1" 'BEGIN { printf "%.2f", mib / 1024 }'
+}
+
+ratio() {
+  awk -v a="$1" -v b="$2" 'BEGIN { if (b > 0) printf "%.2f:1", a / b; else print "-" }'
+}
+
+# Prints the value of one key from the main section of a VM config file.
+# Stops at the first [section] so snapshot and pending values are ignored.
+conf_value() {
+  local file="$1"
+  local key="$2"
+  if [ ! -r "$file" ]; then
+    return
+  fi
+  awk -F': ' -v key="$key" '
+    /^\[/        { exit }
+    $1 == key    { print $2; exit }
+  ' "$file"
+}
+
+# Average CPU of one VM over the last 5 finished minutes (same source as the GUI graphs).
+# The value is a share of the VM's own vCPUs: 50% on a 2 vCPU VM means about 1 vCPU busy.
+vm_cpu_avg() {
+  local vmid="$1"
+  pvesh get "/nodes/$NODE/qemu/$vmid/rrddata" --timeframe hour --output-format json \
+    < /dev/null 2>/dev/null | python3 -c '
+import json, sys
+try:
+    points = json.load(sys.stdin)
+    values = [p["cpu"] for p in points if p.get("cpu") is not None][-5:]
+    if values:
+        print(f"{sum(values) / len(values) * 100:.2f}%")
+    else:
+        print("?")
+except Exception:
+    print("?")
+' 2>/dev/null || echo "?"
+}
+
+NODE=$(hostname -s)
+DATE=$(date +"%Y-%m-%d %H:%M:%S %Z")
+
+echo "$LINE"
+echo "PVE OVERVIEW   node=$NODE   at $DATE"
+echo "$LINE"
+
+# 4. Host CPU
+CPU_MODEL=$(lscpu | awk -F: '/^Model name/ {gsub(/^[ \t]+/, "", $2); print $2; exit}')
+CORES_PS=$(lscpu | awk -F: '/^Core\(s\) per socket/ {gsub(/ /, "", $2); print $2; exit}')
+SOCKETS=$(lscpu | awk -F: '/^Socket\(s\)/ {gsub(/ /, "", $2); print $2; exit}')
+TPC=$(lscpu | awk -F: '/^Thread\(s\) per core/ {gsub(/ /, "", $2); print $2; exit}')
+PCORES=$((CORES_PS * SOCKETS))
+THREADS=$(nproc)
+if [ "$TPC" -gt 1 ]; then
+  SMT="ON"
+else
+  SMT="OFF"
+fi
+
+cat <<EOT
+
+HOST CPU
+  Model:            $CPU_MODEL
+  Sockets:          $SOCKETS
+  Physical cores:   $PCORES
+  Logical threads:  $THREADS
+  SMT status:       $SMT (threads/core=$TPC)
+EOT
+
+# 5. Host memory, ZFS ARC and load
+read -r TOTAL USED FREE_M _ CACHE AVAIL < <(free -m | awk '/^Mem:/ {print $2, $3, $4, $5, $6, $7}')
+read -r SWAP_T SWAP_U < <(free -m | awk '/^Swap:/ {print $2, $3}')
+
+HAS_ARC="no"
+ARC_SIZE=0
+ARC_MAX=0
+if [ -r "$ARCSTATS" ]; then
+  HAS_ARC="yes"
+  ARC_SIZE=$(awk '$1 == "size"  { printf "%d", $3 / 1048576 }' "$ARCSTATS")
+  ARC_MAX=$(awk  '$1 == "c_max" { printf "%d", $3 / 1048576 }' "$ARCSTATS")
+fi
+USED_NO_ARC=$((USED - ARC_SIZE))
+
+read -r LOAD1 LOAD5 LOAD15 _ < /proc/loadavg
+
+cat <<EOT
+
+HOST MEMORY  (MiB)
+  Total:            $TOTAL  ($(mib_to_gib "$TOTAL") GiB)
+  Used:             $USED  (includes the ZFS ARC)
+EOT
+if [ "$HAS_ARC" = "yes" ]; then
+  cat <<EOT
+  Used without ARC: $USED_NO_ARC
+  ZFS ARC:          $ARC_SIZE of max $ARC_MAX  ($(mib_to_gib "$ARC_SIZE") of $(mib_to_gib "$ARC_MAX") GiB)
+EOT
+fi
+cat <<EOT
+  Free:             $FREE_M
+  Buff/cache:       $CACHE  (mostly reclaimable)
+  Available:        $AVAIL  (free for new work, ARC not counted)
+  Swap used/total:  $SWAP_U / $SWAP_T
+
+HOST LOAD
+  Load avg (1/5/15): $LOAD1, $LOAD5, $LOAD15
+  Uptime:           $(uptime -p)
+
+SOFTWARE
+  Kernel:           $(uname -r)
+  PVE:              $(pveversion 2>/dev/null | head -1)
+EOT
+
+# 6. VM list: one API call. cpus and maxmem already include the Proxmox defaults.
+VM_LIST=$(pvesh get "/nodes/$NODE/qemu" --output-format json < /dev/null 2>/dev/null | python3 -c '
+import json, sys
+try:
+    vms = json.load(sys.stdin)
+except Exception:
+    sys.exit(0)
+for vm in sorted(vms, key=lambda v: int(v["vmid"])):
+    print("\t".join([
+        str(vm["vmid"]),
+        str(vm.get("name") or "-"),
+        str(vm.get("status") or "?"),
+        str(vm.get("cpus") or 0),
+        str(int(vm.get("maxmem") or 0) // 1048576),
+        str(int(vm.get("mem") or 0) // 1048576),
+    ]))
+')
+
+echo ""
+echo "$LINE"
+echo "VMs  (CPU% = 5-min avg of the VM's own vCPUs, RAM in MiB)"
+echo "$LINE"
+echo ""
+
+ROW_FORMAT="%-5s | %-18.18s | %-8s | %-4s | %-7s | %-14.14s | %-11.11s | %-7s | %-8s | %s\n"
+# shellcheck disable=SC2059
+printf "$ROW_FORMAT" "VMID" "Name" "Status" "vCPU" "CPU%" "CPU type" "Affinity" "RAM" "RAMused" "Balloon"
+echo "------+--------------------+----------+------+---------+----------------+-------------+---------+----------+----------------"
+
+T_VCPU_ALL=0
+T_VCPU_RUN=0
+T_RAM_ALL=0
+T_RAM_RUN=0
+HOST_MEASURED="no"
+STOPPED_VMS=""
+
+if [ -z "$VM_LIST" ]; then
+  echo "  (no VMs found, or the Proxmox API did not answer)"
+fi
+
+# fd 3 so that commands inside the loop cannot eat the VM list from stdin
+while IFS=$'\t' read -r -u 3 vmid name status vcpus mem ram_used; do
+  if [ -z "$vmid" ]; then
+    continue
+  fi
+  conf="$CONF_DIR/$vmid.conf"
+
+  # 6a. CPU type: Proxmox uses kvm64 when the config has no cpu line
+  cpu_t=$(conf_value "$conf" cpu)
+  cpu_t=${cpu_t:-kvm64 (unset)}
+  cpu_t=${cpu_t#cputype=}
+  cpu_t=${cpu_t%%,*}
+
+  affinity=$(conf_value "$conf" affinity)
+  affinity=${affinity:--}
+
+  # 6b. Balloon setting
+  balloon=$(conf_value "$conf" balloon)
+  if   [ -z "$balloon" ];       then balloon_d="not-set (=mem)"
+  elif [ "$balloon" = "0" ];    then balloon_d="DISABLED"
+  elif [ "$balloon" = "$mem" ]; then balloon_d="fixed=${mem}M"
+  else                               balloon_d="${balloon}M-${mem}M (dyn)"
+  fi
+
+  # 6c. Live values for running VMs only
+  cpu_pct="-"
+  ram_used_d="-"
+  if [ "$status" = "running" ]; then
+    cpu_pct=$(vm_cpu_avg "$vmid")
+    ram_used_d="$ram_used"
+    # Without the balloon device Proxmox measures the QEMU process on the host,
+    # which can be a little above the allocation.
+    if [ "$balloon" = "0" ] || [ "$ram_used" -gt "$mem" ]; then
+      ram_used_d="${ram_used}*"
+      HOST_MEASURED="yes"
+    fi
+  else
+    STOPPED_VMS="$STOPPED_VMS$vmid:$name:$mem "
+  fi
+
+  # shellcheck disable=SC2059
+  printf "$ROW_FORMAT" "$vmid" "$name" "$status" "$vcpus" "$cpu_pct" "$cpu_t" "$affinity" "$mem" "$ram_used_d" "$balloon_d"
+
+  T_VCPU_ALL=$((T_VCPU_ALL + vcpus))
+  T_RAM_ALL=$((T_RAM_ALL + mem))
+  if [ "$status" = "running" ]; then
+    T_VCPU_RUN=$((T_VCPU_RUN + vcpus))
+    T_RAM_RUN=$((T_RAM_RUN + mem))
+  fi
+done 3<<< "$VM_LIST"
+
+if [ "$HOST_MEASURED" = "yes" ]; then
+  echo ""
+  echo "  * measured on the host (QEMU process), can be slightly above the allocation"
+fi
+
+echo ""
+# 7. ZFS pools
+if command -v zpool >/dev/null 2>&1; then
+  echo "$LINE"
+  echo "ZFS POOLS"
+  echo "$LINE"
+  echo ""
+  zpool list -o name,size,alloc,free,frag,cap,health 2>/dev/null
+  echo ""
+  echo "  Health check: $(zpool status -x 2>/dev/null | head -1)"
+  echo ""
+fi
+
+# 8. CPU vulnerabilities
+echo "$LINE"
+echo "CPU VULNERABILITIES (summary)"
+echo "$LINE"
+echo ""
+COUNT_PARTIAL=0
+COUNT_VULN=0
+for f in /sys/devices/system/cpu/vulnerabilities/*; do
+  name=$(basename "$f")
+  val=$(cat "$f")
+  # Compare in lower case: the kernel writes both "vulnerable" and "Vulnerable"
+  val_lc=${val,,}
+  case "$val_lc" in
+    "not affected")                  flag="ok     " ;;
+    mitigation:*vulnerable*)         flag="partial" ;;
+    mitigation:*)                    flag="mitig  " ;;
+    kvm:*mitigation:*vulnerable*)    flag="partial" ;;
+    kvm:*mitigation:*)               flag="mitig  " ;;
+    *vulnerable*)                    flag="VULN   " ;;
+    *)                               flag="?      " ;;
+  esac
+  if [ "$flag" = "partial" ]; then
+    COUNT_PARTIAL=$((COUNT_PARTIAL + 1))
+  elif [ "$flag" = "VULN   " ]; then
+    COUNT_VULN=$((COUNT_VULN + 1))
+  fi
+  printf "  %-25s [%s]  %s\n" "$name" "$flag" "$val"
+done
+echo ""
+echo "  Summary: $COUNT_VULN vulnerable, $COUNT_PARTIAL partial"
+# 9. Totals and ratios (last, so they stay on screen)
+cat <<EOT
+
+$LINE
+TOTALS & RATIOS
+$LINE
+
+vCPUs:
+  Allocated (all VMs):           $T_VCPU_ALL
+  Allocated (running only):      $T_VCPU_RUN
+  Host logical threads:          $THREADS  (SMT=$SMT)
+  Host physical cores:           $PCORES
+
+  Ratio running / threads:       $(ratio "$T_VCPU_RUN" "$THREADS")
+  Ratio all / threads:           $(ratio "$T_VCPU_ALL" "$THREADS")
+  Ratio running / physical:      $(ratio "$T_VCPU_RUN" "$PCORES")
+
+RAM (MiB):
+  Allocated (all VMs):           $T_RAM_ALL  ($(mib_to_gib "$T_RAM_ALL") GiB)
+  Allocated (running only):      $T_RAM_RUN  ($(mib_to_gib "$T_RAM_RUN") GiB)
+  Host total:                    $TOTAL  ($(mib_to_gib "$TOTAL") GiB)
+  Running allocation %:          $(awk -v r="$T_RAM_RUN" -v t="$TOTAL" 'BEGIN { printf "%.1f%%", r * 100 / t }')
+EOT
+
+# 10. RAM budget: worst case, every running VM uses all of its RAM
+LEFT=$((TOTAL - ARC_MAX - T_RAM_RUN))
+LEFT_ALL=$((TOTAL - ARC_MAX - T_RAM_ALL))
+
+budget_status() {
+  local left="$1"
+  if [ "$left" -lt 0 ]; then
+    echo "OVER (VMs alone need more than the host has)"
+  elif [ "$left" -lt "$HOST_RESERVE_MIB" ]; then
+    echo "LOW (keep at least $HOST_RESERVE_MIB)"
+  else
+    echo "OK"
+  fi
+}
+
+cat <<EOT
+
+$LINE
+RAM BUDGET  (MiB, worst case: every VM uses all of its RAM)
+$LINE
+
+  Host total:                    $TOTAL
+  - ZFS ARC limit:               $ARC_MAX
+  - Allocated (running VMs):     $T_RAM_RUN
+  = Left for Proxmox itself:     $LEFT  ($(mib_to_gib "$LEFT") GiB)   $(budget_status "$LEFT")
+
+  If every VM ran at once:       $LEFT_ALL  ($(mib_to_gib "$LEFT_ALL") GiB)   $(budget_status "$LEFT_ALL")
+EOT
+
+# 10a. Which stopped VMs could start now and still keep the reserve (one at a time)
+FITS=""
+NO_FIT=""
+for entry in $STOPPED_VMS; do
+  s_id=${entry%%:*}
+  rest=${entry#*:}
+  s_name=${rest%:*}
+  s_mem=${rest##*:}
+  if [ $((LEFT - s_mem)) -ge "$HOST_RESERVE_MIB" ]; then
+    FITS="$FITS $s_id ($s_name, $s_mem),"
+  else
+    NO_FIT="$NO_FIT $s_id ($s_name, $s_mem),"
+  fi
+done
+if [ -n "$STOPPED_VMS" ]; then
+  FITS=${FITS%,}
+  NO_FIT=${NO_FIT%,}
+  echo ""
+  echo "  Stopped VMs, can start now:   ${FITS:- none}"
+  echo "  Stopped VMs, not enough RAM:  ${NO_FIT:- none}"
+fi
+echo "  (QEMU adds a little overhead per VM on top of these numbers)"
+echo ""
+
+echo "$LINE"
+echo "END"
+echo "$LINE"

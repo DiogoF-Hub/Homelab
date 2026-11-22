@@ -98,6 +98,13 @@ Homelab/
 │   ├── README.md
 │   └── generate_cert.sh
 │
+├── opnsense/                                 # the firewall box (separate hardware)
+│   └── README.md                             # hardware, OS, plugins
+│
+├── proxmox/                                  # the Proxmox host the VMs run on
+│   ├── README.md                             # hardware, ZFS mirror, ARC limit
+│   └── pve-overview                          # one-shot host + VM resource snapshot (run as root on the host)
+│
 └── Tailscale Windows VPN on demand/
     └── README.md                             # migrated to a dedicated repo (read-only reference)
 ```
