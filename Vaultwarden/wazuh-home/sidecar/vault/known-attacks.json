@@ -214,6 +214,12 @@
       "none": [{"in": "attacks", "re": "rce|injection|sqli|xss|rfi"}]
     },
     {
+      "name": "Secret-file scan (unexpanded $(pwd))",
+      "note": "seen 2026-11-22, four IPs in one /24 at the same second, ~1000 secret-file GETs between them (.env, .aws/credentials, terraform.tfstate ...), fake Chrome 131. Some paths kept a literal '$(pwd)/' the scanner's wordlist never expanded (/$(pwd)/docker-compose.yml, /$(pwd)/.terraform/terraform.tfstate). CRS 932239 (PL2) reads '$(pwd)' as shell command substitution, so the Secret-file scan entry's 'no rce' guard skips them. DNSBL had them 403'd anyway",
+      "all": [{"in": "path", "re": "/\\$\\(pwd\\)/"}, {"in": "rules", "has": "932239"}],
+      "none": [{"in": "attacks", "re": "sqli|xss|rfi|injection"}]
+    },
+    {
       "name": "Secret-file scan",
       "note": "930121 added 2026-11-19: the file name in a header (GET /app/config/parameters.yml with itself as referer)",
       "any": [{"in": "rules", "has": "930130"}, {"in": "rules", "has": "920440"}, {"in": "rules", "has": "920500"}, {"in": "rules", "has": "930121"}],
