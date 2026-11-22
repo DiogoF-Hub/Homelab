@@ -182,6 +182,9 @@ The Vaultwarden service has been migrated from a Raspberry Pi to a **dedicated D
 * The Proxmox bridge is **VLAN-aware**, and the VM's virtual NIC carries a **VLAN tag of 50** set in the VM's network-device settings. Proxmox tags every frame leaving this VM with VLAN 50 (VLAN-DMZ) before it goes out on the host's trunked uplink, so the VM lands on the DMZ VLAN without a physical NIC dedicated to it.
 * This replaces the earlier arrangement, which dedicated a separate physical NIC on the Proxmox host (cabled to a DMZ-access switch port) to this VM. The VLAN-aware bridge plus a per-VM VLAN tag is the standard Proxmox approach and gives the same isolation with one trunked uplink instead of a NIC per VLAN.
 
+#### **CPU isolation on the host**
+* This VM has **one physical core of the Proxmox host to itself** (CPU affinity `17,35`, both threads of the last core), and every other VM is pinned away from it (`0-16,18-34`). The host keeps SMT on, and the CPU leaks data between the two threads of one core (L1TF, MDS, MMIO Stale Data), so the only internet-facing VM never shares a core with another VM. Details and commands: [`proxmox/cpu-affinity.md`](../proxmox/cpu-affinity.md).
+
 #### **Benefits of This Migration**
 * **Full system backups**: The VM-based approach enables complete system snapshots, ensuring full recovery capability beyond just data backups
 * **Hardware independence**: Decouples Vaultwarden from bare-metal hardware constraints and provides more flexibility for maintenance and scaling

@@ -53,6 +53,12 @@ After changing it: `update-initramfs -u -k all` and reboot (or write the value t
 
 ---
 
+## CPU affinity (SMT side channels)
+
+SMT stays on, and the CPU leaks data between the two threads of one core (L1TF, MDS, MMIO Stale Data). So the internet-facing VM (Vaultwarden) gets one physical core to itself, and every other VM is pinned to the rest. Why, the CPU layout, the `qm set` commands and the rule for new VMs: [`cpu-affinity.md`](cpu-affinity.md).
+
+---
+
 ## pve-overview
 
 [`pve-overview`](pve-overview): one command that prints the whole host + VM resource picture, so there's no clicking through the GUI per VM.
