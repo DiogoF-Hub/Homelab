@@ -78,6 +78,12 @@ emit_run_summary() {
             "age_update=$(_f backup age_update)"
             "minisign_update=$(_f backup minisign_update)"
             "wazuh_agent_update=$(_f system-update wazuh_agent_update)"
+            "listbugs_pins=$(_f system-update listbugs_pins)"
+            # what failed and why (empty on a clean run): the failed phase
+            # names, plus the first failed phase's reason + log error lines
+            "failed_phase=$(jq -rs '[.[]|select(.status=="fail")|.phase]|join(",")' <<<"$lines")"
+            "fail_reason=$(jq -rs '[.[]|select(.status=="fail")|.fail_reason//""]|.[0]//""' <<<"$lines")"
+            "fail_detail=$(jq -rs '[.[]|select(.status=="fail")|.fail_detail//""]|.[0]//""' <<<"$lines")"
         )
     else
         if   grep -q '"status":"fail"'     <<<"$lines"; then overall="fail"
@@ -197,7 +203,9 @@ else
     # so fire a separate loud alert to correct it , the one case where not
     # rebooting is an emergency, not a relief.
     REBOOT_RC=$?
-    emit_status run fail "$REBOOT_RC" "vw_sev=warn" "reboot_status=BLOCKED" "backup_status=ok"
+    emit_status run fail "$REBOOT_RC" "vw_sev=warn" "reboot_status=BLOCKED" "backup_status=ok" \
+        "failed_phase=reboot" "fail_reason=${EXIT_CODE_DESC[$REBOOT_RC]:-exit code $REBOOT_RC}" \
+        "fail_detail=containers are stopped, Vaultwarden is DOWN until someone reboots or starts them"
 fi
 
 # ---- summary --------------------------------------------------------------

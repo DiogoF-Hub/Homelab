@@ -300,7 +300,49 @@ __status_on_exit() {
     if (( rc != 0 )) && [[ "${PHASE_STATUS:-ok}" != "fail" ]]; then
         PHASE_STATUS="fail"
     fi
+    # On a failure, say WHY in the status line too, so the Discord report
+    # can show it: the exit-code description plus the error lines from the
+    # end of this phase's log (apt's "E:" lines, apt-listbugs' bug list ...).
+    if (( rc != 0 )); then
+        PHASE_KV+=("fail_reason=${EXIT_CODE_DESC[$rc]:-exit code $rc}"
+                   "fail_detail=$(phase_log_errors)")
+    fi
     emit_status "$PHASE_NAME_FOR_STATUS" "${PHASE_STATUS:-ok}" "$rc" "${PHASE_KV[@]}"
+}
+
+# phase_log_errors, the error-looking lines from the last 60 lines of
+# $PHASE_LOG, joined with " | " (one JSON-safe line), max 6 lines / 600
+# chars. Matches apt/dpkg errors, apt-listbugs bug lines and anything that
+# says error/failed; skips our own FATAL line (fail_reason already says it)
+# and apt's download chatter. Falls back to the last 3 non-empty lines when
+# nothing matches, so the report never says "no detail" for a real failure.
+phase_log_errors() {
+    [[ -n "${PHASE_LOG:-}" && -r "$PHASE_LOG" ]] || return 0
+    local tail_lines picked
+    tail_lines=$(tail -n 60 "$PHASE_LOG" 2>/dev/null \
+        | tr -d '\000-\010\013-\037' \
+        | sed -E 's/\*{3,}//g; s/^[[:space:]]+//; s/[[:space:]]+$//' \
+        | grep -v -E '^$|^\[[0-9:]+\] FATAL:|^(Get|Hit|Ign|Fetched|Reading|Building|Calculating)[: ]' || true)
+    picked=$(grep -E '^(E|W): |^dpkg: |bugs? of |#[0-9]{4,}|error|fail' -i <<<"$tail_lines" | tail -n 6 || true)
+    [[ -n "$picked" ]] || picked=$(tail -n 3 <<<"$tail_lines")
+    picked=$(paste -sd'|' <<<"$picked" | sed 's/|/ | /g')
+    printf '%s' "${picked:0:600}"
+}
+
+# listbugs_pins, the packages apt-listbugs has pinned (held back) because
+# of an open critical/grave bug, as "pkg (#NNN: title)" joined with ", ".
+# Empty when there are none. apt-listbugs writes one block per package to
+# /etc/apt/preferences.d/apt-listbugs and its daily cron job removes the
+# block once the bug is fixed.
+listbugs_pins() {
+    local f=/etc/apt/preferences.d/apt-listbugs
+    [[ -r "$f" ]] || return 0
+    awk '
+        /^Explanation: +#[0-9]+:/ { sub(/^Explanation: +/, ""); bug = (bug ? bug "; " : "") $0 }
+        /^Package:/               { pkg = $2 }
+        /^[[:space:]]*$/          { if (pkg) out = out (out ? ", " : "") pkg (bug ? " (" bug ")" : ""); pkg = ""; bug = "" }
+        END                       { if (pkg) out = out (out ? ", " : "") pkg (bug ? " (" bug ")" : ""); printf "%s", out }
+    ' "$f"
 }
 
 require_root() {

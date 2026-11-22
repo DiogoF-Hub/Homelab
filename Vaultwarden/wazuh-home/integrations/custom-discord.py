@@ -683,8 +683,22 @@ def format_maintenance(alert):
     fields = [
         {"name": "Backup", "value": backup_val, "inline": True},
         {"name": "Reboot", "value": data.get("reboot_status") or "scheduled", "inline": True},
-        {"name": "Docker images updated", "value": _maint_images(data), "inline": False},
     ]
+
+    # What failed and why, right under the headline: main.sh carries the
+    # failed phase, its exit-code reason and the error lines from that
+    # phase's log (joined with " | ", one per line here).
+    failed = data.get("failed_phase", "")
+    if failed:
+        reason = data.get("fail_reason", "") or "no reason recorded"
+        detail = data.get("fail_detail", "")
+        value = reason
+        if detail:
+            lines = "\n".join(p.strip() for p in detail.split(" | ") if p.strip())
+            value += "\n```\n" + lines.replace("```", "'''")[:850] + "\n```"
+        fields.append({"name": f"❌ Failed: {failed.replace(',', ', ')}", "value": value[:1024], "inline": False})
+
+    fields.append({"name": "Docker images updated", "value": _maint_images(data), "inline": False})
     if images:
         fields.append({
             "name": "🐳 New images start at this reboot",
@@ -701,6 +715,13 @@ def format_maintenance(alert):
         "value": _maint_cap_list(data.get("apt_upgraded", "")),
         "inline": False,
     })
+
+    # packages apt-listbugs holds back over an open critical/grave Debian
+    # bug; its daily cron job releases them once the bug is fixed
+    pins = data.get("listbugs_pins", "")
+    if pins:
+        fields.append({"name": "📌 Held back by apt-listbugs (open critical bug)",
+                       "value": pins[:1024], "inline": False})
 
     # pinned / held software: only shown when a bump is available. age and
     # minisign are pinned binaries; wazuh-agent is apt-held on every VM and

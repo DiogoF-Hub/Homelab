@@ -68,11 +68,17 @@ apt-get update -y >> "$PHASE_LOG" 2>&1 \
 # drops apt's "Listing…" header.
 # Held packages are listed as upgradable too but never upgraded, so they're
 # filtered out here.
-mapfile -t __held < <(apt-mark showhold 2>/dev/null)
-mapfile -t __upgradable < <(apt list --upgradable 2>/dev/null | grep '/' | cut -d/ -f1 \
-    | grep -vxF -f <(printf '%s\n' "${__held[@]}") || true)
-APT_UPGRADED_LIST=$(IFS=,; echo "${__upgradable[*]}")
-APT_UPGRADED_COUNT=${#__upgradable[@]}
+# Packages apt-listbugs pinned (see apt_with_listbugs_retry) aren't listed:
+# the pin makes the installed version the candidate.
+snapshot_upgradable() {
+    local __held __upgradable
+    mapfile -t __held < <(apt-mark showhold 2>/dev/null)
+    mapfile -t __upgradable < <(apt list --upgradable 2>/dev/null | grep '/' | cut -d/ -f1 \
+        | grep -vxF -f <(printf '%s\n' "${__held[@]}") || true)
+    APT_UPGRADED_LIST=$(IFS=,; echo "${__upgradable[*]}")
+    APT_UPGRADED_COUNT=${#__upgradable[@]}
+}
+snapshot_upgradable
 
 # wazuh-agent is held (apt-mark hold) on every VM: an agent must never be
 # newer than the manager, and an unattended agent upgrade once took every
@@ -123,18 +129,43 @@ systemctl enable --now unattended-upgrades.service apt-daily.timer apt-daily-upg
 
 # --- main upgrades --------------------------------------------------------
 
-log "apt-get upgrade"
-apt-get "${APT_CONF_OPTS[@]}" upgrade -y >> "$PHASE_LOG" 2>&1 \
-    || fail "apt-get upgrade failed" 32
+# apt_with_listbugs_retry ACTION EXIT_CODE, run `apt-get ACTION`, retrying
+# once when apt-listbugs is what stopped it. apt-listbugs (installed in the
+# Lynis pass) checks Debian's bug tracker before every install; on an open
+# critical/grave bug in a new version it pins that package at the installed
+# version and aborts the WHOLE install (error code 10), so without a retry
+# one buggy package would hold back every update, security fixes included,
+# for a night. The pin only takes effect in a new apt session, so the retry
+# upgrades everything else and leaves the buggy package where it is. The
+# run then reports degraded with the pinned package + bug.
+apt_with_listbugs_retry() {
+    local action="$1" code="$2" mark
+    log "apt-get $action"
+    mark=$(wc -l < "$PHASE_LOG")
+    apt-get "${APT_CONF_OPTS[@]}" "$action" -y >> "$PHASE_LOG" 2>&1 && return 0
+    # process substitution, not a pipe: with pipefail, grep -q quitting early
+    # can SIGPIPE tail and turn a match into "false"
+    if grep -q 'apt-listbugs apt returned an error code' < <(tail -n +"$((mark + 1))" "$PHASE_LOG"); then
+        warn "apt-listbugs stopped apt-get $action and pinned the buggy package(s): $(listbugs_pins), retrying once without them"
+        PHASE_STATUS="degraded"
+        snapshot_upgradable
+        apt-get "${APT_CONF_OPTS[@]}" "$action" -y >> "$PHASE_LOG" 2>&1 && return 0
+    fi
+    fail "apt-get $action failed" "$code"
+}
 
-log "apt-get dist-upgrade"
-apt-get "${APT_CONF_OPTS[@]}" dist-upgrade -y >> "$PHASE_LOG" 2>&1 \
-    || fail "apt-get dist-upgrade failed" 33
+apt_with_listbugs_retry upgrade 32
+apt_with_listbugs_retry dist-upgrade 33
 
 # Record the upgraded package names for the status report. Only reached on
 # a successful upgrade; a failure above fail()s and the trap reports
 # status=fail instead.
 PHASE_KV+=("apt_upgraded=$APT_UPGRADED_LIST" "apt_upgraded_count=$APT_UPGRADED_COUNT")
+
+# Packages apt-listbugs holds back (tonight or an earlier night), with the
+# bug, so the report says why they aren't upgrading. Empty = none held.
+__pins=$(listbugs_pins)
+[[ -n "$__pins" ]] && PHASE_KV+=("listbugs_pins=$__pins")
 
 # --- cleanup --------------------------------------------------------------
 
