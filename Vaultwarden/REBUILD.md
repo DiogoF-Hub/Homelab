@@ -352,8 +352,9 @@ choice):
 Port <ssh_port>
 
 # Only these two accounts can SSH in. vwadmin = management; fetcher =
-# TrueNAS-side scp puller (Phase 9). poduser is intentionally absent,
-# it's a containers-runtime account, never reached over SSH.
+# TrueNAS-side SFTP-only puller (Phase 9, see the Match block at the
+# end). poduser is intentionally absent, it's a containers-runtime
+# account, never reached over SSH.
 AllowUsers vwadmin fetcher
 
 # MACs: SHA-2 only, no hmac-sha1 / umac-64 / umac-128 (CIS 42104,
@@ -422,6 +423,19 @@ MaxStartups 10:30:60
 AcceptEnv LANG LC_* COLORTERM NO_COLOR
 
 Subsystem       sftp    /usr/lib/openssh/sftp-server
+
+# fetcher = SFTP only. Whatever the client asks for, sshd runs its
+# built-in SFTP server: a shell login gets "This service allows sftp
+# connections only." and is closed. TrueNAS's plain `scp` (OpenSSH 9.0+
+# = SFTP protocol) keeps working; `scp -O` (legacy protocol, runs `scp`
+# as a remote command) is refused, so never add -O on TrueNAS.
+# MUST stay the LAST block in the file: every line after a `Match`
+# belongs to it, so a global directive added below would silently apply
+# to fetcher only.
+Match User fetcher
+    ForceCommand internal-sftp
+    AllowTcpForwarding no
+    X11Forwarding no
 ```
 
 > **About the commented-out `Include`:** the default Debian/Ubuntu
@@ -441,7 +455,8 @@ Subsystem       sftp    /usr/lib/openssh/sftp-server
 > add it back later (and remember to `systemctl restart ssh` after the
 > edit).
 
-Before restarting sshd: copy your workstation pubkey to
+Before restarting sshd: copy your workstation pubkey (ED25519, like
+every SSH key in this setup: `ssh-keygen -t ed25519`) to
 `/home/vwadmin/.ssh/authorized_keys` **first**, otherwise the next
 session will lock you out:
 
@@ -991,10 +1006,12 @@ fetcher:x:1002:1002:,,,:/home/fetcher:/bin/bash
 
 Default `/bin/bash` shell, password set during creation, **not in any
 extra groups**. The lockdown comes from the SSH daemon
-(`PasswordAuthentication no` + `AllowUsers vwadmin fetcher` from
-Phase 2) and from the filesystem (no sudo, read-only access scope),
-**not** from a `nologin` shell, forcing `nologin` would break scp
-under some sshd configurations and gain nothing meaningful.
+(`PasswordAuthentication no` + `AllowUsers vwadmin fetcher` + the
+`Match User fetcher` / `ForceCommand internal-sftp` block at the end of
+Phase 2's `sshd_config`), from the key line itself (`from=` +
+`restrict`, below) and from the filesystem (no sudo, read-only access
+scope), **not** from a `nologin` shell. The bash shell is never
+reached: ForceCommand runs before it would.
 
 Create the account:
 
@@ -1025,8 +1042,18 @@ drwx------ 2 fetcher fetcher  ... /home/fetcher/.ssh
 ```
 
 The `authorized_keys` file contains a **single** line: the public key
-matching `/root/.ssh/fetcher_automation_rsa` on TrueNAS (the path
-`truenas-script.sh` uses for its `SSH_KEY` constant).
+matching `/root/.ssh/fetcher_automation` on TrueNAS (the path
+`truenas-script.sh` uses for its `VM_SSH_KEY` constant), prefixed with
+two options:
+
+```
+from="<truenas_ip>",restrict ssh-ed25519 AAAA... <comment>
+```
+
+- `from="<truenas_ip>"`: the key is refused from any other source
+  address (TrueNAS has a fixed LAN address).
+- `restrict`: no port / agent / X11 forwarding, no PTY, no
+  `~/.ssh/rc` for this key.
 
 Permissions / ownership rule of thumb after the file is in place:
 
@@ -1057,13 +1084,19 @@ fine as long as the resulting access pattern matches:
 - ❌ `fetcher` cannot read `/srv/vw-data/`, `/srv/vw-logs/`,
       `/srv/bw-logs/`, the compose files, or anything under `/root/`
 
-Smoke test from TrueNAS once the keypair is in place:
+Smoke test from TrueNAS once the keypair and the Match block are in
+place:
 
 ```bash
-ssh -i /root/.ssh/fetcher_automation_rsa -p <ssh_port> fetcher@<vm-ip> exit   # expect: 0
-scp -i /root/.ssh/fetcher_automation_rsa -P <ssh_port> \
-    fetcher@<vm-ip>:/srv/backups/                                          \
-    /tmp/test-pull/                                                        # expect: lists files OK
+# A shell must be REFUSED (SFTP-only account):
+ssh -i /root/.ssh/fetcher_automation -p <ssh_port> fetcher@<vm-ip>
+#   expect: "This service allows sftp connections only." and the connection closes
+
+# A file copy must work (plain scp = SFTP protocol; never add -O):
+mkdir -p /tmp/test-pull
+scp -i /root/.ssh/fetcher_automation -P <ssh_port> \
+    "fetcher@<vm-ip>:/srv/logs/main/main-$(date +%F).log" /tmp/test-pull/
+#   expect: the file lands in /tmp/test-pull/ (pick any log that exists)
 ```
 
 ## Phase 10, Repo checkout (poduser side) + `.env`

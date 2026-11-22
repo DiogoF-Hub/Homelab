@@ -192,8 +192,8 @@ termination.
 
 Hardened on first boot, before anything else is reachable. Standard
 public-VPS posture: SSH on a non-default port, key-based authentication
-only, root login disabled, only the operational user permitted, short
-failure window. Everything lives in `/etc/ssh/sshd_config` itself: the
+only (ED25519 keys, like everywhere in this setup), root login disabled,
+only the operational user permitted, short failure window. Everything lives in `/etc/ssh/sshd_config` itself: the
 `Include /etc/ssh/sshd_config.d/*.conf` line stays commented and
 `sshd_config.d/` is empty, one file to read. `auto-update.sh` keeps the
 local file on openssh-server upgrades (`UCF_FORCE_CONFFOLD`).
@@ -926,8 +926,8 @@ sudo crontab -l
 ### The `fetcher` user
 
 A second unprivileged account, mirroring the Vault VM's `fetcher`
-pattern (no sudo, SSH-key auth only, read-only on logs). Used by
-TrueNAS to SCP the daily auto-update log home.
+pattern (no sudo, SSH-key auth only, read-only on logs, SFTP only, no
+shell). Used by TrueNAS to SCP the daily auto-update log home.
 
 ```bash
 # Create the account
@@ -942,15 +942,28 @@ sudo useradd -m -s /bin/bash fetcher
 sudo passwd fetcher
 
 # Set up the SSH dir + the public key TrueNAS will authenticate with.
-# Paste the corresponding PUBLIC key (matches the private key on
-# TrueNAS); if reusing the existing fetcher_automation_rsa keypair
-# from the Vault VM setup, it's the contents of
-# /root/.ssh/fetcher_automation_rsa.pub on the TrueNAS box.
+# Paste the PUBLIC half of the VPS fetch key from TrueNAS,
+# /root/.ssh/fetcher_automation_vps.pub (its own keypair, separate
+# from the Vault VM's fetcher_automation; see the line format below).
 sudo install -d -m 700 -o fetcher -g fetcher /home/fetcher/.ssh
 sudo nano /home/fetcher/.ssh/authorized_keys
 sudo chmod 600 /home/fetcher/.ssh/authorized_keys
 sudo chown fetcher:fetcher /home/fetcher/.ssh/authorized_keys
 ```
+
+The `authorized_keys` line, with the `restrict` option in front (no
+port / agent / X11 forwarding, no PTY, no `~/.ssh/rc` for this key):
+
+```
+restrict ssh-ed25519 AAAA... <comment>
+```
+
+**No `from=` here, on purpose** (the Vault VM's line has
+`from="<truenas_ip>"`): TrueNAS reaches the VPS over the internet from
+the home connection, which is behind CGNAT, so its public source address
+can change and a `from=` would lock the fetch out. *Planned:* fetching
+over the WireGuard tunnel instead would give a fixed source address and
+allow a `from=` here too.
 
 Update `/etc/ssh/sshd_config` to allow `fetcher` to log in (the
 hardened config from the "SSH hardening" section above starts with
@@ -959,6 +972,24 @@ hardened config from the "SSH hardening" section above starts with
 ```
 AllowUsers admin fetcher
 ```
+
+And make `fetcher` SFTP-only with a `Match` block at the **very end** of
+`/etc/ssh/sshd_config` (same block as the Vault VM, see
+[REBUILD.md](../REBUILD.md) Phase 2). It must stay last: every line after
+a `Match` belongs to it.
+
+```
+Match User fetcher
+    ForceCommand internal-sftp
+    AllowTcpForwarding no
+    X11Forwarding no
+```
+
+A shell login then gets "This service allows sftp connections only."
+TrueNAS's plain `scp` keeps working, since OpenSSH 9.0+ `scp` uses the
+SFTP protocol. **Never add `-O`** to the scp calls in
+`truenas-script.sh`: that's the legacy scp protocol, which runs `scp` as
+a remote command, and the ForceCommand refuses it.
 
 Apply:
 
@@ -990,13 +1021,21 @@ sudo tail -50 /srv/logs/system/system-autoupdate-*.log
 ```
 
 And from the TrueNAS side, dry-run the pull as the user that owns
-the SSH key:
+the SSH key. Use the same host name `truenas-script.sh` uses
+(`VPS_HOST`): TrueNAS's `known_hosts` entry is keyed on it, so a
+different spelling (raw IP vs name) fails host-key verification for an
+unrelated reason.
 
 ```bash
-ssh -i /root/.ssh/fetcher_automation_rsa -p <ssh_port> fetcher@<vps_ip> exit   # expect: 0
-scp -i /root/.ssh/fetcher_automation_rsa -P <ssh_port> \
-    fetcher@<vps_ip>:/srv/logs/system/system-autoupdate-*.log \
-    /tmp/test-pull/                                                            # expect: file lists OK
+# A shell must be REFUSED (SFTP-only account):
+ssh -i /root/.ssh/fetcher_automation_vps -p <ssh_port> fetcher@<vps_ip>
+#   expect: "This service allows sftp connections only." and the connection closes
+
+# A file copy must work (plain scp = SFTP protocol; never add -O):
+mkdir -p /tmp/test-pull
+scp -i /root/.ssh/fetcher_automation_vps -P <ssh_port> \
+    "fetcher@<vps_ip>:/srv/logs/system/system-autoupdate-$(date +%F).log" /tmp/test-pull/
+#   expect: the file lands in /tmp/test-pull/
 ```
 
 If both succeed, wire the actual pull into the TrueNAS-side script

@@ -4,12 +4,15 @@
 # the edge VPS to this TrueNAS server, then uploads the Vault VM's encrypted
 # backup bundle to a Hetzner Storage Box in the cloud.
 # IPs and user are changed from the original script.
+#
+# On both hosts `fetcher` is SFTP-only (sshd `Match User fetcher` +
+# `ForceCommand internal-sftp`, see Vaultwarden/REBUILD.md Phase 2).
 
 # === CONFIGURATION (Vault VM) ===
 VM_USER="fetcher"
 VM_HOST="192.168.50.3"
 VM_PORT=2222
-VM_SSH_KEY="/root/.ssh/fetcher_automation_rsa"
+VM_SSH_KEY="/root/.ssh/fetcher_automation"
 
 # === CONFIGURATION (Edge VPS) ===
 # VPS hosts the public-facing edge. Fetch the daily auto-update log only
@@ -18,7 +21,7 @@ VM_SSH_KEY="/root/.ssh/fetcher_automation_rsa"
 VPS_USER="fetcher"
 VPS_HOST="<vps_public_ip_or_hostname>"
 VPS_PORT=<vps_ssh_port>
-VPS_SSH_KEY="/root/.ssh/fetcher_automation_rsa_vps"
+VPS_SSH_KEY="/root/.ssh/fetcher_automation_vps"
 
 RETENTION_DAYS=90
 TODAY=$(date +"%Y-%m-%d")
@@ -99,6 +102,10 @@ mkdir -p "$DEST_HETZNER_LOG_DIR"
         filename=$(basename "$remote_path")
 
         mkdir -p "$dest_dir"
+        # Plain scp on purpose: OpenSSH 9.0+ scp talks the SFTP protocol,
+        # the only thing fetcher's ForceCommand internal-sftp allows. NEVER
+        # add -O: that's the legacy scp protocol (runs `scp` as a remote
+        # command), refused on both hosts, and every fetch would fail.
         scp -i "$ssh_key" -P "$ssh_port" "${ssh_user}@${ssh_host}:${remote_path}" "$dest_dir/"
         if [[ $? -eq 0 ]]; then
             echo -e "\n[OK] Fetched $filename from ${ssh_host} to $dest_dir"
